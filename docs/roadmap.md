@@ -30,7 +30,7 @@ A checkpoint is complete only when its implementation and relevant verification 
 - [x] The operator demo succeeds against the running service.
 - [x] Repository documentation clearly distinguishes delivered and planned capabilities.
 
-The checked items are supported by the local 83-test wrapper verification (Java 21.0.11 and PostgreSQL 14.19), the 12-check live packaged-application demo, and documentation review, recorded 2026-09-09 UTC. PostgreSQL 16 and Docker runtime verification are pending CI; see [PROGRESS.md](PROGRESS.md). The checkboxes are verification records, not estimates. They should be updated only after the corresponding checks have been run.
+The checked items are supported by the local 84-test wrapper verification (Java 21.0.11 and PostgreSQL 14.19), the 12-check live packaged-application demo, and documentation review, recorded 2026-09-09 UTC. PostgreSQL 16 and Docker runtime verification also passed on the initial pushed revision; see [PROGRESS.md](PROGRESS.md) for the linked CI record. The checkboxes are verification records, not estimates. They should be updated only after the corresponding checks have been run.
 
 ## Engineering value
 

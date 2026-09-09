@@ -13,10 +13,10 @@ The initial target is three of ten equally weighted scope checkpoints: **approxi
 Local evidence recorded **2026-09-09 UTC**.
 
 - Static documentation/tooling checks completed: shell syntax, local documentation links, Compose/CI YAML parsing, and the demo's journal predicate.
-- Local pinned-wrapper build and suite: **83 tests passed**, with **0 failures, 0 errors, and 0 skipped** (56 domain tests, 25 PostgreSQL integration tests, 2 architecture tests), using Java **21.0.11** and isolated PostgreSQL **14.19**.
+- Local pinned-wrapper build and suite: **84 tests passed**, with **0 failures, 0 errors, and 0 skipped** (57 domain tests, 25 PostgreSQL integration tests, 2 architecture tests), using Java **21.0.11** and isolated PostgreSQL **14.19**.
 - Packaged application startup, migrations, and operator demo: **passed** against the isolated local PostgreSQL demo database. All **12 HTTP checks** passed; balance changed from 1,000,000 to **997,500** minor units with **0 held**, exactly CAD 25.00 captured.
 - Additional live inspection: operations metrics returned **200** with two decision evaluations and two replay events; active rules exposed the expected `demo-v1` operators. Sealed-journal behavior is covered by the passing integration suite.
-- PostgreSQL 16 and Docker runtime verification: pending the first GitHub Actions run. CI verifies the suite, builds the image, starts it against PostgreSQL 16, waits for health, and executes the operator demo.
+- PostgreSQL 16 and Docker runtime verification: [the initial CI run](https://github.com/beaprogram/Decision-Rail/actions/runs/34302468856) passed on revision `32cf325`, including the integration suite, image build, container startup, and operator demo. The follow-up adds the deterministic flag-order regression; inspect the latest workflow for later revisions.
 - Public deployment: not performed in this milestone.
 
 Record actual commands, test counts, failures, and meaningful limitations here after verification. Do not equate a checked-in CI workflow with a passing remote build.

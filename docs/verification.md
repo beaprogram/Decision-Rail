@@ -24,7 +24,7 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 ## Recorded local result
 
-The initial wrapper verification passed **83 tests**: 56 domain tests, 25 PostgreSQL integration tests, and 2 architecture tests. There were no failures, errors, or skipped tests. This run used Java 21.0.11 and PostgreSQL 14.19 and was recorded on 2026-09-09 UTC. The packaged application passed all 12 operator-demo HTTP checks; final demo funds were 997,500 minor units with no holds after a CAD 25.00 capture. Protected metrics and active rule operators were also inspected successfully. PostgreSQL 16 and actual container startup are a separate CI verification, pending the first remote run.
+The initial wrapper verification passed **84 tests**: 57 domain tests, 25 PostgreSQL integration tests, and 2 architecture tests. There were no failures, errors, or skipped tests. This run used Java 21.0.11 and PostgreSQL 14.19 and was recorded on 2026-09-09 UTC. The packaged application passed all 12 operator-demo HTTP checks; final demo funds were 997,500 minor units with no holds after a CAD 25.00 capture. Protected metrics and active rule operators were also inspected successfully. PostgreSQL 16, container build/startup, and the operator demo also passed in [the initial remote verification](https://github.com/beaprogram/Decision-Rail/actions/runs/34302468856) on revision `32cf325`. The current local count includes one additional deterministic flag-order regression added afterward.
 
 ## Failure cases and rationale
 

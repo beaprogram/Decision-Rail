@@ -1,5 +1,7 @@
 # DecisionRail
 
+[![Verify](https://github.com/beaprogram/Decision-Rail/actions/workflows/verify.yml/badge.svg)](https://github.com/beaprogram/Decision-Rail/actions/workflows/verify.yml)
+
 **Explainable payment decisions. Durable retries. Verifiable accounting.**
 
 DecisionRail is a Java payment decisioning and resilience portfolio project. It answers a deceptively difficult question: **when a payment request is retried, races another request, or is declined, can we explain the outcome and prove that the money state is still correct?**

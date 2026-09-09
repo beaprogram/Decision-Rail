@@ -103,6 +103,29 @@ class DecisionEngineTest {
     }
 
     @Test
+    void flagIterationIsStableForDifferentInputOrdersAndRemainsImmutable() {
+        var reasons = List.of(
+                new ReasonContribution("HIGH_AMOUNT", "Synthetic amount rule.", 60),
+                new ReasonContribution("CROSS_BORDER", "Synthetic country rule.", 20));
+        var forward = new java.util.LinkedHashSet<>(List.of(DecisionFlag.HIGH_AMOUNT, DecisionFlag.CROSS_BORDER));
+        var reverse = new java.util.LinkedHashSet<>(List.of(DecisionFlag.CROSS_BORDER, DecisionFlag.HIGH_AMOUNT));
+        var first = new DecisionResult(DecisionOutcome.DECLINE, 80, "demo-v1", reasons, forward);
+        var second = new DecisionResult(DecisionOutcome.DECLINE, 80, "demo-v1", reasons, reverse);
+        var expectedOrder = List.of(DecisionFlag.HIGH_AMOUNT, DecisionFlag.CROSS_BORDER);
+        assertEquals(expectedOrder, new ArrayList<>(first.flags()));
+        assertEquals(expectedOrder, new ArrayList<>(second.flags()));
+        forward.clear();
+        reverse.clear();
+        assertEquals(expectedOrder, new ArrayList<>(first.flags()));
+        assertEquals(expectedOrder, new ArrayList<>(second.flags()));
+        assertThrows(UnsupportedOperationException.class, () -> first.flags().clear());
+        assertThrows(UnsupportedOperationException.class, () -> second.flags().add(DecisionFlag.ELEVATED_AMOUNT));
+        var empty = engine.evaluate(new DecisionInput(1, "CAD", "CA"));
+        assertTrue(empty.flags().isEmpty());
+        assertThrows(UnsupportedOperationException.class, () -> empty.flags().add(DecisionFlag.HIGH_AMOUNT));
+    }
+
+    @Test
     void repeatedConcurrentEvaluationsProduceIdenticalResults() {
         var input = new DecisionInput(100_000, "USD", "US");
         var expected = engine.evaluate(input);

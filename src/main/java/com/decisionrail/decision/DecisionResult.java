@@ -1,5 +1,7 @@
 package com.decisionrail.decision;
 
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
 
@@ -21,7 +23,10 @@ public record DecisionResult(
             throw new IllegalArgumentException("reasons and flags are required");
         }
         reasons = List.copyOf(reasons);
-        flags = Set.copyOf(flags);
+        // Enum order is stable across JVM restarts, preserving replay JSON array order.
+        flags = Collections.unmodifiableSet(flags.isEmpty()
+                ? EnumSet.noneOf(DecisionFlag.class)
+                : EnumSet.copyOf(flags));
         if (reasons.stream().mapToLong(ReasonContribution::scoreContribution).sum() != score) {
             throw new IllegalArgumentException("reason contributions must sum exactly to score");
         }
