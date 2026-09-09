@@ -1,0 +1,39 @@
+name: decisionrail
+services:
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: decisionrail
+      POSTGRES_USER: decisionrail
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run scripts/prepare-local-env.sh first}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U decisionrail -d decisionrail"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  backend:
+    build: .
+    environment:
+      JDBC_URL: jdbc:postgresql://database:5432/decisionrail
+      JDBC_USERNAME: decisionrail
+      JDBC_PASSWORD: ${POSTGRES_PASSWORD:?Run scripts/prepare-local-env.sh first}
+      MERCHANT_DEMO_PASSWORD: ${MERCHANT_DEMO_PASSWORD:?Run scripts/prepare-local-env.sh first}
+      MERCHANT_OTHER_PASSWORD: ${MERCHANT_OTHER_PASSWORD:?Run scripts/prepare-local-env.sh first}
+      OPERATIONS_PASSWORD: ${OPERATIONS_PASSWORD:?Run scripts/prepare-local-env.sh first}
+      DEMO_ENABLED: "true"
+      PORT: "8080"
+    depends_on:
+      database:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

@@ -1,0 +1,10 @@
+spring:
+  datasource:
+    url: ${JDBC_URL:jdbc:postgresql://localhost:55432/decisionrail_test}
+    username: ${JDBC_USERNAME:decisionrail}
+    password: ${JDBC_PASSWORD:decisionrail_test}
+app:
+  demo-enabled: false
+  merchant-demo-password: demo-test-password-123
+  merchant-other-password: other-test-password-123
+  operations-password: operations-test-password-123

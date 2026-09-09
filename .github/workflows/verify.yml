@@ -1,0 +1,91 @@
+name: Verify
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: decisionrail_test
+          POSTGRES_USER: decisionrail
+          POSTGRES_PASSWORD: ci-ephemeral-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U decisionrail -d decisionrail_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      JDBC_URL: jdbc:postgresql://localhost:5432/decisionrail_test
+      JDBC_USERNAME: decisionrail
+      JDBC_PASSWORD: ci-ephemeral-only
+      MERCHANT_DEMO_PASSWORD: ci-demo-merchant-ephemeral-only
+      MERCHANT_OTHER_PASSWORD: ci-other-merchant-ephemeral-only
+      OPERATIONS_PASSWORD: ci-operations-ephemeral-only
+      DEMO_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: |
+            pom.xml
+            .mvn/wrapper/maven-wrapper.properties
+      - name: Compile, test, and package
+        run: ./mvnw --batch-mode --no-transfer-progress verify
+      - name: Build application container
+        run: docker build --tag decisionrail:ci .
+      - name: Run application container and operator demo
+        shell: bash
+        run: |
+          docker run --detach --name decisionrail-smoke --network host \
+            --env JDBC_URL --env JDBC_USERNAME --env JDBC_PASSWORD \
+            --env MERCHANT_DEMO_PASSWORD --env MERCHANT_OTHER_PASSWORD \
+            --env OPERATIONS_PASSWORD --env DEMO_ENABLED --env PORT=8080 \
+            decisionrail:ci
+          deadline=$((SECONDS + 60))
+          until curl --fail --silent --max-time 2 http://localhost:8080/actuator/health > /dev/null; do
+            if (( SECONDS >= deadline )); then
+              printf 'Application container did not become healthy within 60 seconds.\n' >&2
+              exit 1
+            fi
+            sleep 2
+          done
+          ./scripts/demo.sh
+      - name: Show container logs on failure
+        if: failure()
+        run: |
+          if docker inspect decisionrail-smoke > /dev/null 2>&1; then
+            docker logs decisionrail-smoke
+          fi
+      - name: Remove smoke container
+        if: always()
+        run: docker rm --force decisionrail-smoke > /dev/null 2>&1 || true
+      - name: Save test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            target/surefire-reports/
+            target/failsafe-reports/
+          if-no-files-found: ignore
+          retention-days: 7

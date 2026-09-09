@@ -1,0 +1,14 @@
+# Build and local tooling
+/target/
+/.idea/
+*.iml
+/.vscode/
+.DS_Store
+
+# Local credentials and runtime output
+.env
+.env.*
+!.env.example
+*.log
+/local-data/
+/.local/

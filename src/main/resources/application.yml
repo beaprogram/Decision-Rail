@@ -1,0 +1,42 @@
+spring:
+  application:
+    name: decisionrail
+  datasource:
+    url: ${JDBC_URL:jdbc:postgresql://localhost:5432/decisionrail}
+    username: ${JDBC_USERNAME:decisionrail}
+    password: ${JDBC_PASSWORD}
+    hikari:
+      maximum-pool-size: 12
+      connection-timeout: 5000
+      connection-init-sql: "SET lock_timeout = '5s'"
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+      fail-on-trailing-tokens: true
+      accept-float-as-int: false
+    mapper:
+      allow-coercion-of-scalars: false
+  mvc:
+    problemdetails:
+      enabled: true
+server:
+  port: ${PORT:8080}
+  shutdown: graceful
+  error:
+    include-message: never
+    include-stacktrace: never
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus
+  endpoint:
+    health:
+      show-details: never
+      probes:
+        enabled: true
+app:
+  demo-enabled: ${DEMO_ENABLED:false}
+  merchant-demo-password: ${MERCHANT_DEMO_PASSWORD}
+  merchant-other-password: ${MERCHANT_OTHER_PASSWORD}
+  operations-password: ${OPERATIONS_PASSWORD}

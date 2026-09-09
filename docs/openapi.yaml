@@ -1,0 +1,732 @@
+openapi: 3.1.0
+info:
+  title: DecisionRail transactional payment API
+  version: 0.1.0
+  description: |
+    Synthetic payment decisioning with merchant isolation, durable command retries,
+    concurrency-safe holds, and a balanced capture journal. No real funds are moved.
+
+    Every mutation requires an Idempotency-Key scoped to the authenticated merchant.
+    Replaying the same normalized command returns its original persisted HTTP status
+    and payment snapshot, even if the payment has since been captured or voided.
+    Use GET /v1/payments/{id} for current state. Keys also identify the operation;
+    authorization, capture, and void require distinct keys. A changed command with
+    an existing key returns 409. Validation/transaction errors do not save successful
+    command results. Retry a transient storage failure with the same key.
+
+    HTTP Basic credentials are environment-configured. Merchant users can access
+    /v1; the operations user can only read protected metrics. The local server uses
+    loopback HTTP. Any public deployment must provide TLS.
+servers:
+  - url: http://localhost:8080
+    description: Local synthetic demo only
+security:
+  - merchantBasic: []
+tags:
+  - name: Payments
+  - name: Accounts
+  - name: Decisions
+  - name: Operations
+paths:
+  /v1/payments/authorizations:
+    post:
+      operationId: authorizePayment
+      tags: [Payments]
+      summary: Evaluate a payment and attempt to reserve synthetic funds
+      description: |
+        Creates a payment with AUTHORIZED, REVIEW, or DECLINED state. Policy REVIEW
+        and DECLINE do not reserve funds. An APPROVE risk decision can still produce
+        a DECLINED payment with failureCode INSUFFICIENT_FUNDS. This is a successful
+        creation of a declined payment (201), not an HTTP error.
+        Currency/country are normalized to uppercase for command identity. Amounts
+        must be integer JSON numbers, not decimal values or numeric strings.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AuthorizationRequest'
+            example:
+              accountId: 11111111-1111-1111-1111-111111111111
+              amountMinor: 2500
+              currency: CAD
+              country: CA
+      responses:
+        '201':
+          $ref: '#/components/responses/PaymentCommandResult'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '415':
+          $ref: '#/components/responses/UnsupportedMediaType'
+        '422':
+          $ref: '#/components/responses/CurrencyMismatch'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /v1/payments/{id}/capture:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      operationId: capturePayment
+      tags: [Payments]
+      summary: Capture an authorization and write its balanced journal
+      description: |
+        Accepts no request body. The payment must be AUTHORIZED. Capture consumes
+        its held amount and records debit and credit entries atomically. Partial
+        captures are not supported. A new key against a terminal payment returns
+        409; replaying the original successful capture key returns its saved result.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          $ref: '#/components/responses/PaymentCommandResult'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /v1/payments/{id}/void:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      operationId: voidPayment
+      tags: [Payments]
+      summary: Release an authorization hold
+      description: |
+        Accepts no request body. The payment must be AUTHORIZED. The complete hold
+        is released; no capture journal is created. A new key against a terminal
+        payment returns 409; an original successful void key replays its saved result.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      responses:
+        '200':
+          $ref: '#/components/responses/PaymentCommandResult'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /v1/payments/{id}:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    get:
+      operationId: getPayment
+      tags: [Payments]
+      summary: Read current payment state and its original decision
+      responses:
+        '200':
+          description: Merchant-owned payment with current lifecycle state
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Payment'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /v1/payments/{id}/ledger:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    get:
+      operationId: getPaymentLedger
+      tags: [Payments]
+      summary: Read immutable capture journal entries
+      description: |
+        Returns an empty array for an owned payment without a capture journal.
+        Missing or foreign payments return 404. A capture has a single balanced
+        journal; amounts are positive and side indicates DEBIT or CREDIT.
+      responses:
+        '200':
+          description: Capture journal entries in side and entry-ID order
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LedgerEntry'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /v1/accounts/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Account owned by the authenticated merchant
+        schema:
+          type: string
+          format: uuid
+    get:
+      operationId: getAccount
+      tags: [Accounts]
+      summary: Read a merchant account's synthetic funds
+      responses:
+        '200':
+          description: Current account balances in integer currency minor units
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Account'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /v1/rules/active:
+    get:
+      operationId: getActiveRules
+      tags: [Decisions]
+      summary: Inspect the active versioned synthetic policy
+      description: |
+        Read-only policy inspection. There is no policy mutation endpoint in this
+        milestone. Stored payment decisions retain their original ruleset version.
+      responses:
+        '200':
+          description: Active policy and its ordered rules
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuleSet'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /actuator/health:
+    get:
+      operationId: getHealth
+      tags: [Operations]
+      summary: Read public service health without internal details
+      security: []
+      responses:
+        '200':
+          description: Service reports healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: Service reports unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /actuator/prometheus:
+    get:
+      operationId: getMetrics
+      tags: [Operations]
+      summary: Read protected Prometheus metrics
+      description: Requires the operations user; merchant credentials receive 403.
+      security:
+        - operationsBasic: []
+      responses:
+        '200':
+          description: Prometheus exposition text
+          content:
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+components:
+  securitySchemes:
+    merchantBasic:
+      type: http
+      scheme: basic
+      description: demo-merchant or other-merchant with its environment-configured password
+    operationsBasic:
+      type: http
+      scheme: basic
+      description: operations user with OPERATIONS_PASSWORD; cannot access merchant APIs
+  parameters:
+    PaymentId:
+      name: id
+      in: path
+      required: true
+      description: Payment owned by the authenticated merchant
+      schema:
+        type: string
+        format: uuid
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: true
+      description: |
+        Merchant-scoped command identity. Retain the same key when retrying the same
+        operation. Use a different key for each new operation. Replays return the
+        original command snapshot, not a fresh read of the payment.
+      schema:
+        type: string
+        minLength: 8
+        maxLength: 128
+        pattern: '^[A-Za-z0-9._:-]{8,128}$'
+      example: demo-authorize-0001
+  headers:
+    RequestId:
+      description: Server-generated correlation ID for this HTTP request
+      schema:
+        type: string
+        format: uuid
+    Replayed:
+      description: true when the result was loaded from the durable idempotency record; otherwise false
+      schema:
+        type: boolean
+    PaymentLocation:
+      description: Relative path to the current payment resource
+      schema:
+        type: string
+        format: uri-reference
+  responses:
+    PaymentCommandResult:
+      description: |
+        Original successful command result or its durable replay. Authorization
+        returns 201 even for a REVIEW/DECLINED payment; capture and void return 200.
+      headers:
+        Location:
+          $ref: '#/components/headers/PaymentLocation'
+        Idempotency-Replayed:
+          $ref: '#/components/headers/Replayed'
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Payment'
+    InvalidRequest:
+      description: Missing/invalid header, malformed JSON, invalid field, invalid amount/currency, or an unexpected capture/void body
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Unauthenticated:
+      description: Missing or invalid Basic credentials
+      headers:
+        WWW-Authenticate:
+          schema:
+            type: string
+          example: Basic realm="DecisionRail"
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Forbidden:
+      description: Authenticated identity lacks the required role
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    NotFound:
+      description: Resource does not exist or is owned by another merchant
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    Conflict:
+      description: Idempotency key identifies a different command, or the payment is not AUTHORIZED for a new capture/void command
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnsupportedMediaType:
+      description: Authorization requires a supported JSON content type
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    CurrencyMismatch:
+      description: Payment currency does not match the account currency; no conversion occurs
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    StorageUnavailable:
+      description: Database request failed; retry a mutation with the same Idempotency-Key
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    UnexpectedError:
+      description: Unexpected request failure; retain the request ID for diagnosis
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+  schemas:
+    AuthorizationRequest:
+      type: object
+      additionalProperties: false
+      required: [accountId, amountMinor, currency, country]
+      properties:
+        accountId:
+          type: string
+          format: uuid
+        amountMinor:
+          $ref: '#/components/schemas/PaymentAmount'
+        currency:
+          type: string
+          pattern: '^([Cc][Aa][Dd]|[Uu][Ss][Dd])$'
+          description: CAD or USD, case-insensitive; normalized to uppercase
+          example: CAD
+        country:
+          type: string
+          pattern: '^[A-Za-z]{2}$'
+          description: Two ASCII letters; normalized to uppercase. ZZ is a synthetic terminal-decline marker, not an actual country.
+          example: CA
+    PaymentAmount:
+      type: integer
+      format: int64
+      minimum: 1
+      maximum: 1000000000000
+      description: Positive integer currency minor units; 2500 represents CAD 25.00 or USD 25.00
+      example: 2500
+    Currency:
+      type: string
+      enum: [CAD, USD]
+    Payment:
+      type: object
+      required: [id, accountId, amountMinor, currency, country, status, decision, failureCode, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        amountMinor:
+          $ref: '#/components/schemas/PaymentAmount'
+        currency:
+          $ref: '#/components/schemas/Currency'
+        country:
+          type: string
+          pattern: '^[A-Z]{2}$'
+        status:
+          type: string
+          enum: [AUTHORIZED, CAPTURED, VOIDED, REVIEW, DECLINED]
+        decision:
+          $ref: '#/components/schemas/Decision'
+        failureCode:
+          type: [string, 'null']
+          enum: [INSUFFICIENT_FUNDS, null]
+          description: |
+            INSUFFICIENT_FUNDS means policy risk outcome APPROVE could not reserve
+            funds, producing a DECLINED payment. Otherwise null. A risk decline is
+            explained by decision.reasons, not this field.
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+    Decision:
+      type: object
+      required: [outcome, score, ruleSetVersion, reasons, flags]
+      properties:
+        outcome:
+          type: string
+          enum: [APPROVE, REVIEW, DECLINE]
+          description: Scores 0-29 APPROVE, 30-59 REVIEW, and 60-100 DECLINE
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        ruleSetVersion:
+          type: string
+          minLength: 1
+          example: demo-v1
+        reasons:
+          type: array
+          minItems: 1
+          description: Ordered explanation contributions sum exactly to score
+          items:
+            $ref: '#/components/schemas/Reason'
+        flags:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [TEST_COUNTRY_BLOCKED, HIGH_AMOUNT, ELEVATED_AMOUNT, CROSS_BORDER]
+    Reason:
+      type: object
+      required: [code, description, scoreContribution]
+      properties:
+        code:
+          type: string
+          example: NO_RISK_SIGNALS
+        description:
+          type: string
+        scoreContribution:
+          type: integer
+          minimum: 0
+          maximum: 100
+    Account:
+      type: object
+      required: [id, currency, balanceMinor, heldMinor, availableMinor]
+      properties:
+        id:
+          type: string
+          format: uuid
+        currency:
+          $ref: '#/components/schemas/Currency'
+        balanceMinor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Synthetic wallet balance after captures
+        heldMinor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Outstanding authorized funds; never exceeds balanceMinor
+        availableMinor:
+          type: integer
+          format: int64
+          minimum: 0
+          description: balanceMinor minus heldMinor
+    LedgerEntry:
+      type: object
+      required: [id, journalId, ledgerAccount, side, amountMinor, currency]
+      properties:
+        id:
+          type: string
+          format: uuid
+        journalId:
+          type: string
+          format: uuid
+        ledgerAccount:
+          type: string
+          description: Internal wallet or merchant-clearing ledger account identifier
+        side:
+          type: string
+          enum: [DEBIT, CREDIT]
+        amountMinor:
+          $ref: '#/components/schemas/PaymentAmount'
+        currency:
+          $ref: '#/components/schemas/Currency'
+    RuleSet:
+      type: object
+      required: [version, homeCountry, reviewThreshold, declineThreshold, rules]
+      properties:
+        version:
+          type: string
+          example: demo-v1
+        homeCountry:
+          type: string
+          const: CA
+        reviewThreshold:
+          type: integer
+          const: 30
+        declineThreshold:
+          type: integer
+          const: 60
+        rules:
+          type: array
+          items:
+            type: object
+            required: [code, description, expression, scoreContribution, flag, terminal]
+            properties:
+              code:
+                type: string
+              description:
+                type: string
+              expression:
+                $ref: '#/components/schemas/RuleExpression'
+              scoreContribution:
+                type: integer
+                minimum: 1
+                maximum: 100
+              flag:
+                type: string
+              terminal:
+                type: boolean
+    RuleExpression:
+      description: Read-only predicate tree with an explicit operator discriminator
+      oneOf:
+        - $ref: '#/components/schemas/CompositeExpression'
+        - $ref: '#/components/schemas/AmountExpression'
+        - $ref: '#/components/schemas/CountryExpression'
+        - $ref: '#/components/schemas/CurrencyExpression'
+      discriminator:
+        propertyName: operator
+        mapping:
+          ALL: '#/components/schemas/CompositeExpression'
+          ANY: '#/components/schemas/CompositeExpression'
+          AMOUNT_AT_LEAST: '#/components/schemas/AmountExpression'
+          AMOUNT_LESS_THAN: '#/components/schemas/AmountExpression'
+          COUNTRY_IN: '#/components/schemas/CountryExpression'
+          COUNTRY_OUTSIDE: '#/components/schemas/CountryExpression'
+          CURRENCY_IN: '#/components/schemas/CurrencyExpression'
+    CompositeExpression:
+      type: object
+      required: [operator, children]
+      properties:
+        operator:
+          type: string
+          enum: [ALL, ANY]
+        children:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/RuleExpression'
+    AmountExpression:
+      type: object
+      required: [operator, amountMinor]
+      properties:
+        operator:
+          type: string
+          enum: [AMOUNT_AT_LEAST, AMOUNT_LESS_THAN]
+        amountMinor:
+          type: integer
+          format: int64
+          minimum: 1
+    CountryExpression:
+      type: object
+      required: [operator, countries]
+      properties:
+        operator:
+          type: string
+          enum: [COUNTRY_IN, COUNTRY_OUTSIDE]
+        countries:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: Sorted country codes
+          items:
+            type: string
+            pattern: '^[A-Z]{2}$'
+    CurrencyExpression:
+      type: object
+      required: [operator, currencies]
+      properties:
+        operator:
+          type: string
+          const: CURRENCY_IN
+        currencies:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          description: Sorted currency codes
+          items:
+            $ref: '#/components/schemas/Currency'
+    Problem:
+      type: object
+      required: [type, title, status, detail, code, requestId]
+      properties:
+        type:
+          type: string
+          format: uri
+          example: urn:decisionrail:error:idempotency-conflict
+        title:
+          type: string
+          example: Conflict
+        status:
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri-reference
+        code:
+          type: string
+          example: IDEMPOTENCY_CONFLICT
+        requestId:
+          type: string
+          format: uuid
+      additionalProperties: true
+    Health:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          example: UP
+      additionalProperties: true
