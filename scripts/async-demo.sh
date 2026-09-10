@@ -121,8 +121,18 @@ step '2. Committed event intent is retained and the backlog is visible'
 outage_event=$(psql_value "SELECT id FROM outbox_events WHERE aggregate_id = '$outage_payment'")
 pass "event intent retained and undelivered: $outage_event"
 
-await 'asynchronous delivery reports itself degraded' "$recovery_budget" \
-  bash -c "curl --silent --max-time 5 '$base_url/actuator/health/async' | jq -e '.status == \"DEGRADED\"' >/dev/null"
+# The breaker opens only after repeated failed sends, each bounded by the client's delivery
+# timeout, so this is a bounded wait rather than an immediate check. How long it takes depends
+# on machine speed and on the configured failure threshold, which is why it is not asserted
+# after a fixed delay.
+await 'the breaker opens after repeated failed sends' "$recovery_budget" \
+  bash -c "curl --silent --max-time 5 --user '$admin_user:$ADMIN_PASSWORD' '$base_url/v1/ops/outbox/backlog' | jq -e '.breakerState == \"OPEN\" or .breakerState == \"HALF_OPEN\"' >/dev/null"
+admin_call GET /v1/ops/outbox/backlog 200
+jq '{breakerState, countsByStatus, oldestPendingAgeSeconds, blockedPaymentCount}' "$work_dir/body"
+pass 'operator backlog view shows the open breaker and the undelivered backlog'
+
+curl --silent --max-time 5 "$base_url/actuator/health/async" | jq -e '.status == "DEGRADED"' >/dev/null \
+  || fail 'asynchronous delivery should report DEGRADED while the broker is unreachable'
 curl --silent --max-time 5 "$base_url/actuator/health/async" | jq '.components.asyncDelivery.details
   | {brokerBreaker, undeliveredEvents, oldestUndeliveredAgeSeconds, paymentApiAffected}'
 pass 'async delivery is DEGRADED while the payment API stays healthy'
@@ -130,12 +140,6 @@ pass 'async delivery is DEGRADED while the payment API stays healthy'
 curl --silent --max-time 5 "$base_url/actuator/health/readiness" | jq -e '.status == "UP"' >/dev/null \
   || fail 'readiness must stay UP during a broker outage'
 pass 'readiness is still UP: a broker outage does not remove the payment API from rotation'
-
-admin_call GET /v1/ops/outbox/backlog 200
-jq '{breakerState, countsByStatus, oldestPendingAgeSeconds, blockedPaymentCount}' "$work_dir/body"
-jq -e '.breakerState == "OPEN" or .breakerState == "HALF_OPEN"' "$work_dir/body" >/dev/null \
-  || fail 'breaker did not open during the outage'
-pass 'operator backlog view shows the open breaker and the undelivered backlog'
 
 # ---------------------------------------------------------------------------
 step '3. Delivery resumes after the broker returns, with the same event identity'
@@ -145,6 +149,18 @@ await 'broker accepts connections again' "$recovery_budget" \
   docker compose --file "$compose_file" exec -T "$broker_service" \
   /opt/kafka/bin/kafka-topics.sh --bootstrap-server "$broker_service:9092" --list
 pass 'broker is accepting connections again'
+
+# An outage that outlasts an event's retry budget leaves it terminally FAILED. That is the
+# documented behaviour, not a defect, and redrive is the documented remedy. Whether it happens
+# depends on how long the outage lasted relative to the configured budget, so the demo handles
+# both paths and says which one it took.
+if [[ "$(event_status "$outage_payment")" == FAILED ]]; then
+  printf 'The outage outlasted this event'"'"'s retry budget, so it is terminally FAILED.\n'
+  printf 'Redriving it, which preserves event identity and does not skip earlier events.\n'
+  admin_call POST /v1/ops/outbox/redrive 200 '' "$(jq -cn --arg id "$outage_payment" '{paymentId:$id}')"
+  jq '{redrivenCount, stillBlockedPaymentCount}' "$work_dir/body"
+  pass 'redrove the event whose retry budget the outage exhausted'
+fi
 
 await 'the backlog drains' "$recovery_budget" \
   bash -c "[[ \"\$(docker compose --file '$compose_file' exec -T '$database_service' psql --username '$database_user' --dbname '$database_name' -tAc \"SELECT status FROM outbox_events WHERE aggregate_id = '$outage_payment'\" | tr -d '[:space:]')\" == PUBLISHED ]]"
