@@ -17,27 +17,19 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_DB: decisionrail_test
-          POSTGRES_USER: decisionrail
-          POSTGRES_PASSWORD: ci-ephemeral-only
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U decisionrail -d decisionrail_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
+    # PostgreSQL and Kafka come from compose.test.yaml rather than workflow service
+    # containers, so CI runs the same infrastructure definition the documented local
+    # workflow uses. Infrastructure behaviour is never skipped: if either dependency is
+    # unavailable the suite fails.
     env:
-      JDBC_URL: jdbc:postgresql://localhost:5432/decisionrail_test
+      JDBC_URL: jdbc:postgresql://127.0.0.1:55433/decisionrail_test
       JDBC_USERNAME: decisionrail
-      JDBC_PASSWORD: ci-ephemeral-only
+      JDBC_PASSWORD: local-test-only
+      KAFKA_BOOTSTRAP_SERVERS: 127.0.0.1:19092
       MERCHANT_DEMO_PASSWORD: ci-demo-merchant-ephemeral-only
       MERCHANT_OTHER_PASSWORD: ci-other-merchant-ephemeral-only
       OPERATIONS_PASSWORD: ci-operations-ephemeral-only
+      ADMIN_PASSWORD: ci-administrator-ephemeral-only
       DEMO_ENABLED: "true"
     steps:
       - uses: actions/checkout@v7.0.1
@@ -49,6 +41,8 @@ jobs:
           cache-dependency-path: |
             pom.xml
             .mvn/wrapper/maven-wrapper.properties
+      - name: Start dedicated PostgreSQL and Kafka
+        run: docker compose -f compose.test.yaml up -d --wait --wait-timeout 240
       - name: Compile, test, and package
         run: ./mvnw --batch-mode --no-transfer-progress verify
       - name: Build application container
@@ -59,7 +53,8 @@ jobs:
           docker run --detach --name decisionrail-smoke --network host \
             --env JDBC_URL --env JDBC_USERNAME --env JDBC_PASSWORD \
             --env MERCHANT_DEMO_PASSWORD --env MERCHANT_OTHER_PASSWORD \
-            --env OPERATIONS_PASSWORD --env DEMO_ENABLED --env PORT=8080 \
+            --env OPERATIONS_PASSWORD --env ADMIN_PASSWORD \
+            --env KAFKA_BOOTSTRAP_SERVERS --env DEMO_ENABLED --env PORT=8080 \
             decisionrail:ci
           deadline=$((SECONDS + 60))
           until curl --fail --silent --max-time 2 http://localhost:8080/actuator/health > /dev/null; do
@@ -76,9 +71,15 @@ jobs:
           if docker inspect decisionrail-smoke > /dev/null 2>&1; then
             docker logs decisionrail-smoke
           fi
+      - name: Show broker and database logs on failure
+        if: failure()
+        run: docker compose -f compose.test.yaml logs --tail 100 || true
       - name: Remove smoke container
         if: always()
         run: docker rm --force decisionrail-smoke > /dev/null 2>&1 || true
+      - name: Stop dedicated infrastructure
+        if: always()
+        run: docker compose -f compose.test.yaml down -v || true
       - name: Save test reports
         if: always()
         uses: actions/upload-artifact@v7.0.1

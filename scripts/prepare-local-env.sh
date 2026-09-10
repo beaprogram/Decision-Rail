@@ -13,6 +13,7 @@ postgres_password=$(openssl rand -hex 24)
 demo_password=$(openssl rand -hex 24)
 other_password=$(openssl rand -hex 24)
 operations_password=$(openssl rand -hex 24)
+admin_password=$(openssl rand -hex 24)
 # noclobber prevents overwriting a file created by another invocation.
 set -o noclobber
 cat > "$env_path" <<ENV
@@ -24,6 +25,9 @@ JDBC_PASSWORD=$postgres_password
 MERCHANT_DEMO_PASSWORD=$demo_password
 MERCHANT_OTHER_PASSWORD=$other_password
 OPERATIONS_PASSWORD=$operations_password
+# Separate administrative identity for policy creation, shadow configuration and redrive.
+ADMIN_PASSWORD=$admin_password
+KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:19092
 DEMO_ENABLED=true
 ENV
 printf 'Created .env with generated local credentials and owner-only permissions.\n'

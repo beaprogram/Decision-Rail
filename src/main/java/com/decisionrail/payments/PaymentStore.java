@@ -1,6 +1,8 @@
 package com.decisionrail.payments;
 
 import com.decisionrail.decision.DecisionResult;
+import com.decisionrail.events.EventEnvelope;
+import com.decisionrail.events.OutboxStore;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
@@ -16,10 +18,12 @@ import org.springframework.stereotype.Repository;
 public class PaymentStore {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
+    private final OutboxStore outbox;
 
-    public PaymentStore(JdbcTemplate jdbc, ObjectMapper json) {
+    public PaymentStore(JdbcTemplate jdbc, ObjectMapper json, OutboxStore outbox) {
         this.jdbc = jdbc;
         this.json = json;
+        this.outbox = outbox;
     }
 
     public IdempotencyRecord claimKey(String merchant, String key, String hash) {
@@ -91,14 +95,39 @@ public class PaymentStore {
                 """, (rs, n) -> new LedgerEntryView(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getString(3), rs.getString(4), rs.getLong(5), rs.getString(6).trim()), merchant, payment);
     }
 
+    /**
+     * Writes durable event intent and the audit row inside the caller's payment transaction.
+     *
+     * <p>The per-payment sequence is assigned here, while the transaction owns the payment row:
+     * newly inserted for an authorization, locked FOR UPDATE for capture and void. That makes
+     * lifecycle order a committed fact rather than something a dispatcher has to infer from
+     * timestamps, random event ids, or partition assignment.
+     *
+     * <p>The event id is generated once and never regenerated, so every retry and every
+     * operator redrive of this event carries the same identity a consumer deduplicates on.
+     */
     public void recordEvent(String merchant, PaymentView payment) {
         String eventType = "payment." + payment.status().name().toLowerCase(java.util.Locale.ROOT) + ".v1";
         UUID eventId = UUID.randomUUID();
-        // The full payment snapshot includes the pinned decision and original input fields.
-        String envelope = encode(new EventEnvelope(eventId, eventType, 1, payment.updatedAt(), payment));
-        jdbc.update("INSERT INTO outbox_events(id,aggregate_id,merchant_id,event_type,payload) VALUES (?,?,?,?,?::jsonb)",
-                eventId, payment.id(), merchant, eventType, envelope);
+        long sequence = outbox.nextSequence(payment.id());
+        EventEnvelope envelope = new EventEnvelope(eventId, eventType, EventEnvelope.SUPPORTED_SCHEMA_VERSION,
+                payment.id(), EventEnvelope.PAYMENT_AGGREGATE, sequence, merchant,
+                payment.updatedAt(), payment.updatedAt(), snapshot(payment));
+        outbox.append(eventId, payment.id(), sequence, merchant, eventType,
+                EventEnvelope.SUPPORTED_SCHEMA_VERSION, encode(envelope), payment.updatedAt());
         jdbc.update("INSERT INTO audit_events(id,merchant_id,payment_id,action) VALUES (?,?,?,?)", UUID.randomUUID(), merchant, payment.id(), eventType);
+    }
+
+    private static EventEnvelope.Payment snapshot(PaymentView payment) {
+        DecisionResult decision = payment.decision();
+        return new EventEnvelope.Payment(payment.id(), payment.accountId(), payment.amountMinor(),
+                payment.currency(), payment.country(), payment.status().name(),
+                new EventEnvelope.Decision(decision.outcome().name(), decision.score(), decision.ruleSetVersion(),
+                        decision.reasons().stream()
+                                .map(reason -> new EventEnvelope.Reason(reason.code(), reason.description(), reason.scoreContribution()))
+                                .toList(),
+                        decision.flags().stream().map(Enum::name).toList()),
+                payment.failureCode(), payment.createdAt(), payment.updatedAt());
     }
 
     public PaymentView decodePayment(String value) { return decode(value, PaymentView.class); }
@@ -121,5 +150,4 @@ public class PaymentStore {
     }
 
     public record IdempotencyRecord(String requestHash, String responseBody, Integer httpStatus) {}
-    private record EventEnvelope(UUID eventId, String eventType, int schemaVersion, Instant occurredAt, PaymentView payment) {}
 }

@@ -1,0 +1,49 @@
+# Dedicated, disposable infrastructure for ./mvnw verify.
+# Integration tests deliberately install failure-injection triggers and publish
+# synthetic events. Never point the suite at a database or broker that anything
+# else is using. Ports are loopback-only and deliberately non-default so this
+# stack cannot collide with a local development PostgreSQL or broker.
+name: decisionrail-test
+services:
+  test-database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: decisionrail_test
+      POSTGRES_USER: decisionrail
+      # Ephemeral local-only value. This database holds synthetic test data only.
+      POSTGRES_PASSWORD: local-test-only
+    ports:
+      - "127.0.0.1:${TEST_DB_PORT:-55433}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U decisionrail -d decisionrail_test"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  test-broker:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,EXTERNAL://0.0.0.0:19092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://test-broker:9092,EXTERNAL://127.0.0.1:${TEST_KAFKA_PORT:-19092}
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@test-broker:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_NUM_PARTITIONS: "3"
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+    ports:
+      - "127.0.0.1:${TEST_KAFKA_PORT:-19092}:19092"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server test-broker:9092 --list >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30

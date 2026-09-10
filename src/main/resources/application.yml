@@ -19,6 +19,8 @@ spring:
   mvc:
     problemdetails:
       enabled: true
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
 server:
   port: ${PORT:8080}
   shutdown: graceful
@@ -35,8 +37,53 @@ management:
       show-details: never
       probes:
         enabled: true
+      # Liveness answers "is this process alive". Readiness answers "should traffic for the
+      # synchronous payment API arrive here", so it includes the database: a payment command
+      # cannot succeed without it. Broker reachability is deliberately absent from both,
+      # because payments keep working while the broker is down. Degraded asynchronous
+      # capability is reported separately by the async group so an outage is visible without
+      # taking a healthy payment API out of rotation.
+      group:
+        liveness:
+          include: livenessState
+        readiness:
+          include: readinessState,db
+        async:
+          include: asyncDelivery
+          show-details: always
+      # DEGRADED maps to 200: impaired asynchronous delivery is a real operational signal, but
+      # it must not read as an unhealthy instance, because the payment API is still correct.
+      status:
+        order: DOWN,OUT_OF_SERVICE,DEGRADED,UP,UNKNOWN
+        http-mapping:
+          DEGRADED: 200
 app:
   demo-enabled: ${DEMO_ENABLED:false}
+  events:
+    topic: ${EVENTS_TOPIC:decisionrail.payments.v1}
+    projection-group: ${EVENTS_PROJECTION_GROUP:decisionrail-projection}
+    shadow-group: ${EVENTS_SHADOW_GROUP:decisionrail-shadow}
+    # Typed local failpoints for delivery and shadow tests. Never enable outside local or test.
+    fault-injection-enabled: ${EVENTS_FAULT_INJECTION_ENABLED:false}
+    dispatcher:
+      enabled: ${EVENTS_DISPATCHER_ENABLED:true}
+      batch-size: 64
+      poll-interval: 250ms
+      lease-duration: 30s
+      max-attempts: 8
+      send-timeout: 5s
+      backoff-base: 200ms
+      backoff-ceiling: 30s
+      backoff-multiplier: 2.0
+      send-concurrency: 4
+    breaker:
+      failure-threshold: 5
+      open-duration: 10s
+      probe-successes-to-close: 1
+    backlog:
+      degraded-age: 120s
+      degraded-count: 1000
   merchant-demo-password: ${MERCHANT_DEMO_PASSWORD}
   merchant-other-password: ${MERCHANT_OTHER_PASSWORD}
   operations-password: ${OPERATIONS_PASSWORD}
+  admin-password: ${ADMIN_PASSWORD}
