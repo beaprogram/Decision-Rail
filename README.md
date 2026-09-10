@@ -181,7 +181,7 @@ Local verification on **2026-09-10 UTC** passed **149 tests** on Java 21.0.11, P
 
 Timing-sensitive behaviour is tested with injected clocks, explicit failpoints, and bounded polling rather than sleeps. A test named for recovery leaves behind exactly the state a killed process leaves, so recovery has to happen through durable state and lease expiry. The [verification guide](docs/verification.md) explains the failure cases and why real infrastructure matters.
 
-CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the pushed revision.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34538867915) passed the same 149 tests and both demos on revision `f01fe41`, against PostgreSQL 16 and Kafka. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 ## What comes next
 
