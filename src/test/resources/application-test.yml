@@ -23,6 +23,16 @@ app:
     breaker:
       failure-threshold: 2
       open-duration: 1s
+  replay:
+    # Workers are driven one explicit cycle at a time so resume behaviour is reproducible.
+    enabled: false
+    batch-size: 3
+  shadow:
+    enabled: false
+    batch-size: 5
+    concurrency: 2
+    max-attempts: 2
+    retry-delay: 10ms
   merchant-demo-password: demo-test-password-123
   merchant-other-password: other-test-password-123
   operations-password: operations-test-password-123

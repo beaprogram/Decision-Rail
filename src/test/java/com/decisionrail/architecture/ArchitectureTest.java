@@ -18,6 +18,28 @@ class ArchitectureTest {
     }
 
     @Test
+    void shadowEvaluationCannotReachAnyFinancialMutation() {
+        // The isolation guarantee should not depend on nobody adding an import later. Shadow code
+        // has no access to the payment service, the payment store, or the outbox, so it cannot
+        // reserve funds, capture, void, write a ledger entry, change a stored decision, or emit a
+        // financial event even by mistake.
+        noClasses().that().resideInAPackage("..shadow..")
+                .should().dependOnClassesThat().haveFullyQualifiedName("com.decisionrail.payments.PaymentService")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("com.decisionrail.payments.PaymentStore")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("com.decisionrail.events.OutboxStore")
+                .because("shadow evaluation must not be able to move money or emit financial events").check(classes);
+    }
+
+    @Test
+    void replayCannotReachAnyFinancialMutation() {
+        noClasses().that().resideInAPackage("..replay..")
+                .should().dependOnClassesThat().haveFullyQualifiedName("com.decisionrail.payments.PaymentService")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("com.decisionrail.payments.PaymentStore")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("com.decisionrail.events.OutboxStore")
+                .because("replaying history must not alter the payments it replays").check(classes);
+    }
+
+    @Test
     void httpHandlersCannotBypassTransactionalPaymentService() {
         noClasses().that().resideInAPackage("..api..")
                 .should().dependOnClassesThat().resideInAnyPackage("org.springframework.jdbc..", "java.sql..")

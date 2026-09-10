@@ -2,6 +2,8 @@ package com.decisionrail.api;
 
 import com.decisionrail.events.OutboxBacklog;
 import com.decisionrail.events.OutboxDispatcher;
+import com.decisionrail.shadow.ShadowService;
+import com.decisionrail.shadow.ShadowSettingsView;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -9,8 +11,10 @@ import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.util.List;
 import java.util.UUID;
+import java.security.Principal;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -25,9 +29,11 @@ public class OpsController {
     private static final int MAX_REDRIVE = 500;
 
     private final OutboxDispatcher dispatcher;
+    private final ShadowService shadow;
 
-    public OpsController(OutboxDispatcher dispatcher) {
+    public OpsController(OutboxDispatcher dispatcher, ShadowService shadow) {
         this.dispatcher = dispatcher;
+        this.shadow = shadow;
     }
 
     /** Durable backlog, terminal failures, blocked payment streams, and breaker state. */
@@ -69,4 +75,25 @@ public class OpsController {
             @Min(1) @Max(MAX_REDRIVE) Integer limit) {}
 
     public record RedriveResponse(int redrivenCount, List<UUID> redrivenEventIds, long stillBlockedPaymentCount) {}
+
+    /** Current shadow configuration, queue depth, and comparison totals. */
+    @GetMapping("/shadow")
+    public ShadowSettingsView shadowSettings() {
+        return shadow.settings();
+    }
+
+    /**
+     * Enables or disables shadow evaluation of a candidate policy.
+     *
+     * <p>Idempotent, so a retry needs no key. Enabling a candidate grants it no authority over real
+     * payments: it selects a policy to evaluate alongside live decisions and nothing more.
+     */
+    @PutMapping("/shadow")
+    public ShadowSettingsView configureShadow(Principal principal, @Valid @RequestBody ShadowRequest request) {
+        return shadow.configure(request.enabled(), request.candidateVersion(), principal.getName());
+    }
+
+    public record ShadowRequest(
+            boolean enabled,
+            @Pattern(regexp = "[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}") String candidateVersion) {}
 }

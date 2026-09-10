@@ -83,6 +83,21 @@ app:
     backlog:
       degraded-age: 120s
       degraded-count: 1000
+  replay:
+    enabled: ${REPLAY_ENABLED:true}
+    batch-size: 100
+    poll-interval: 500ms
+    lease-duration: 60s
+  shadow:
+    # Enables the background worker, not shadow evaluation itself. Whether a candidate is
+    # evaluated is operator state in the database, set through PUT /v1/ops/shadow.
+    enabled: ${SHADOW_WORKER_ENABLED:true}
+    batch-size: 50
+    concurrency: 2
+    max-attempts: 3
+    poll-interval: 500ms
+    lease-duration: 30s
+    retry-delay: 1s
   merchant-demo-password: ${MERCHANT_DEMO_PASSWORD}
   merchant-other-password: ${MERCHANT_OTHER_PASSWORD}
   operations-password: ${OPERATIONS_PASSWORD}

@@ -1,6 +1,8 @@
 package com.decisionrail.api;
 
 import com.decisionrail.payments.PaymentException;
+import com.decisionrail.policy.PolicyService;
+import com.decisionrail.policy.PolicyValidationException;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -26,6 +28,22 @@ public class ApiExceptionHandler {
     @ExceptionHandler(PaymentException.class)
     ProblemDetail payment(PaymentException error, HttpServletRequest request) {
         return ApiProblems.problem(request, error.status(), error.code(), error.getMessage());
+    }
+
+    @ExceptionHandler(PolicyValidationException.class)
+    ProblemDetail policyValidation(PolicyValidationException error, HttpServletRequest request) {
+        // The message names the offending JSON path so an author can correct the document.
+        return ApiProblems.problem(request, 400, "INVALID_POLICY_DEFINITION", error.getMessage());
+    }
+
+    @ExceptionHandler(PolicyService.PolicyVersionConflictException.class)
+    ProblemDetail policyConflict(PolicyService.PolicyVersionConflictException error, HttpServletRequest request) {
+        return ApiProblems.problem(request, 409, "POLICY_VERSION_CONFLICT", error.getMessage());
+    }
+
+    @ExceptionHandler(PolicyService.PolicyNotFoundException.class)
+    ProblemDetail policyMissing(PolicyService.PolicyNotFoundException error, HttpServletRequest request) {
+        return ApiProblems.problem(request, 404, "POLICY_VERSION_NOT_FOUND", error.getMessage());
     }
 
     @ExceptionHandler({MethodArgumentNotValidException.class, HttpMessageNotReadableException.class,

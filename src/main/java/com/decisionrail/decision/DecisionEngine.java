@@ -42,27 +42,59 @@ public final class DecisionEngine {
         return ACTIVE_RULE_SET;
     }
 
+    /**
+     * Evaluates the authoritative built-in policy. This is the only path that produces a stored
+     * decision, and its behaviour is unchanged: {@code demo-v1} rules, order, contributions, and
+     * thresholds are exactly what they were.
+     */
     public DecisionResult evaluate(DecisionInput input) {
+        return evaluatePolicy(ACTIVE_RULE_SET, input).toDecisionResult();
+    }
+
+    /**
+     * Evaluates an explicitly supplied immutable policy snapshot.
+     *
+     * <p>Pure and deterministic: the same snapshot and the same input always produce the same
+     * evaluation, which is what makes replay and shadow comparison meaningful. There is no
+     * clock, no database, no random source, and no I/O on this path.
+     *
+     * <p>Outcome thresholds are a platform-level property rather than something a candidate
+     * policy sets. A candidate varies rules: their codes, expressions, contributions, flags,
+     * terminal behaviour, and order. Letting a candidate also move the thresholds would make
+     * two evaluations incomparable, because a divergence could come from either the rules or a
+     * relabelled scale, and the report could not tell an operator which.
+     */
+    public PolicyEvaluation evaluatePolicy(DecisionRuleSet ruleSet, DecisionInput input) {
+        if (ruleSet == null) {
+            throw new IllegalArgumentException("rule set is required");
+        }
         if (input == null) {
             throw new IllegalArgumentException("decision input is required");
         }
-        int score = 0;
+        int rawScore = 0;
+        int rulesEvaluated = 0;
+        boolean terminated = false;
         List<ReasonContribution> reasons = new ArrayList<>();
         Set<DecisionFlag> flags = EnumSet.noneOf(DecisionFlag.class);
-        for (DecisionRule rule : ACTIVE_RULE_SET.rules()) {
+        for (DecisionRule rule : ruleSet.rules()) {
+            rulesEvaluated++;
             if (!evaluator.evaluateValidated(rule.expression(), input).matched()) {
                 continue;
             }
-            score += rule.scoreContribution();
+            // Every match contributes: overlapping rules accumulate rather than override.
+            rawScore += rule.scoreContribution();
             reasons.add(new ReasonContribution(rule.code(), rule.description(), rule.scoreContribution()));
             flags.add(rule.flag());
             if (rule.terminal()) {
+                terminated = true;
                 break;
             }
         }
         if (reasons.isEmpty()) {
             reasons.add(new ReasonContribution("NO_RISK_SIGNALS", "No synthetic demo risk rules matched.", 0));
         }
-        return new DecisionResult(DecisionOutcome.fromScore(score), score, ACTIVE_RULE_SET.version(), reasons, flags);
+        int score = Math.min(PolicyEvaluation.MAX_SCORE, rawScore);
+        return new PolicyEvaluation(DecisionOutcome.fromScore(score), score, rawScore,
+                rawScore > PolicyEvaluation.MAX_SCORE, ruleSet.version(), reasons, flags, rulesEvaluated, terminated);
     }
 }
