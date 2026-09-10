@@ -13,10 +13,33 @@ Run `./scripts/prepare-local-env.sh` once from the repository. It generates an i
 | `MERCHANT_DEMO_PASSWORD` | Password for `demo-merchant`. Required. |
 | `MERCHANT_OTHER_PASSWORD` | Password for `other-merchant`. Required. |
 | `OPERATIONS_PASSWORD` | Password for the `operations` metrics user. Required. |
+| `ADMIN_PASSWORD` | Password for the `admin` user: policy creation, shadow configuration, outbox redrive. Required. |
+| `KAFKA_BOOTSTRAP_SERVERS` | Broker list. Compose sets the internal `broker:9092`; a native run uses the published loopback port. |
 | `DEMO_ENABLED` | Explicitly enable synthetic account seed data; defaults to `false` in the application. |
 | `PORT` | HTTP port; defaults to `8080`. |
+| `DB_PORT`, `KAFKA_PORT`, `BACKEND_PORT` | Optional Compose host-port overrides so this stack can coexist with another local PostgreSQL or broker. |
+| `EVENTS_DISPATCHER_ENABLED` | Set `false` to stop this instance publishing events. Committed intent still accumulates. |
+| `REPLAY_ENABLED`, `SHADOW_WORKER_ENABLED` | Set `false` to stop this instance running the replay or shadow worker. |
+| `EVENTS_FAULT_INJECTION_ENABLED` | Local and test only. Leave `false`; see "Controlled failure injection". |
 
-All three application passwords must be distinct and contain 16–72 characters; startup rejects missing, out-of-range, or placeholder values. The generated values exceed this minimum. Merchant users cannot read the protected Prometheus endpoint; the operations user cannot access `/v1/**`. Public health responses contain no internal detail.
+All four application passwords must be distinct and contain 16–72 characters; startup rejects missing, out-of-range, or placeholder values. The generated values exceed this minimum.
+
+The four identities have non-overlapping authority, and privileged routes are matched before the broad merchant rule so they cannot fall through to it:
+
+| Identity | Can do | Cannot do |
+| --- | --- | --- |
+| `demo-merchant`, `other-merchant` | `/v1/**` for their own data, including replay jobs and projection reads | Read protected metrics; reach `/v1/ops/**`; create a policy; see another merchant's data |
+| `operations` | Read `/actuator/prometheus` | Everything else, including `/v1/ops/**`. It is deliberately not an administrator. |
+| `admin` | `/v1/ops/**` and `POST /v1/policies` | Call merchant payment or replay APIs |
+
+If you already have an `.env` from an earlier milestone it will not contain `ADMIN_PASSWORD`. Append one without touching the existing credentials:
+
+```bash
+umask 077
+printf 'ADMIN_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
+```
+
+Public health responses contain no internal detail.
 
 Local demo accounts:
 
@@ -36,11 +59,19 @@ docker compose up --build -d
 docker compose logs -f backend
 ```
 
-Compose starts PostgreSQL before the application. A healthy PostgreSQL service means it is accepting connections; the application still needs to complete migration and startup. Check the API separately:
+Compose starts PostgreSQL and a single-node Kafka broker before the application. A healthy service means it is accepting connections; the application still needs to complete migration and startup. Check the API separately:
 
 ```bash
 curl --fail http://localhost:8080/actuator/health
 ```
+
+If ports `5432`, `19092`, or `8080` are already in use locally, override the host ports instead of editing the file:
+
+```bash
+DB_PORT=55434 KAFKA_PORT=19093 BACKEND_PORT=8080 docker compose up --build -d
+```
+
+The broker is a **single-node KRaft development broker**: one controller, one broker, replication factor 1. It is not a highly available deployment. A broker restart is a delivery outage and a lost volume is lost events. What makes that survivable is the outbox: committed intent stays in PostgreSQL until a broker acknowledges it. A real deployment would need at least three brokers, replication factor 3, and `min.insync.replicas=2` before any durability claim could be made.
 
 ## Native Java development
 
@@ -88,6 +119,151 @@ curl --fail-with-body --silent --show-error \
 
 Retry with the same body and key to observe replay. Change the body while retaining that key to observe `409`. Capture or void the returned payment using a separate key for that operation.
 
+## Walk through asynchronous delivery, replay, and shadow
+
+```bash
+./scripts/async-demo.sh
+```
+
+This drives the capabilities added in checkpoints 4 to 6 against a running stack and fails on any
+mismatch. It shows, in order: a payment authorized while the broker is stopped; retained event
+intent with an open breaker and a DEGRADED asynchronous health signal while readiness stays UP;
+delivery resuming after the broker returns with the original event id; one projection effect despite
+the same event being delivered twice more; a replay job whose membership does not change when a
+later payment commits; a 409 when a policy version id is rebound to different content; and a shadow
+divergence that leaves balances, holds, journals, the stored decision, and the event stream
+untouched.
+
+The broker outage is real: the script stops the broker container and restarts it. It targets only
+the Compose services named by `BROKER_SERVICE` and `DATABASE_SERVICE`, and it never calls an
+endpoint that executes commands. If you overrode the Compose host ports, pass the same values:
+
+```bash
+DB_PORT=55434 KAFKA_PORT=19093 ./scripts/async-demo.sh
+```
+
+## Watching the asynchronous path
+
+```bash
+set -a; source .env; set +a
+
+# Delivery backlog, terminal failures, blocked payment streams, breaker state.
+curl --silent --user "admin:$ADMIN_PASSWORD" \
+  http://localhost:8080/v1/ops/outbox/backlog | jq .
+
+# Is asynchronous delivery degraded? Separate from readiness on purpose.
+curl --silent http://localhost:8080/actuator/health/async | jq .
+curl --silent http://localhost:8080/actuator/health/readiness | jq .
+
+# Merchant view of the event-derived projection.
+curl --silent --user "demo-merchant:$MERCHANT_DEMO_PASSWORD" \
+  http://localhost:8080/v1/activity | jq .
+```
+
+Metrics worth watching on `/actuator/prometheus` (operations identity):
+
+| Metric | Meaning |
+| --- | --- |
+| `decisionrail_outbox_backlog{status=...}` | Events by delivery status. A growing `PENDING` means delivery is behind. |
+| `decisionrail_outbox_backlog_age_seconds` | Age of the oldest undelivered event. The primary outage signal. |
+| `decisionrail_outbox_publish_attempts_total`, `..._acknowledged_total`, `..._failures_total` | Send attempts versus real acknowledgements. |
+| `decisionrail_outbox_publish_short_circuited_total` | Sends the breaker refused. These cost no broker round trip and no retry budget. |
+| `decisionrail_outbox_retry_scheduled_total`, `decisionrail_outbox_failed_terminal_total` | Retry pressure and events that gave up. |
+| `decisionrail_outbox_leases_reclaimed_total`, `decisionrail_outbox_lease_lost_total` | Worker deaths recovered, and completions fenced out. |
+| `decisionrail_broker_breaker_state` | 0 closed, 1 half-open, 2 open. |
+| `decisionrail_consumer_duplicates_total`, `..._applied_total`, `..._quarantined_total` | Deduplicated redeliveries, applied effects, and refused records by reason. |
+| `decisionrail_consumer_quarantine_size` | Records the consumer refused to apply. |
+| `decisionrail_shadow_tasks{state=...}`, `decisionrail_shadow_failures_total` | Shadow queue depth and candidate failures. |
+| `decisionrail_replay_jobs{status=...}`, `decisionrail_replay_items_remaining` | Replay progress. |
+
+Every label is a bounded enumeration. No payment id, merchant id, or policy version appears in a
+metric; per-payment detail belongs in the operator APIs.
+
+## Handling a stalled delivery stream
+
+A terminally failed event blocks exactly one payment's stream. Later events for that payment stay
+unclaimable until the failure is resolved, while every other payment keeps draining. That is
+deliberate: applying a payment's `captured` event when its `authorized` event was never delivered
+would build a read model from a gap.
+
+```bash
+set -a; source .env; set +a
+curl --silent --user "admin:$ADMIN_PASSWORD" \
+  http://localhost:8080/v1/ops/outbox/backlog | jq '{countsByStatus, blockedPaymentCount}'
+
+# Redrive every failed event for one payment, so no earlier event is left behind.
+curl --silent --user "admin:$ADMIN_PASSWORD" \
+  --header 'Content-Type: application/json' \
+  --data '{"paymentId":"<payment-id>"}' \
+  http://localhost:8080/v1/ops/outbox/redrive | jq .
+```
+
+Redrive resets only the attempt budget and schedule. Event identity and payload are never rewritten,
+so a redriven event is deduplicated by consumers like any other redelivery, and repeating the same
+redrive request is a no-op because it matches only rows that are still failed. Check
+`stillBlockedPaymentCount` in the response: if it is non-zero, some payment still has an earlier
+failed event that was not part of your filter.
+
+## Comparing a candidate policy
+
+```bash
+set -a; source .env; set +a
+
+# 1. Register an immutable candidate. Admin only.
+curl --silent --user "admin:$ADMIN_PASSWORD" --header 'Content-Type: application/json' \
+  --data '{"versionId":"candidate-strict-v1","definition":{"rules":[
+    {"code":"STRICT_AMOUNT","description":"Candidate declines at or above 1000 minor units.",
+     "scoreContribution":60,"flag":"HIGH_AMOUNT","terminal":false,
+     "expression":{"operator":"AMOUNT_AT_LEAST","amountMinor":1000}}]}}' \
+  http://localhost:8080/v1/policies | jq '{versionId, definitionHash, origin}'
+
+# 2. Replay history against it. The merchant owns the job.
+curl --silent --user "demo-merchant:$MERCHANT_DEMO_PASSWORD" \
+  --header 'Content-Type: application/json' --header 'Idempotency-Key: replay-example-0001' \
+  --data '{"candidateVersion":"candidate-strict-v1","limit":500}' \
+  http://localhost:8080/v1/replay-jobs | jq '{id, inputCount, status}'
+
+# 3. Read the report, then the diverging payments.
+curl --silent --user "demo-merchant:$MERCHANT_DEMO_PASSWORD" \
+  http://localhost:8080/v1/replay-jobs/<job-id>/report | jq .
+curl --silent --user "demo-merchant:$MERCHANT_DEMO_PASSWORD" \
+  "http://localhost:8080/v1/replay-jobs/<job-id>/results?divergedOnly=true" | jq .
+
+# 4. Or evaluate the candidate alongside live authorizations.
+curl --silent --user "admin:$ADMIN_PASSWORD" --request PUT \
+  --header 'Content-Type: application/json' \
+  --data '{"enabled":true,"candidateVersion":"candidate-strict-v1"}' \
+  http://localhost:8080/v1/ops/shadow | jq .
+```
+
+Reading the report correctly matters:
+
+- `divergenceRate` is `divergenceCount / completedCount`. The response states this in
+  `divergenceDenominator` so a partially finished job is not misread.
+- Divergence compares **risk decisions**, not payment outcomes. A payment declined for insufficient
+  funds has an `APPROVE` risk decision and is compared as one. `paymentStatus` and
+  `paymentFailureCode` appear on each result for context only.
+- `labelledOutcomeDataAvailable` is always `false`. There are no fraud labels for this synthetic
+  data, so no precision, recall, or false-positive rate is reported.
+- `timingMethod` describes exactly what was measured. These are observed values for one run, not a
+  benchmark.
+- A candidate is never authoritative. Replaying it or enabling it for shadow evaluation does not let
+  it decide a real payment, and there is no promotion path in this phase.
+
+Shadow evaluation applies to authorizations observed while it is enabled; it does not backfill.
+Use a replay job for history. Disabling it stops new work and retains recorded comparisons.
+
+## Controlled failure injection
+
+`EVENTS_FAULT_INJECTION_ENABLED` arms typed, local-only failpoints used by the test suite to
+reproduce failure windows deterministically: a broker acknowledgement followed by a worker crash
+before the outbox row is updated, a send that never reaches the broker, and a slow or throwing
+candidate policy. Each switch names a payment and a behaviour. None of them accepts a command, a
+host, or a path, and none is reachable over HTTP.
+
+Leave it `false` outside local development and the test profile. The demo script does not need it:
+its broker outage is produced by stopping the broker container.
+
 ## Interpreting results
 
 A payment contains `id`, `accountId`, `amountMinor`, `currency`, `country`, `status`, `decision`, `failureCode`, `createdAt`, and `updatedAt`. The nested decision records `outcome`, `score`, `ruleSetVersion`, `reasons`, and `flags`.
@@ -114,7 +290,17 @@ The ledger endpoint returns an array of entries with `id`, `journalId`, `ledgerA
 | An identical authorization repeats but does not spend again | Expected idempotency behavior; use a new key only for a new command. |
 | `409` on key reuse | The key was already used with a different request or operation. |
 | `REVIEW` or policy decline | Inspect the stored score, reasons, and `demo-v1` rules. |
-| Outbox records stay pending | Expected in this milestone; delivery has not been implemented. |
+| Outbox records stay pending | Check `/actuator/health/async` and `/v1/ops/outbox/backlog`. An OPEN breaker or an unreachable broker means delivery is waiting, not lost. |
+| `countsByStatus.FAILED` is non-zero | Events exhausted their retry budget. Inspect `last_error`, fix the cause, then redrive by payment. |
+| One payment's events stop while others flow | Expected: a terminally failed event blocks exactly that payment's stream. Redrive it. |
+| Projection read returns `404` | No event for that payment has been delivered and projected yet, or the payment belongs to another merchant. |
+| `/actuator/health/async` reports `DEGRADED` | Asynchronous delivery is impaired. Readiness stays `UP` because payment commands are unaffected. |
+| Readiness is `DOWN` but the broker is fine | Readiness includes the database. Check PostgreSQL, not Kafka. |
+| Replay job stays `PENDING` | The replay worker is disabled (`REPLAY_ENABLED=false`) or not running on this instance. |
+| Replay job has fewer inputs than expected | Membership is fixed at creation. Payments committed afterwards, or outside the `from` window, are not members. |
+| Shadow comparison never appears | Shadow must be enabled *before* the authorization, the event must be delivered, and the shadow worker must be running. |
+| `409 POLICY_VERSION_CONFLICT` | That version id already exists with different content. Policy versions are immutable; use a new id. |
+| Startup fails naming the built-in policy | The in-code `demo-v1` rules changed. Historical decisions name that version, so its meaning must not change: introduce a new version id instead. |
 
 ## Operating boundary
 

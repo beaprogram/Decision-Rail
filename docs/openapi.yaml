@@ -14,9 +14,26 @@ info:
     an existing key returns 409. Validation/transaction errors do not save successful
     command results. Retry a transient storage failure with the same key.
 
-    HTTP Basic credentials are environment-configured. Merchant users can access
-    /v1; the operations user can only read protected metrics. The local server uses
-    loopback HTTP. Any public deployment must provide TLS.
+    Committed payment events are delivered to Kafka by a leased dispatcher outside the
+    payment transaction, so payment commands keep working while the broker is down. Each
+    event carries a durable per-payment sequence, and an event is only sent once its
+    predecessor for that payment has been acknowledged. The delivery guarantee is
+    at-least-once with idempotent consumer effects: a crash between a broker
+    acknowledgement and the outbox update resends, and consumers deduplicate by event id.
+    This is not end-to-end exactly-once processing across PostgreSQL and Kafka.
+
+    Candidate policy versions are immutable and content-addressed. They are never
+    authoritative: replaying one or enabling it for shadow evaluation does not let it
+    decide a real payment. Replay compares a candidate against the risk decision stored
+    with each payment, never against the payment's lifecycle status, so a payment declined
+    for insufficient funds is compared as the APPROVE risk decision it actually recorded.
+
+    HTTP Basic credentials are environment-configured. Four identities exist with
+    non-overlapping authority: demo-merchant and other-merchant reach /v1 for their own
+    data; operations can only read protected metrics; admin reaches /v1/ops and policy
+    creation and cannot call merchant APIs. Privileged routes are matched before the broad
+    merchant rule so they cannot fall through to it. The local server uses loopback HTTP.
+    Any public deployment must provide TLS.
 servers:
   - url: http://localhost:8080
     description: Local synthetic demo only
@@ -26,6 +43,14 @@ tags:
   - name: Payments
   - name: Accounts
   - name: Decisions
+  - name: Events
+    description: Merchant reads of the read model built from delivered events
+  - name: Policies
+    description: Immutable candidate policy versions. Creation requires the admin identity.
+  - name: Replay
+    description: Merchant-owned historical replay jobs against a pinned candidate policy
+  - name: Shadow
+    description: Comparisons produced by evaluating a pinned candidate alongside live decisions
   - name: Operations
 paths:
   /v1/payments/authorizations:
@@ -296,6 +321,678 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /v1/payments/{id}/activity:
+    get:
+      operationId: readPaymentActivity
+      tags: [Events]
+      summary: Read the event-derived activity projection for one payment
+      description: |
+        Read model built by the projection consumer from delivered events. It holds no
+        balance, hold, or ledger amount: the authoritative financial record stays in the
+        payment, account, and ledger resources.
+
+        riskOutcome is the stored risk decision and is not the same thing as lastStatus. An
+        APPROVE riskOutcome with a DECLINED lastStatus and failureCode INSUFFICIENT_FUNDS is
+        a normal, correct combination.
+
+        Returns 404 while no event for this payment has been delivered and projected yet,
+        and 404 for a payment owned by another merchant. The two are indistinguishable on
+        purpose, so identifiers cannot be probed.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Projected activity for a payment the caller owns
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentActivity'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+  /v1/activity:
+    get:
+      operationId: listPaymentActivity
+      tags: [Events]
+      summary: List recent projected activity for the authenticated merchant
+      description: |
+        Most recent events first. limit is clamped to 1..200 rather than rejected, because a
+        listing bound is a server concern and only an unbounded limit is genuinely unsafe.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          description: Maximum rows to return. Values outside 1..200 are clamped.
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: Projected activity rows owned by the caller
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PaymentActivity'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/policies:
+    post:
+      operationId: createPolicyVersion
+      tags: [Policies]
+      summary: Register an immutable candidate policy version
+      description: |
+        Requires the admin identity. The submitted document is validated, translated into an
+        evaluable snapshot, and stored in canonical form with a SHA-256 content hash.
+
+        Retry-safe without an Idempotency-Key, because content identity does the work:
+
+        - the same versionId with the same meaning returns 200 and the existing version,
+          including when the submission differs only in whitespace, key order, code casing,
+          or the order of a country set;
+        - the same versionId with different content returns 409. A policy version is
+          immutable because stored decisions and pinned replay jobs name it.
+
+        The reserved identifier demo-v1 belongs to the built-in policy and is rejected with
+        400. A created version is a candidate only: it is never authoritative, and neither
+        replaying it nor enabling it for shadow evaluation grants it authority over a real
+        payment.
+      security:
+        - adminBasic: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreatePolicyRequest'
+            example:
+              versionId: candidate-strict-v1
+              definition:
+                rules:
+                  - code: STRICT_AMOUNT
+                    description: Candidate declines at or above 1000 minor units.
+                    scoreContribution: 60
+                    flag: HIGH_AMOUNT
+                    terminal: false
+                    expression:
+                      operator: AMOUNT_AT_LEAST
+                      amountMinor: 1000
+      responses:
+        '201':
+          description: Candidate registered
+          headers:
+            Location:
+              description: Relative path to the stored policy version
+              schema:
+                type: string
+                format: uri-reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersion'
+        '200':
+          description: This exact definition was already registered under this identifier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersion'
+        '400':
+          description: |
+            Invalid policy definition. The problem detail names the offending JSON path, for
+            example an unsupported operator, a non-integer operand, a duplicate rule code, a
+            scoreContribution outside 1..100, an unknown decision flag, an exceeded nesting
+            or size limit, or an unsupported field.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 400
+                code: INVALID_POLICY_DEFINITION
+                detail: '$.rules[0].expression.operator: unsupported operator REGEX_MATCH; supported operators are [ALL, AMOUNT_AT_LEAST, AMOUNT_LESS_THAN, ANY, COUNTRY_IN, COUNTRY_OUTSIDE, CURRENCY_IN]'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: The identifier already exists with a different definition
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 409
+                code: POLICY_VERSION_CONFLICT
+                detail: 'Policy version candidate-strict-v1 already exists with definition hash aeb3...; the submitted definition hashes to 91c4.... A policy version is immutable: create a new version identifier.'
+    get:
+      operationId: listPolicyVersions
+      tags: [Policies]
+      summary: List policy versions
+      description: |
+        Readable by merchants as well as the admin identity: a merchant needs to name a
+        candidate when creating a replay job. Policy versions contain rule definitions, not
+        tenant data, and are identical for every merchant.
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: Stored policy versions, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/PolicyVersion'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+  /v1/policies/{versionId}:
+    get:
+      operationId: readPolicyVersion
+      tags: [Policies]
+      summary: Read one policy version in canonical form
+      parameters:
+        - name: versionId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$'
+          example: demo-v1
+      responses:
+        '200':
+          description: The canonical definition and its content hash
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PolicyVersion'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          description: No such policy version
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 404
+                code: POLICY_VERSION_NOT_FOUND
+                detail: Policy version candidate-missing was not found.
+  /v1/replay-jobs:
+    post:
+      operationId: createReplayJob
+      tags: [Replay]
+      summary: Create a historical replay job against a pinned candidate policy
+      description: |
+        Materialises the job's membership and input snapshot in the creating transaction.
+        Membership is a fixed set of rows, not a timestamp cursor re-queried per batch, so a
+        payment that commits after the job is created cannot join it and cannot change a
+        denominator partway through a run. A payment still uncommitted when the job was
+        created is simply not a member, which is a property of the snapshot rather than a
+        race.
+
+        The original amount, currency, country, and stored risk decision are copied into the
+        snapshot, so evaluation never reads today's account balance or hold to reconstruct a
+        historical feature.
+
+        Retry semantics are the job's own, not the payment idempotency model: a repeated
+        request returns the same job document, and this endpoint never returns a payment
+        document. A key reused for a different request returns 409.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReplayJobRequest'
+            example:
+              candidateVersion: candidate-strict-v1
+              limit: 500
+              from: '2026-09-01T00:00:00Z'
+      responses:
+        '201':
+          description: Job created with its membership already materialised
+          headers:
+            Location:
+              description: Relative path to the job
+              schema:
+                type: string
+                format: uri-reference
+            Idempotency-Replayed:
+              $ref: '#/components/headers/Replayed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayJob'
+        '200':
+          description: This key already created a job; the same job is returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayJob'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The named candidate policy version does not exist
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '409':
+          description: This Idempotency-Key was already used for a different replay request
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 409
+                code: IDEMPOTENCY_CONFLICT
+                detail: This Idempotency-Key was already used for a different replay request.
+    get:
+      operationId: listReplayJobs
+      tags: [Replay]
+      summary: List the authenticated merchant's replay jobs
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        '200':
+          description: Jobs owned by the caller, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ReplayJob'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/replay-jobs/{id}:
+    get:
+      operationId: readReplayJob
+      tags: [Replay]
+      summary: Read replay job state and progress
+      description: |
+        Counts are derived from recorded results rather than incremented, so a job that was
+        interrupted and resumed reports the same totals an uninterrupted run would have.
+        Another merchant's job returns 404, not 403.
+      parameters:
+        - $ref: '#/components/parameters/ReplayJobId'
+      responses:
+        '200':
+          description: Job state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayJob'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ReplayJobNotFound'
+  /v1/replay-jobs/{id}/report:
+    get:
+      operationId: readReplayReport
+      tags: [Replay]
+      summary: Read the comparison report for a replay job
+      description: |
+        divergenceRate is divergenceCount divided by completedCount: the share of
+        successfully evaluated inputs whose candidate risk outcome differs from the stored
+        baseline risk outcome. Failed and not-yet-evaluated inputs are excluded, so a
+        partially finished job never reports a rate against a denominator it has not reached.
+        The field divergenceDenominator states this in the response itself.
+
+        Divergence compares risk decisions only. It is not a claim about what would have
+        happened to the payment: available funds, currency checks, and lifecycle state are
+        not part of a policy evaluation.
+
+        Timings are labelled with how they were obtained and are observed values for one run,
+        not a benchmark. labelledOutcomeDataAvailable is always false for this synthetic data,
+        which is why no precision, recall, or false-positive rate is reported.
+      parameters:
+        - $ref: '#/components/parameters/ReplayJobId'
+      responses:
+        '200':
+          description: Comparison report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReplayReport'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ReplayJobNotFound'
+  /v1/replay-jobs/{id}/results:
+    get:
+      operationId: listReplayResults
+      tags: [Replay]
+      summary: List per-payment baseline and candidate explanations
+      parameters:
+        - $ref: '#/components/parameters/ReplayJobId'
+        - name: divergedOnly
+          in: query
+          required: false
+          description: Return only inputs whose candidate risk outcome differed from the baseline
+          schema:
+            type: boolean
+            default: false
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+        - name: offset
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        '200':
+          description: Recorded comparisons in membership order
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ReplayResult'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/ReplayJobNotFound'
+  /v1/payments/{id}/shadow:
+    get:
+      operationId: readPaymentShadowComparisons
+      tags: [Shadow]
+      summary: Read shadow comparisons recorded for one payment
+      description: |
+        Returns an empty array when no comparison exists, including for a payment owned by
+        another merchant. Shadow comparisons are stored and exposed separately from replay
+        results: a comparison here is a live observation of one authorization, while a replay
+        result belongs to a bounded historical job with a fixed membership snapshot.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: Comparisons the caller owns, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ShadowComparison'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/shadow-comparisons:
+    get:
+      operationId: listShadowComparisons
+      tags: [Shadow]
+      summary: List recent shadow comparisons for the authenticated merchant
+      parameters:
+        - name: divergedOnly
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 200
+      responses:
+        '200':
+          description: Comparisons owned by the caller, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/ShadowComparison'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/ops/outbox/backlog:
+    get:
+      operationId: readOutboxBacklog
+      tags: [Operations]
+      summary: Read durable delivery backlog, terminal failures, and breaker state
+      description: |
+        Requires the admin identity; the metrics-only operations account cannot call it.
+
+        oldestPendingAgeSeconds is the signal that matters during an outage.
+        blockedPaymentCount is the number of payments whose delivery stream is stalled behind
+        a terminally failed event: a failed event is unpublished, and a later event for the
+        same payment is not claimable until its predecessor is published, so one failure
+        blocks exactly one payment while every other payment keeps draining.
+      security:
+        - adminBasic: []
+      responses:
+        '200':
+          description: Backlog snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OutboxBacklog'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/ops/outbox/redrive:
+    post:
+      operationId: redriveFailedEvents
+      tags: [Operations]
+      summary: Return terminally failed events to the pending pool
+      description: |
+        Requires the admin identity. Resets only the attempt budget and schedule; event
+        identity and payload are never rewritten, so a redriven event is deduplicated by
+        consumers exactly like any other redelivery.
+
+        Retry-safe without an Idempotency-Key: the statement matches only rows that are still
+        FAILED, so repeating the same request is a no-op rather than a second effect.
+
+        Redrive cannot skip ahead. A payment's later event stays unclaimable until its earlier
+        event is published, so redriving only a later event changes nothing.
+        stillBlockedPaymentCount reports whether anything remains stalled afterwards. Passing
+        paymentId redrives every failed event for that payment, so an earlier event is not
+        left behind.
+      security:
+        - adminBasic: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RedriveRequest'
+            example:
+              paymentId: 9f1c2f5a-0f3a-4c2b-9a5d-3b7e8c1d2e4f
+      responses:
+        '200':
+          description: What was redriven and what remains blocked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedriveResponse'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /v1/ops/shadow:
+    get:
+      operationId: readShadowSettings
+      tags: [Operations]
+      summary: Read shadow configuration, queue depth, and comparison totals
+      security:
+        - adminBasic: []
+      responses:
+        '200':
+          description: Current configuration and totals
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShadowSettings'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      operationId: configureShadow
+      tags: [Operations]
+      summary: Enable or disable shadow evaluation of a candidate policy
+      description: |
+        Requires the admin identity. Idempotent, so a retry needs no key.
+
+        Enabling a candidate selects a policy to evaluate alongside live decisions and grants
+        it no authority: the authoritative policy is unchanged and a candidate cannot decide a
+        real payment. Enabling requires naming a candidate, because enabling without one would
+        silently evaluate nothing.
+
+        Shadow applies to authorizations observed while it is enabled; enabling does not
+        backfill earlier payments. Use a replay job for history. Disabling stops new work
+        being enqueued and retains recorded comparisons.
+      security:
+        - adminBasic: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ShadowRequest'
+            example:
+              enabled: true
+              candidateVersion: candidate-strict-v1
+      responses:
+        '200':
+          description: Configuration after the change
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShadowSettings'
+        '400':
+          description: Enabling without a candidate policy version
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 400
+                code: INVALID_SHADOW_CONFIGURATION
+                detail: A candidate policy version is required to enable shadow evaluation.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          description: The named candidate policy version does not exist
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+  /actuator/health/liveness:
+    get:
+      operationId: readLiveness
+      tags: [Operations]
+      summary: Is this process alive
+      description: Unauthenticated, like the other health probes. Does not consider any dependency.
+      security: []
+      responses:
+        '200':
+          description: Process is alive
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /actuator/health/readiness:
+    get:
+      operationId: readReadiness
+      tags: [Operations]
+      summary: Should payment traffic arrive at this instance
+      description: |
+        Includes the database, because no payment command can succeed without it. Deliberately
+        excludes the broker, because payment commands succeed while the broker is down. A
+        broker outage must not remove a correct payment API from rotation.
+      security: []
+      responses:
+        '200':
+          description: Ready for payment traffic
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '503':
+          description: Not ready, for example when the database is unreachable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+  /actuator/health/async:
+    get:
+      operationId: readAsyncDeliveryHealth
+      tags: [Operations]
+      summary: Is asynchronous event delivery healthy or degraded
+      description: |
+        The third, separate answer alongside liveness and readiness. Reports DEGRADED when the
+        broker breaker is not closed, when the oldest undelivered event exceeds the configured
+        age, when the backlog exceeds the configured count, or when any event has terminally
+        failed. DEGRADED maps to HTTP 200 on purpose: it is a real operational signal, but the
+        payment API is still correct and must stay in rotation. paymentApiAffected is always
+        false for this indicator.
+      security: []
+      responses:
+        '200':
+          description: Status is UP or DEGRADED, with details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AsyncDeliveryHealth'
 components:
   securitySchemes:
     merchantBasic:
@@ -305,13 +1002,28 @@ components:
     operationsBasic:
       type: http
       scheme: basic
-      description: operations user with OPERATIONS_PASSWORD; cannot access merchant APIs
+      description: operations user with OPERATIONS_PASSWORD; metrics only, cannot access merchant or admin APIs
+    adminBasic:
+      type: http
+      scheme: basic
+      description: |
+        admin user with ADMIN_PASSWORD. Authority over policy creation, shadow configuration,
+        and outbox redrive. Deliberately a separate identity: the metrics-only operations
+        account was not widened into an administrator. Cannot call merchant APIs.
   parameters:
     PaymentId:
       name: id
       in: path
       required: true
       description: Payment owned by the authenticated merchant
+      schema:
+        type: string
+        format: uuid
+    ReplayJobId:
+      name: id
+      in: path
+      required: true
+      description: Replay job owned by the authenticated merchant. Another merchant's job reads as absent.
       schema:
         type: string
         format: uuid
@@ -439,6 +1151,19 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+    ReplayJobNotFound:
+      description: |
+        No replay job with this identifier belongs to the authenticated merchant. A job owned by
+        another merchant is reported as absent rather than forbidden, so identifiers cannot be
+        probed for existence.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            status: 404
+            code: REPLAY_JOB_NOT_FOUND
+            detail: Replay job was not found.
   schemas:
     AuthorizationRequest:
       type: object
@@ -721,6 +1446,574 @@ components:
         requestId:
           type: string
           format: uuid
+      additionalProperties: true
+    PaymentActivity:
+      type: object
+      description: |
+        Event-derived read model. It deliberately carries no balance, hold, or ledger amount.
+      required: [paymentId, accountId, amountMinor, currency, country, lastStatus, lastEventType,
+                 lastSequence, riskOutcome, riskScore, policyVersion, appliedEventCount,
+                 firstEventAt, lastEventAt]
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        accountId:
+          type: string
+          format: uuid
+        amountMinor:
+          $ref: '#/components/schemas/PaymentAmount'
+        currency:
+          $ref: '#/components/schemas/Currency'
+        country:
+          type: string
+          example: CA
+        lastStatus:
+          type: string
+          enum: [AUTHORIZED, CAPTURED, VOIDED, DECLINED, REVIEW]
+          description: Payment lifecycle status from the most recently applied event
+        lastEventType:
+          type: string
+          example: payment.captured.v1
+        lastSequence:
+          type: integer
+          format: int64
+          minimum: 1
+          description: |
+            Durable per-payment event sequence. The projection only moves forward: an event
+            carrying an older sequence is recorded as consumed but not applied.
+        riskOutcome:
+          type: string
+          enum: [APPROVE, REVIEW, DECLINE]
+          description: |
+            The stored risk decision. Not the same thing as lastStatus: an APPROVE riskOutcome
+            with a DECLINED lastStatus and failureCode INSUFFICIENT_FUNDS is correct.
+        riskScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+        policyVersion:
+          type: string
+          example: demo-v1
+        failureCode:
+          type: [string, 'null']
+          example: INSUFFICIENT_FUNDS
+        appliedEventCount:
+          type: integer
+          minimum: 1
+          description: Events actually applied to this projection row. Duplicate deliveries do not increment it.
+        firstEventAt:
+          type: string
+          format: date-time
+        lastEventAt:
+          type: string
+          format: date-time
+    CreatePolicyRequest:
+      type: object
+      additionalProperties: false
+      required: [versionId, definition]
+      properties:
+        versionId:
+          type: string
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$'
+          description: Immutable identifier. demo-v1 is reserved for the built-in policy.
+          example: candidate-strict-v1
+        definition:
+          $ref: '#/components/schemas/PolicyDefinition'
+    PolicyDefinition:
+      type: object
+      additionalProperties: false
+      required: [rules]
+      description: |
+        A closed, typed rule document. There is no script, template, callback, or URL form, so a
+        policy cannot introduce new behaviour, reach the network, read the filesystem, or cause
+        reflection. Unknown fields are rejected rather than ignored, so a typo cannot silently
+        disable a rule. Rule order is part of the definition: rules accumulate in order and a
+        matching terminal rule stops evaluation.
+      properties:
+        rules:
+          type: array
+          minItems: 1
+          maxItems: 32
+          items:
+            $ref: '#/components/schemas/PolicyRule'
+    PolicyRule:
+      type: object
+      additionalProperties: false
+      required: [code, description, scoreContribution, flag, terminal, expression]
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Za-z][A-Za-z0-9_]{0,63}$'
+          description: Uppercase identifier, unique within the policy. Normalized to upper case.
+          example: STRICT_AMOUNT
+        description:
+          type: string
+          minLength: 1
+          maxLength: 512
+          description: Shown in the explanation when this rule matches
+        scoreContribution:
+          type: integer
+          minimum: 1
+          maximum: 100
+          description: |
+            Added when the rule matches. Overlapping rules accumulate. If matched contributions
+            sum above 100 the score is capped at 100 and scoreCapped is recorded; reasons still
+            reconcile against the uncapped rawScore.
+        flag:
+          type: string
+          enum: [TEST_COUNTRY_BLOCKED, HIGH_AMOUNT, ELEVATED_AMOUNT, CROSS_BORDER]
+          description: |
+            Selected from the platform decision-flag vocabulary. A candidate cannot define new
+            flags, so a baseline and a candidate stay comparable on the same axes.
+        terminal:
+          type: boolean
+          description: When this rule matches, evaluation stops and later rules contribute nothing
+        expression:
+          $ref: '#/components/schemas/RuleExpression'
+    PolicyVersion:
+      type: object
+      description: |
+        A stored, immutable policy version. definition is the canonical form and is exactly what
+        gets evaluated. definitionHash identifies meaning rather than formatting: reordered keys,
+        casing, and country-set order hash identically, while any semantic change does not. The
+        version identifier is excluded from the hash.
+      required: [versionId, definition, definitionHash, origin, ruleCount, createdBy, createdAt]
+      properties:
+        versionId:
+          type: string
+          example: candidate-strict-v1
+        definition:
+          $ref: '#/components/schemas/PolicyDefinition'
+        definitionHash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+          description: SHA-256 of the canonical definition
+        origin:
+          type: string
+          enum: [BUILTIN, CANDIDATE]
+          description: |
+            BUILTIN is the authoritative in-code policy. CANDIDATE is never authoritative:
+            replaying it or enabling it for shadow evaluation grants it no authority.
+        ruleCount:
+          type: integer
+          minimum: 1
+          maximum: 32
+        createdBy:
+          type: string
+          example: admin
+        createdAt:
+          type: string
+          format: date-time
+    CreateReplayJobRequest:
+      type: object
+      additionalProperties: false
+      required: [candidateVersion]
+      properties:
+        candidateVersion:
+          type: string
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$'
+          description: An existing immutable policy version
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 5000
+          default: 500
+          description: Maximum pinned inputs. The membership snapshot is bounded by this value.
+        from:
+          type: string
+          format: date-time
+          description: |
+            Optional inclusive lower bound on payment creation time. The upper bound is always
+            the moment the job is created.
+    ReplayJob:
+      type: object
+      description: |
+        Durable job state. Counts are recomputed from recorded results rather than incremented,
+        so an interrupted job that resumes reports the totals an uninterrupted run would have.
+      required: [id, merchantId, candidateVersion, candidateHash, baselineSource, status,
+                 inputCount, completedCount, failedCount, pendingCount, divergenceCount,
+                 windowTo, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        merchantId:
+          type: string
+        candidateVersion:
+          type: string
+        candidateHash:
+          type: string
+          pattern: '^[0-9a-f]{64}$'
+        baselineSource:
+          type: string
+          enum: [STORED_RISK_DECISION]
+          description: |
+            Always the risk decision stored with the original payment. Never the payment's
+            lifecycle status, and never a re-evaluation of the baseline policy.
+        status:
+          type: string
+          enum: [PENDING, RUNNING, COMPLETED, FAILED]
+        inputCount:
+          type: integer
+          minimum: 0
+          description: Size of the membership snapshot materialised when the job was created
+        completedCount:
+          type: integer
+          minimum: 0
+        failedCount:
+          type: integer
+          minimum: 0
+        pendingCount:
+          type: integer
+          minimum: 0
+        approveCount:
+          type: integer
+          minimum: 0
+          description: Candidate outcomes, not baseline outcomes
+        reviewCount:
+          type: integer
+          minimum: 0
+        declineCount:
+          type: integer
+          minimum: 0
+        divergenceCount:
+          type: integer
+          minimum: 0
+        evaluationNanosTotal:
+          type: integer
+          format: int64
+          minimum: 0
+        windowFrom:
+          type: [string, 'null']
+          format: date-time
+        windowTo:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        startedAt:
+          type: [string, 'null']
+          format: date-time
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+        failureDetail:
+          type: [string, 'null']
+    ReplayReport:
+      type: object
+      required: [jobId, status, candidateVersion, candidateHash, baselineSource, inputCount,
+                 completedCount, failedCount, pendingCount, divergenceCount,
+                 divergenceDenominator, timingMethod, labelledOutcomeDataAvailable]
+      properties:
+        jobId:
+          type: string
+          format: uuid
+        merchantId:
+          type: string
+        status:
+          type: string
+          enum: [PENDING, RUNNING, COMPLETED, FAILED]
+        candidateVersion:
+          type: string
+        candidateHash:
+          type: string
+        baselinePolicyVersion:
+          type: [string, 'null']
+          description: Policy version recorded on the pinned baseline decisions
+          example: demo-v1
+        baselineSource:
+          type: string
+          enum: [STORED_RISK_DECISION]
+        inputCount:
+          type: integer
+        completedCount:
+          type: integer
+        failedCount:
+          type: integer
+        pendingCount:
+          type: integer
+        candidateOutcomeCounts:
+          type: object
+          additionalProperties:
+            type: integer
+          example:
+            APPROVE: 0
+            REVIEW: 0
+            DECLINE: 4
+        baselineOutcomeCounts:
+          type: object
+          additionalProperties:
+            type: integer
+          description: |
+            Stored risk outcomes across the membership snapshot. A payment declined for
+            insufficient funds counts as APPROVE here, because that is the risk decision it
+            recorded.
+          example:
+            APPROVE: 3
+            REVIEW: 1
+            DECLINE: 0
+        divergenceCount:
+          type: integer
+        divergenceDenominator:
+          type: string
+          description: States which population divergenceRate is measured against
+          example: 'completedCount: inputs whose candidate evaluation succeeded. Failed and not-yet-evaluated inputs are excluded.'
+        divergenceRate:
+          type: [number, 'null']
+          minimum: 0
+          maximum: 1
+          description: divergenceCount / completedCount, or null when nothing has been evaluated yet
+        evaluationTimings:
+          type: object
+          properties:
+            totalNanos:
+              type: integer
+              format: int64
+            meanNanos:
+              type: [integer, 'null']
+              format: int64
+            measuredEvaluations:
+              type: integer
+        timingMethod:
+          type: string
+          description: How the timings were obtained, so they are not mistaken for a benchmark
+        labelledOutcomeDataAvailable:
+          type: boolean
+          description: |
+            Always false for this synthetic data. No fraud labels exist, so precision, recall,
+            and false-positive rates are not computed; reporting them would be inventing them.
+        windowFrom:
+          type: [string, 'null']
+          format: date-time
+        windowTo:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: [string, 'null']
+          format: date-time
+    ReplayResult:
+      type: object
+      description: |
+        One pinned input's comparison. diverged compares risk outcomes only; it is not a claim
+        about what would have happened to the payment.
+      required: [paymentId, baselineOutcome, baselineScore, baselineReasons, diverged]
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        baselineOutcome:
+          type: string
+          enum: [APPROVE, REVIEW, DECLINE]
+        baselineScore:
+          type: integer
+          minimum: 0
+          maximum: 100
+        baselineReasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reason'
+        candidateOutcome:
+          type: [string, 'null']
+          enum: [APPROVE, REVIEW, DECLINE, null]
+        candidateScore:
+          type: [integer, 'null']
+          minimum: 0
+          maximum: 100
+          description: The capped score the outcome thresholds saw
+        candidateRawScore:
+          type: [integer, 'null']
+          minimum: 0
+          description: Exact sum of matched contributions, which may exceed 100
+        candidateScoreCapped:
+          type: boolean
+          description: True when rawScore exceeded 100 and score was capped to it
+        candidateReasons:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/Reason'
+        diverged:
+          type: boolean
+        evaluationNanos:
+          type: integer
+          format: int64
+        errorCode:
+          type: [string, 'null']
+          description: Set instead of a candidate outcome when evaluation failed for this input
+        paymentStatus:
+          type: string
+          description: Carried for context only; never used as the comparison baseline
+        paymentFailureCode:
+          type: [string, 'null']
+          example: INSUFFICIENT_FUNDS
+    ShadowComparison:
+      type: object
+      required: [paymentId, candidateVersion, baselineOutcome, baselineScore, diverged, evaluatedAt]
+      properties:
+        paymentId:
+          type: string
+          format: uuid
+        candidateVersion:
+          type: string
+        baselineOutcome:
+          type: string
+          enum: [APPROVE, REVIEW, DECLINE]
+        baselineScore:
+          type: integer
+        baselineReasons:
+          type: array
+          items:
+            $ref: '#/components/schemas/Reason'
+        candidateOutcome:
+          type: [string, 'null']
+          enum: [APPROVE, REVIEW, DECLINE, null]
+        candidateScore:
+          type: [integer, 'null']
+        candidateRawScore:
+          type: [integer, 'null']
+        candidateScoreCapped:
+          type: boolean
+        candidateReasons:
+          type: [array, 'null']
+          items:
+            $ref: '#/components/schemas/Reason'
+        diverged:
+          type: boolean
+        evaluationNanos:
+          type: integer
+          format: int64
+        errorCode:
+          type: [string, 'null']
+          description: |
+            Recorded when the candidate threw. The comparison row still exists, so a failing
+            candidate is visible rather than silently missing.
+        evaluatedAt:
+          type: string
+          format: date-time
+    ShadowRequest:
+      type: object
+      additionalProperties: false
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        candidateVersion:
+          type: [string, 'null']
+          pattern: '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$'
+          description: Required when enabling
+    ShadowSettings:
+      type: object
+      required: [enabled, updatedBy, updatedAt, pendingTasks, failedTasks, comparisons, divergences]
+      properties:
+        enabled:
+          type: boolean
+        candidateVersion:
+          type: [string, 'null']
+        candidateHash:
+          type: [string, 'null']
+        updatedBy:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+        pendingTasks:
+          type: integer
+          format: int64
+          description: Queued shadow evaluations not yet processed
+        failedTasks:
+          type: integer
+          format: int64
+        comparisons:
+          type: integer
+          format: int64
+        divergences:
+          type: integer
+          format: int64
+    OutboxBacklog:
+      type: object
+      required: [countsByStatus, oldestPendingAgeSeconds, blockedPaymentCount, breakerState]
+      properties:
+        countsByStatus:
+          type: object
+          additionalProperties:
+            type: integer
+            format: int64
+          example:
+            PENDING: 1
+            CLAIMED: 0
+            PUBLISHED: 42
+            FAILED: 0
+        oldestPendingAt:
+          type: [string, 'null']
+          format: date-time
+        oldestPendingAgeSeconds:
+          type: integer
+          format: int64
+          description: Age of the oldest undelivered event. The signal that matters during an outage.
+        blockedPaymentCount:
+          type: integer
+          format: int64
+          description: |
+            Payments whose delivery stream is stalled behind a terminally failed event. One
+            failure blocks exactly one payment; other payments keep draining.
+        breakerState:
+          type: string
+          enum: [CLOSED, HALF_OPEN, OPEN]
+    RedriveRequest:
+      type: object
+      additionalProperties: false
+      description: All filters are optional. Supplying none redrives up to limit failed events.
+      properties:
+        merchantId:
+          type: string
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$'
+        paymentId:
+          type: string
+          format: uuid
+          description: Redrives every failed event for this payment, so an earlier event is not left behind
+        eventIds:
+          type: array
+          maxItems: 500
+          items:
+            type: string
+            format: uuid
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 500
+          default: 500
+    RedriveResponse:
+      type: object
+      required: [redrivenCount, redrivenEventIds, stillBlockedPaymentCount]
+      properties:
+        redrivenCount:
+          type: integer
+          minimum: 0
+        redrivenEventIds:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Original event identities. Redrive never mints replacement events.
+        stillBlockedPaymentCount:
+          type: integer
+          format: int64
+          description: Payments still stalled after this redrive
+    AsyncDeliveryHealth:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [UP, DEGRADED]
+          description: DEGRADED maps to HTTP 200; the payment API is unaffected
+        components:
+          type: object
+          additionalProperties: true
       additionalProperties: true
     Health:
       type: object

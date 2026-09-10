@@ -47,7 +47,7 @@ jobs:
         run: ./mvnw --batch-mode --no-transfer-progress verify
       - name: Build application container
         run: docker build --tag decisionrail:ci .
-      - name: Run application container and operator demo
+      - name: Run application container and both operator demos
         shell: bash
         run: |
           docker run --detach --name decisionrail-smoke --network host \
@@ -65,6 +65,9 @@ jobs:
             sleep 2
           done
           ./scripts/demo.sh
+          COMPOSE_FILE_PATH=compose.test.yaml BROKER_SERVICE=test-broker \
+            DATABASE_SERVICE=test-database DATABASE_NAME=decisionrail_test \
+            ADMIN_PASSWORD="$ADMIN_PASSWORD" ./scripts/async-demo.sh
       - name: Show container logs on failure
         if: failure()
         run: |
