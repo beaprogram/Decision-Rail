@@ -83,7 +83,10 @@ absent. Isolation that rests on reviewer vigilance is not isolation.
 risk to money. Reports state their denominator and how timings were measured. Jobs survive restarts.
 Historical decisions remain exactly what they were.
 
-**Tradeoffs.** A capped candidate score loses information above 100, recorded but not recoverable.
+**Tradeoffs.** A candidate score above 100 is capped before the outcome thresholds see it, so two
+policies that differ only above the cap produce the same outcome. The information itself is not lost:
+`candidateRawScore`, `candidateScoreCapped`, and the contributing reasons are stored and returned for
+both replay results and shadow comparisons, and the reasons reconcile against the raw total.
 Candidates select from the existing decision-flag vocabulary rather than defining new flags. Shadow
 applies only to authorizations observed while it is enabled; enabling it does not backfill. Replay
 membership omits a payment that was still uncommitted when the job was created, which is a documented

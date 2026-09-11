@@ -51,11 +51,17 @@ management:
         async:
           include: asyncDelivery
           show-details: always
-      # DEGRADED maps to 200: impaired asynchronous delivery is a real operational signal, but
-      # it must not read as an unhealthy instance, because the payment API is still correct.
       status:
         order: DOWN,OUT_OF_SERVICE,DEGRADED,UP,UNKNOWN
+        # A non-empty http-mapping REPLACES Spring Boot's defaults rather than adding to them, so
+        # every unhealthy status has to be listed here. Declaring only DEGRADED previously made
+        # DOWN and OUT_OF_SERVICE fall back to 200, which meant a readiness probe answered with a
+        # success code while the database was unreachable. Do not remove these two entries.
         http-mapping:
+          DOWN: 503
+          OUT_OF_SERVICE: 503
+          # DEGRADED stays 200: impaired asynchronous delivery is a real operational signal, but
+          # it must not read as an unhealthy instance, because the payment API is still correct.
           DEGRADED: 200
 app:
   demo-enabled: ${DEMO_ENABLED:false}

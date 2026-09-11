@@ -89,6 +89,35 @@ public final class BrokerProbe {
         return collected;
     }
 
+    /**
+     * Publishes to one explicit partition, so a test can prove that a refused record does not block
+     * the records queued behind it on the same partition.
+     */
+    public static void publishRawToPartition(String topic, int partition, String key, String value) {
+        Properties config = new Properties();
+        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers());
+        config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
+        config.put(ProducerConfig.ACKS_CONFIG, "all");
+        config.put(ProducerConfig.MAX_BLOCK_MS_CONFIG, 10_000);
+        try (KafkaProducer<String, String> producer = new KafkaProducer<>(config)) {
+            producer.send(new ProducerRecord<>(topic, partition, key, value)).get(20, TimeUnit.SECONDS);
+        } catch (Exception failure) {
+            throw new AssertionError("Could not publish a raw test record to " + topic + " partition " + partition, failure);
+        }
+    }
+
+    /** Committed offset for one partition of a consumer group, or -1 when nothing is committed yet. */
+    public static long committedOffset(String group, String topic, int partition) {
+        try (AdminClient admin = admin()) {
+            var offsets = admin.listConsumerGroupOffsets(group).partitionsToOffsetAndMetadata().get(30, TimeUnit.SECONDS);
+            var metadata = offsets.get(new org.apache.kafka.common.TopicPartition(topic, partition));
+            return metadata == null ? -1L : metadata.offset();
+        } catch (Exception failure) {
+            throw new AssertionError("Could not read committed offsets for group " + group, failure);
+        }
+    }
+
     /** Publishes a raw value so tests can deliver records the application would never emit. */
     public static void publishRaw(String topic, String key, String value) {
         Properties config = new Properties();

@@ -177,7 +177,7 @@ docker compose -f compose.test.yaml up -d --wait
 
 The test profile already defaults to that stack. Use a dedicated database and broker: integration tests install triggers that inject storage failures, publish synthetic events, and create a throwaway database for the migration upgrade check.
 
-Local verification on **2026-09-10 UTC** passed **149 tests** on Java 21.0.11, PostgreSQL 16.15, and Kafka 3.9.1 with zero failures, errors, or skipped tests: 86 domain and contract units, 4 architecture rules, 35 PostgreSQL integration tests, and 24 against both PostgreSQL and a real broker. All 84 tests from the previous milestone still pass. The packaged application passed **12** transactional demo checks and **27** asynchronous demo checks.
+Local verification on **2026-09-11 UTC** passed **186 tests** on Java 21.0.11, PostgreSQL 16.15, and Kafka 3.9.1 with zero failures, errors, or skipped tests: 107 domain and contract units, 4 architecture rules, 48 PostgreSQL integration tests, and 27 against both PostgreSQL and a real broker. Every test from the earlier milestones still passes. The packaged application passed **12** transactional demo checks and **27** asynchronous demo checks.
 
 Timing-sensitive behaviour is tested with injected clocks, explicit failpoints, and bounded polling rather than sleeps. A test named for recovery leaves behind exactly the state a killed process leaves, so recovery has to happen through durable state and lease expiry. The [verification guide](docs/verification.md) explains the failure cases and why real infrastructure matters.
 

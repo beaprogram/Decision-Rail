@@ -4,6 +4,7 @@ import com.decisionrail.decision.DecisionEngine;
 import com.decisionrail.decision.DecisionInput;
 import com.decisionrail.decision.PolicyEvaluation;
 import com.decisionrail.decision.ReasonContribution;
+import com.decisionrail.events.DeliveryFaults;
 import com.decisionrail.policy.PolicyService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -38,6 +39,7 @@ public class ReplayWorker {
     private final ReplayStore store;
     private final PolicyService policies;
     private final DecisionEngine engine;
+    private final DeliveryFaults faults;
     private final TransactionTemplate transactions;
     private final ObjectMapper json;
     private final Clock clock;
@@ -46,7 +48,7 @@ public class ReplayWorker {
     private final Duration leaseDuration;
     private final String workerId;
 
-    public ReplayWorker(ReplayStore store, PolicyService policies, DecisionEngine engine,
+    public ReplayWorker(ReplayStore store, PolicyService policies, DecisionEngine engine, DeliveryFaults faults,
                         TransactionTemplate transactions, ObjectMapper json, Clock clock, MeterRegistry metrics,
                         @Value("${app.replay.batch-size:100}") int batchSize,
                         @Value("${app.replay.lease-duration:60s}") Duration leaseDuration) {
@@ -59,6 +61,7 @@ public class ReplayWorker {
         this.store = store;
         this.policies = policies;
         this.engine = engine;
+        this.faults = faults;
         this.transactions = transactions;
         this.json = json;
         this.clock = clock;
@@ -89,19 +92,13 @@ public class ReplayWorker {
         }
         try {
             BatchOutcome outcome = processBatch(claimed);
-            transactions.executeWithoutResult(status -> store.refreshAggregates(claimed.jobId(), claimed.leaseToken()));
-            int remaining = store.pendingItemCount(claimed.jobId());
-            boolean completed = false;
-            if (remaining == 0) {
-                completed = Boolean.TRUE.equals(transactions.execute(status ->
-                        store.completeJob(claimed.jobId(), claimed.leaseToken(), clock.instant())));
-                if (completed) {
-                    metrics.counter("decisionrail.replay.jobs.completed").increment();
-                    log.info("Replay job {} completed", claimed.jobId());
-                }
-            } else {
-                transactions.executeWithoutResult(status -> store.releaseLease(claimed.jobId(), claimed.leaseToken()));
+            if (outcome.lostOwnership()) {
+                return lostOwnership(claimed);
             }
+            // This worker holds no locks here, so this is the window where another worker can take
+            // the job over. A test can hold it to exercise that handover. Inert in production.
+            faults.awaitGate(DeliveryFaults.replayHandoverGate(workerId));
+            boolean completed = finalise(claimed);
             metrics.counter("decisionrail.replay.items.processed").increment(outcome.evaluated() + outcome.failed());
             return new Cycle(claimed.jobId(), outcome.evaluated(), outcome.failed(), outcome.alreadyRecorded(), completed);
         } catch (RuntimeException failure) {
@@ -113,13 +110,65 @@ public class ReplayWorker {
         }
     }
 
-    private record BatchOutcome(int evaluated, int failed, int alreadyRecorded) {}
+    private record BatchOutcome(int evaluated, int failed, int alreadyRecorded, boolean lostOwnership) {
+        static BatchOutcome lost() { return new BatchOutcome(0, 0, 0, true); }
+    }
+
+    /**
+     * Recomputes totals, counts remaining work, and finalises the job in one transaction, under the
+     * job's ownership lock.
+     *
+     * <p>These were three separate statements, which is what allowed a job to be completed with
+     * totals measured before another worker's results landed. Holding the lock across all of them
+     * means nothing can write results for this job between the recomputation and the decision, so a
+     * completed job's totals always describe its full set of durable results.
+     *
+     * @return true when this call completed the job
+     */
+    private boolean finalise(ReplayStore.ClaimedJob job) {
+        Boolean completed = transactions.execute(status -> {
+            if (!store.lockOwnedJob(job.jobId(), job.leaseToken())) {
+                return null;
+            }
+            store.refreshAggregates(job.jobId(), job.leaseToken());
+            // Rendezvous point for the takeover race: a test can hold one worker here, between
+            // recomputing totals and deciding whether the job is finished. Inert in production.
+            faults.awaitGate(DeliveryFaults.replayCompletionGate(workerId));
+            if (store.pendingItemCount(job.jobId()) > 0) {
+                store.releaseLease(job.jobId(), job.leaseToken());
+                return false;
+            }
+            return store.completeJob(job.jobId(), job.leaseToken(), clock.instant());
+        });
+        if (completed == null) {
+            log.warn("Replay job {} was taken over before finalisation; leaving it to its current owner", job.jobId());
+            metrics.counter("decisionrail.replay.ownership.lost").increment();
+            return false;
+        }
+        if (completed) {
+            metrics.counter("decisionrail.replay.jobs.completed").increment();
+            log.info("Replay job {} completed", job.jobId());
+        }
+        return completed;
+    }
+
+    private Cycle lostOwnership(ReplayStore.ClaimedJob job) {
+        log.warn("Replay job {} was taken over by another worker; discarding this batch", job.jobId());
+        metrics.counter("decisionrail.replay.ownership.lost").increment();
+        return new Cycle(job.jobId(), 0, 0, 0, false);
+    }
 
     private BatchOutcome processBatch(ReplayStore.ClaimedJob job) {
         // The snapshot is resolved once per batch. It is immutable, so every item in this job sees
         // exactly the same policy regardless of how many batches or restarts the job takes.
         var snapshot = policies.snapshot(job.candidateVersion());
         return transactions.execute(status -> {
+            // Nothing is written unless this worker still owns the job. Without this an obsolete
+            // owner could commit results and item transitions for a job another worker had taken
+            // over, leaving totals and item state describing work nobody was authorised to do.
+            if (!store.lockOwnedJob(job.jobId(), job.leaseToken())) {
+                return BatchOutcome.lost();
+            }
             List<ReplayItem> items = store.claimItems(job.jobId(), batchSize);
             int evaluated = 0;
             int failed = 0;
@@ -146,7 +195,10 @@ public class ReplayWorker {
                     else alreadyRecorded++;
                 }
             }
-            return new BatchOutcome(evaluated, failed, alreadyRecorded);
+            // Held before this transaction commits, so a test can expire this worker's lease and
+            // let another worker take the job over while these writes are still uncommitted.
+            faults.awaitGate(DeliveryFaults.replayBatchCommitGate(workerId));
+            return new BatchOutcome(evaluated, failed, alreadyRecorded, false);
         });
     }
 

@@ -90,6 +90,27 @@ public class ShadowStore {
     }
 
     /**
+     * Takes a row lock on the task, but only if this worker still owns the claim.
+     *
+     * <p>Callers must do this before writing a comparison or changing task state. Holding the lock
+     * for the rest of the transaction is what makes the pair atomic: a concurrent reclaim is an
+     * UPDATE on this row, so it blocks until the owner commits and then no longer matches
+     * {@code state = 'CLAIMED'}. A worker whose lease was already taken over finds no row here and
+     * must write nothing at all.
+     *
+     * <p>Lock order is always this row first, then shadow_comparisons, in every path.
+     *
+     * @return true while this worker still owns the claim
+     */
+    public boolean lockOwnedTask(UUID eventId, UUID leaseToken) {
+        return !jdbc.queryForList("""
+                SELECT 1 FROM shadow_tasks
+                WHERE event_id = ? AND lease_token = ? AND state = 'CLAIMED'
+                FOR UPDATE
+                """, Integer.class, eventId, leaseToken).isEmpty();
+    }
+
+    /**
      * Records a comparison. The primary key on (candidate_version, payment_id) means a repeated
      * delivery or a payment retry produces one comparison, not several.
      *

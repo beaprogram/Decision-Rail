@@ -168,11 +168,12 @@ class PolicySchemaTest {
         assertRejected("$.rules[0].expression.amountMinor", """
                 {"rules":[{"code":"X","description":"d","scoreContribution":10,"flag":"CROSS_BORDER","terminal":false,
                  "expression":{"operator":"AMOUNT_AT_LEAST","amountMinor":1.5}}]}""");
-        // Out-of-range operand: rejected by the expression type's own bounds.
-        assertThatThrownBy(() -> translate("v", """
+        // Out-of-range operand. This is an input error, so it must arrive as a structured policy
+        // validation failure naming its path, not as an unchecked exception that reads as a server
+        // fault to the caller.
+        assertRejected("$.rules[0].expression.amountMinor", """
                 {"rules":[{"code":"X","description":"d","scoreContribution":10,"flag":"CROSS_BORDER","terminal":false,
-                 "expression":{"operator":"AMOUNT_AT_LEAST","amountMinor":9999999999999}}]}"""))
-                .isInstanceOf(IllegalArgumentException.class);
+                 "expression":{"operator":"AMOUNT_AT_LEAST","amountMinor":9999999999999}}]}""");
         assertRejected("$.rules[0].expression.countries", """
                 {"rules":[{"code":"X","description":"d","scoreContribution":10,"flag":"CROSS_BORDER","terminal":false,
                  "expression":{"operator":"COUNTRY_IN","countries":[]}}]}""");
@@ -208,10 +209,12 @@ class PolicySchemaTest {
             nested = "{\"operator\":\"ALL\",\"children\":[" + nested + "]}";
         }
         final String deep = nested;
+        assertRejected("$.rules[0].expression", """
+                {"rules":[{"code":"X","description":"d","scoreContribution":10,"flag":"CROSS_BORDER","terminal":false,
+                 "expression":%s}]}""".formatted(deep));
         assertThatThrownBy(() -> translate("v", """
                 {"rules":[{"code":"X","description":"d","scoreContribution":10,"flag":"CROSS_BORDER","terminal":false,
                  "expression":%s}]}""".formatted(deep)))
-                .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("depth");
 
         StringBuilder tooManyChildren = new StringBuilder();

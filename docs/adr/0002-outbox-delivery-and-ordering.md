@@ -50,6 +50,26 @@ only to rows written before the migration; the live path never depends on timest
 same migration adds routing identity to old payloads so committed history stays deliverable instead of
 arriving at a consumer as malformed.
 
+**Validate events against the bounds the consumer's own tables accept.** Validation originally
+checked a normalised copy of a value and then stored the original: a currency of "cad" passed because
+its uppercase form is supported, and failed a column CHECK on insert. That arrived as a database
+exception, which the retry policy correctly treats as a transient storage outage and retries
+indefinitely, so one unprocessable record blocked its partition forever. Status, policy version, and
+failure code had the same shape of gap with no validation at all. The contract now requires canonical,
+in-bounds values and refuses anything else, which routes it to quarantine in bounded time. Rejecting
+rather than normalising is deliberate: rewriting a payload would change the bytes a consumer
+deduplicates and fingerprints on, and a consumer may not alter an immutable event it received. Genuine
+storage failures still propagate and still retry without acknowledging, because turning every database
+exception into a quarantine would convert a recoverable outage into lost work.
+
+**Fence every write by ownership, not just the final state transition.** Both workers originally wrote
+their result before the lease-fenced row update, and discarded that update's false result. A worker
+whose claim had been taken over therefore committed a comparison or a batch of replay results anyway.
+Each path now takes a row lock on its own task or job first and writes nothing unless it still owns it,
+with a consistent lock order of claim row first, then results. For replay, recomputing totals, counting
+remaining work, and completing the job also moved into that same locked transaction, so completion can
+no longer be decided against totals that an outstanding batch is about to change.
+
 **Do not charge a short-circuited send against the retry budget.** This was a real defect found in
 testing: because the breaker's rejection looked like any other failure, a few seconds of protection
 terminally failed a whole backlog of events that had never been offered to the broker. A rejected send

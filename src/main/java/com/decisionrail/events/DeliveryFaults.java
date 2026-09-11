@@ -1,8 +1,12 @@
 package com.decisionrail.events;
 
+import java.time.Duration;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
@@ -26,8 +30,18 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class DeliveryFaults {
+    private static final Duration GATE_TIMEOUT = Duration.ofSeconds(60);
+
     private final boolean enabled;
 
+    /**
+     * Bounded rendezvous points, armed by a test and opened by it explicitly.
+     *
+     * <p>A timed sleep cannot express "pause worker A here, let worker B take the job over, then
+     * resume A", which is the only way to reproduce a takeover race deterministically. Labels are
+     * scoped by worker id so two workers running the same task can be held independently.
+     */
+    private final Map<String, CountDownLatch> gates = new ConcurrentHashMap<>();
     private final Set<UUID> crashAfterAcknowledgement = ConcurrentHashMap.newKeySet();
     private final Set<UUID> rejectSends = ConcurrentHashMap.newKeySet();
     private volatile long shadowEvaluationDelayMillis;
@@ -53,8 +67,45 @@ public class DeliveryFaults {
         }
     }
 
-    public void beforeShadowEvaluation(UUID paymentId) {
+    /** Arms a gate. The next production call to {@link #awaitGate} with this label blocks. */
+    public void hold(String label) {
+        requireEnabled();
+        gates.computeIfAbsent(label, key -> new CountDownLatch(1));
+    }
+
+    /** Opens a gate, releasing whatever is waiting on it. */
+    public void release(String label) {
+        CountDownLatch gate = gates.remove(label);
+        if (gate != null) gate.countDown();
+    }
+
+    public boolean isHeld(String label) {
+        CountDownLatch gate = gates.get(label);
+        return gate != null && gate.getCount() > 0;
+    }
+
+    /**
+     * Blocks while a gate with this label is armed. Inert when fault injection is disabled, so no
+     * production path can ever wait here. The wait is bounded so a test that forgets to open a gate
+     * fails instead of hanging the build.
+     */
+    public void awaitGate(String label) {
         if (!enabled) return;
+        CountDownLatch gate = gates.get(label);
+        if (gate == null) return;
+        try {
+            if (!gate.await(GATE_TIMEOUT.toSeconds(), TimeUnit.SECONDS)) {
+                throw new IllegalStateException("Injected gate " + label + " was never released");
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("Interrupted waiting on injected gate " + label, interrupted);
+        }
+    }
+
+    public void beforeShadowEvaluation(String workerId, UUID paymentId) {
+        if (!enabled) return;
+        awaitGate(shadowGate(workerId));
         long delay = shadowEvaluationDelayMillis;
         if (delay > 0) {
             try {
@@ -98,7 +149,24 @@ public class DeliveryFaults {
         this.shadowEvaluationDelayMillis = value;
     }
 
+    /** Label for holding one shadow worker inside its evaluation step. */
+    public static String shadowGate(String workerId) { return "shadow-evaluate:" + workerId; }
+
+    /** Label for holding one replay worker just before its batch results commit. */
+    public static String replayBatchCommitGate(String workerId) { return "replay-batch-commit:" + workerId; }
+
+    /** Label for holding one replay worker between recomputing totals and deciding completion. */
+    public static String replayCompletionGate(String workerId) { return "replay-completion:" + workerId; }
+
+    /**
+     * Label for holding one replay worker after its batch has committed and before it finalises,
+     * which is the only window in which another worker can legitimately take the job over.
+     */
+    public static String replayHandoverGate(String workerId) { return "replay-handover:" + workerId; }
+
     public void clear() {
+        gates.keySet().forEach(this::release);
+        gates.clear();
         crashAfterAcknowledgement.clear();
         rejectSends.clear();
         failShadowEvaluation.clear();

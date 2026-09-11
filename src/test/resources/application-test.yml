@@ -6,6 +6,11 @@ spring:
     url: ${JDBC_URL:jdbc:postgresql://127.0.0.1:55433/decisionrail_test}
     username: ${JDBC_USERNAME:decisionrail}
     password: ${JDBC_PASSWORD:local-test-only}
+    hikari:
+      # Each cached Spring context holds its own pool for the whole run, so a production-sized pool
+      # per context exhausts the server's connection limit. Tests need only enough for their own
+      # concurrency checks.
+      maximum-pool-size: 6
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:127.0.0.1:19092}
 app:

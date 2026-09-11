@@ -42,6 +42,20 @@ report through a separate health group as DEGRADED, mapped to HTTP 200. Folding 
 would remove a correct payment API from rotation because of a broker outage, which is the exact failure
 the outbox exists to avoid.
 
+**Declare every unhealthy status in the HTTP mapping, not just the custom one.** A non-empty
+`management.endpoint.health.status.http-mapping` *replaces* Spring Boot's defaults rather than adding to
+them. Mapping only DEGRADED therefore silently dropped the built-in DOWN and OUT_OF_SERVICE entries, and
+both fell back to HTTP 200: a readiness probe answered success while the database was unreachable, so an
+orchestrator would have kept sending payment traffic to an instance that could not serve it. DOWN and
+OUT_OF_SERVICE are now listed explicitly alongside DEGRADED, and an HTTP-level test asserts the codes
+against the application's real configuration rather than against a standalone mapper.
+
+**A health indicator must answer rather than throw.** The asynchronous indicator reads backlog state
+from PostgreSQL. When that read failed the exception escaped the endpoint, so the whole health document
+was replaced by a generic error response and the other indicators' answers were lost with it. It now
+reports DOWN with the reason instead, because asynchronous delivery genuinely cannot run without the
+database.
+
 **Fault injection is typed, local-only, and has no HTTP surface.** The switches name a payment and a
 behaviour; none of them accepts a command, a host, or a path. They are inert unless
 `app.events.fault-injection-enabled` is true, which only the test profile and the documented local

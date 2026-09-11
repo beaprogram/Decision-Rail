@@ -6,7 +6,6 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
-import java.util.Locale;
 import java.util.Set;
 import org.springframework.stereotype.Component;
 
@@ -26,7 +25,17 @@ public class EventContract {
             "payment.declined.v1", "payment.review.v1");
     private static final Set<String> RISK_OUTCOMES = Set.of("APPROVE", "REVIEW", "DECLINE");
     private static final Set<String> CURRENCIES = Set.of("CAD", "USD");
+    /** The lifecycle states a payment can be in, and the only values the projection column accepts. */
+    private static final Set<String> PAYMENT_STATUSES = Set.of(
+            "AUTHORIZED", "CAPTURED", "VOIDED", "DECLINED", "REVIEW");
     private static final long MAX_AMOUNT_MINOR = 1_000_000_000_000L;
+    /** Mirrors policy_version varchar(64) in the consumer tables. */
+    private static final java.util.regex.Pattern POLICY_VERSION = java.util.regex.Pattern.compile("[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}");
+    /** Mirrors failure_code varchar(64). */
+    private static final java.util.regex.Pattern FAILURE_CODE = java.util.regex.Pattern.compile("[A-Z][A-Z0-9_]{0,63}");
+    /** Reason codes come from rule codes, which are uppercase identifiers of at most 64 characters. */
+    private static final java.util.regex.Pattern REASON_CODE = java.util.regex.Pattern.compile("[A-Z][A-Z0-9_]{0,63}");
+    private static final int MAX_REASON_DESCRIPTION = 512;
 
     private final ObjectMapper reader;
 
@@ -76,18 +85,38 @@ public class EventContract {
         require(payment.accountId() != null, "payment accountId is required");
         require(payment.amountMinor() > 0 && payment.amountMinor() <= MAX_AMOUNT_MINOR,
                 "payment amountMinor is out of range");
-        require(payment.currency() != null && CURRENCIES.contains(payment.currency().toUpperCase(Locale.ROOT)),
-                "payment currency is not supported");
-        require(payment.country() != null && payment.country().matches("[A-Za-z]{2}"), "payment country must be two letters");
-        require(payment.status() != null && !payment.status().isBlank(), "payment status is required");
+        // Canonical form is required rather than normalised into. Upper-casing the value here would
+        // leave the envelope disagreeing with the bytes that were delivered, fingerprinted, and
+        // deduplicated on, and a consumer must not rewrite an immutable event it received. Accepting
+        // a non-canonical value instead pushed the rejection down to a column CHECK, where it
+        // surfaced as a storage error and was retried forever.
+        require(payment.currency() != null && CURRENCIES.contains(payment.currency()),
+                "payment currency must be one of " + CURRENCIES.stream().sorted().toList() + " in canonical upper case");
+        require(payment.country() != null && payment.country().matches("[A-Z]{2}"),
+                "payment country must be two upper-case ASCII letters");
+        require(payment.status() != null && PAYMENT_STATUSES.contains(payment.status()),
+                "payment status must be one of " + PAYMENT_STATUSES.stream().sorted().toList());
+        require(payment.failureCode() == null || FAILURE_CODE.matcher(payment.failureCode()).matches(),
+                "payment failureCode must be an upper-case identifier of at most 64 characters");
         require(payment.createdAt() != null && payment.updatedAt() != null, "payment timestamps are required");
         EventEnvelope.Decision decision = payment.decision();
         require(decision != null, "payment decision is required");
         require(decision.outcome() != null && RISK_OUTCOMES.contains(decision.outcome()),
                 "risk decision outcome must be APPROVE, REVIEW or DECLINE");
         require(decision.score() >= 0 && decision.score() <= 100, "risk score must be between 0 and 100");
-        require(decision.ruleSetVersion() != null && !decision.ruleSetVersion().isBlank(), "policy version is required");
+        require(decision.ruleSetVersion() != null && POLICY_VERSION.matcher(decision.ruleSetVersion()).matches(),
+                "policy version must be an identifier of at most 64 characters");
         require(decision.reasons() != null && !decision.reasons().isEmpty(), "decision reasons are required");
+        for (EventEnvelope.Reason reason : decision.reasons()) {
+            require(reason != null, "a decision reason cannot be null");
+            require(reason.code() != null && REASON_CODE.matcher(reason.code()).matches(),
+                    "a decision reason code must be an upper-case identifier of at most 64 characters");
+            require(reason.description() != null && !reason.description().isBlank()
+                            && reason.description().length() <= MAX_REASON_DESCRIPTION,
+                    "a decision reason description must contain 1 to " + MAX_REASON_DESCRIPTION + " characters");
+            require(reason.scoreContribution() >= 0 && reason.scoreContribution() <= 100,
+                    "a decision reason contribution must be between 0 and 100");
+        }
         return new Parsed(envelope, fingerprint(raw));
     }
 

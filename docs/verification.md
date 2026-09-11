@@ -37,20 +37,42 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 ## Recorded local result
 
-Recorded **2026-09-10 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
+Recorded **2026-09-11 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw verify` passed **149 tests** with **0 failures, 0 errors, and 0 skipped**:
+`./mvnw verify` passed **186 tests** with **0 failures, 0 errors, and 0 skipped**:
 
 | Group | Tests | Infrastructure |
 | --- | --- | --- |
-| Domain and contract units | 86 | None: pure evaluation, breaker state machine, backoff, policy validation, publisher acknowledgement semantics |
+| Domain and contract units | 107 | None: pure evaluation, breaker state machine, backoff, policy validation and bounds, event contract bounds, publisher acknowledgement semantics |
 | Architecture rules | 4 | None |
-| PostgreSQL integration | 35 | Real PostgreSQL, including the migration upgrade check |
-| PostgreSQL and Kafka integration | 24 | Real PostgreSQL and a real single-node broker |
+| PostgreSQL integration | 48 | Real PostgreSQL, including health status codes, worker takeover races, and the migration upgrade check |
+| PostgreSQL and Kafka integration | 27 | Real PostgreSQL and a real single-node broker |
 
-The previous milestone's 84 tests are all still present and passing; the 65 added tests did not replace or weaken any of them.
+Every test from the earlier milestones is still present and passing. Two assertions were **strengthened**, not relaxed: two policy checks previously accepted any `IllegalArgumentException` for an invalid document and now require the structured validation failure with its JSON path, because the old expectation encoded the defect that such inputs were reported as server faults.
 
-Both demo scripts passed against the packaged application in the local Compose stack: `scripts/demo.sh` (**12 HTTP checks**) and `scripts/async-demo.sh` (**27 checks**). The asynchronous demo observed a payment authorized with the broker container stopped, the breaker OPEN with `/actuator/health/async` DEGRADED while readiness stayed UP, delivery resuming after restart with the original event id and the breaker closing again, a projection applied count that stayed at 1 after the same event was delivered twice more, a replay job whose membership stayed at 4 inputs when a later payment committed, a 409 when a policy version id was rebound to different content, and a shadow divergence (live APPROVE, candidate DECLINE at score 60) after which the balance was unchanged and held funds moved only by the new authorization's own hold.
+### Corrections verified in this run
+
+Each correction was demonstrated by a test that failed before it and passes after.
+
+| Correction | Regression test | Failures before |
+| --- | --- | --- |
+| Unhealthy health statuses returned HTTP 200 | `HealthStatusMappingTest` | 3 |
+| Stale shadow worker committed a comparison over the new owner's claim | `ShadowStaleWorkerTest` | 2 |
+| Obsolete replay owner committed results and item transitions | `ReplayTakeoverTest` | 1 |
+| Event validation accepted values the consumer's tables reject | `EventContractBoundsTest` | 6 |
+| A refused record blocked its Kafka partition indefinitely | `MalformedEventPartitionTest` | 1 (40s timeout: the valid record behind it was never processed) |
+| Invalid policy definitions returned HTTP 500 | `PolicyValidationBoundaryTest` | 8 |
+
+The partition-blocking case was confirmed by temporarily restoring the original currency check: the valid record queued behind the refused one was still unprocessed after 40 seconds, which is the blocked partition. With the correction it is processed.
+
+### Test infrastructure notes
+
+Two environmental details were corrected while adding these tests, both test-only:
+
+- **The disposable test database now allows 400 connections.** The suite keeps one cached Spring context per test configuration for the whole run, each with its own pool, and the added classes pushed the total past the server's default of 100. The test profile's pool is also reduced to 6, which is ample for its concurrency checks.
+- **A freshly enqueued row is not claimed by a cycle run in the same millisecond.** The row takes its due time from the database clock while the worker compares it against the JVM clock, and the two differ by a few milliseconds in a container. Tests that drive a single cycle backdate the due time rather than depending on that agreement. Production is unaffected: the workers poll continuously.
+
+Both demo scripts passed against the packaged application in the local Compose stack after these corrections: `scripts/demo.sh` (**12 HTTP checks**) and `scripts/async-demo.sh` (**27 checks**). The asynchronous demo observed a payment authorized with the broker container stopped, the breaker OPEN with `/actuator/health/async` DEGRADED while readiness stayed UP, delivery resuming after restart with the original event id and the breaker closing again, a projection applied count that stayed at 1 after the same event was delivered twice more, a replay job whose membership stayed at 4 inputs when a later payment committed, a 409 when a policy version id was rebound to different content, and a shadow divergence (live APPROVE, candidate DECLINE at score 60) after which the balance was unchanged and held funds moved only by the new authorization's own hold.
 
 ## Failure cases and rationale
 
@@ -88,6 +110,15 @@ Both demo scripts passed against the packaged application in the local Compose s
 | Worker restart | Work is recovered after lease expiry, and a live claim cannot be stolen. | Losing in-flight work, or two workers owning one row. |
 | Storage failure | `503` with nothing reserved, recorded, or queued. | A successful financial response the database never stored. |
 | Migration upgrade with existing records | Sequence backfill, delivery status, and payload identity are correct; money and seals intact. | An upgrade that strands committed history or weakens an existing guarantee. |
+| Unhealthy health status codes | DOWN and OUT_OF_SERVICE answer `503`; DEGRADED answers `200`. | A readiness probe reporting failure in its body while returning a success code. |
+| Health indicator with an unreadable dependency | The indicator reports DOWN with a reason instead of throwing. | One failing indicator replacing the whole health document with a generic error. |
+| Stale shadow worker after takeover | No comparison, no task change, and the new owner's result is the only one stored. | A task marked successful while its stored comparison records a failure. |
+| Obsolete replay owner | No results, no item transitions, and no completion. | Totals and item state describing work nobody was authorised to do. |
+| Replay job with a batch in flight | The job is skipped by other workers until the batch resolves. | Completion decided against totals an outstanding batch is about to change. |
+| Completed replay job totals | Every published count equals the aggregate of its durable result rows. | A finished job whose report disagrees with its own stored results. |
+| Event value outside a consumer column's bounds | Quarantined in bounded time; the next record on the partition is processed. | An unprocessable record retried forever as though it were a transient outage. |
+| Quarantine write failure | The offset is not advanced, and the record is quarantined once storage recovers. | Acknowledging work that was never recorded. |
+| Invalid policy definition | `400` with the offending JSON path, and no version row persisted. | An input error reported to the caller as a server fault. |
 | Cross-tenant replay and shadow access | Another merchant's job, results, and comparisons read as absent. | Cross-tenant disclosure through new endpoints. |
 | Privileged route matching | Merchants and the metrics account are refused admin routes; admin is refused merchant routes. | A privileged path falling through to the broad merchant rule. |
 

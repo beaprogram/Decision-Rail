@@ -1584,11 +1584,25 @@ components:
           type: string
           example: candidate-strict-v1
         definition:
-          $ref: '#/components/schemas/PolicyDefinition'
+          type: string
+          description: |
+            The stored definition, returned as JSON text rather than an embedded object. Parse it to
+            inspect the rules; its parsed shape is PolicyDefinition.
+
+            This text is not byte-identical to what definitionHash covers. It is read back from a
+            PostgreSQL jsonb column, which normalises object key order and whitespace in its own way.
+            The hash is taken over the application's canonical form, so verifying it means parsing
+            this definition and re-deriving that canonical form. That is the same property the hash
+            exists for: it identifies what a policy means, not how it happened to be written.
+          example: '{"rules":[{"code":"STRICT_AMOUNT","flag":"HIGH_AMOUNT","terminal":false,"expression":{"operator":"AMOUNT_AT_LEAST","amountMinor":1000},"description":"Candidate declines at or above 1000 minor units.","scoreContribution":60}]}'
         definitionHash:
           type: string
           pattern: '^[0-9a-f]{64}$'
-          description: SHA-256 of the canonical definition
+          description: |
+            SHA-256 of the canonical form of this definition. Reordered keys, whitespace, code
+            casing, and the order of a country set all hash identically; any change to rule order, a
+            contribution, an operator, or a bound does not. Not a hash of the definition field's
+            bytes as returned; see that field.
         origin:
           type: string
           enum: [BUILTIN, CANDIDATE]

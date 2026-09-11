@@ -1,6 +1,7 @@
 package com.decisionrail.policy;
 
 import com.decisionrail.decision.DecisionFlag;
+import com.decisionrail.decision.DecisionInput;
 import com.decisionrail.decision.DecisionRule;
 import com.decisionrail.decision.DecisionRuleSet;
 import com.decisionrail.decision.RuleEvaluator;
@@ -61,6 +62,8 @@ public final class PolicySchema {
             "ALL", "ANY", "AMOUNT_AT_LEAST", "AMOUNT_LESS_THAN", "CURRENCY_IN", "COUNTRY_IN", "COUNTRY_OUTSIDE");
     private static final Set<String> RULE_FIELDS = Set.of(
             "code", "description", "scoreContribution", "flag", "terminal", "expression");
+    public static final int MAX_DESCRIPTION = 512;
+    public static final int MAX_CODE_SET = 32;
 
     private PolicySchema() {}
 
@@ -97,6 +100,10 @@ public final class PolicySchema {
                 throw new PolicyValidationException(path + ".code", "duplicate rule code " + code);
             }
             String description = requiredText(path + ".description", rule, "description");
+            if (description.length() > MAX_DESCRIPTION) {
+                throw new PolicyValidationException(path + ".description",
+                        "description must contain 1 to " + MAX_DESCRIPTION + " characters but had " + description.length());
+            }
             JsonNode score = rule.get("scoreContribution");
             if (score == null || !score.isInt()) {
                 throw new PolicyValidationException(path + ".scoreContribution",
@@ -111,17 +118,35 @@ public final class PolicySchema {
             if (terminal == null || !terminal.isBoolean()) {
                 throw new PolicyValidationException(path + ".terminal", "terminal must be a boolean");
             }
-            RuleExpression expression = parseExpression(path + ".expression", rule.get("expression"));
-            translated.add(new DecisionRule(code, description, expression, score.asInt(), flag, terminal.asBoolean()));
+            RuleExpression expression = parseExpression(path + ".expression", rule.get("expression"), 1, new int[]{0});
+            // Safety net for any bound enforced only by the value objects: an input error must not
+            // escape as an unchecked exception and be reported as a server fault. Deliberately narrow,
+            // wrapping only the construction of these immutable rule types.
+            translated.add(translating(path, () ->
+                    new DecisionRule(code, description, expression, score.asInt(), flag, terminal.asBoolean())));
         }
         // DecisionRuleSet re-checks bounds and uniqueness, so the evaluable snapshot is never
         // trusted to be valid merely because it came through this translator.
-        return new DecisionRuleSet(versionId, translated);
+        return translating("$.rules", () -> new DecisionRuleSet(versionId, translated));
     }
 
-    private static RuleExpression parseExpression(String path, JsonNode node) {
+    /**
+     * @param depth  nesting level of this node, starting at 1 for a rule's root expression
+     * @param nodes  single-element running total of nodes parsed so far
+     */
+    private static RuleExpression parseExpression(String path, JsonNode node, int depth, int[] nodes) {
         if (node == null || !node.isObject()) {
             throw new PolicyValidationException(path, "expression must be a JSON object");
+        }
+        // Depth and node budgets are checked here rather than only inside the evaluator, so an
+        // oversized document is an input error with a path rather than an unchecked failure.
+        if (depth > RuleEvaluator.MAX_DEPTH) {
+            throw new PolicyValidationException(path,
+                    "expression nesting exceeds the maximum depth of " + RuleEvaluator.MAX_DEPTH);
+        }
+        if (++nodes[0] > RuleEvaluator.MAX_NODES) {
+            throw new PolicyValidationException(path,
+                    "expression exceeds the maximum of " + RuleEvaluator.MAX_NODES + " nodes");
         }
         String operator = requiredText(path + ".operator", node, "operator").toUpperCase(Locale.ROOT);
         if (!OPERATORS.contains(operator)) {
@@ -141,9 +166,11 @@ public final class PolicySchema {
                 }
                 List<RuleExpression> parsed = new ArrayList<>();
                 for (int index = 0; index < children.size(); index++) {
-                    parsed.add(parseExpression(path + ".children[" + index + "]", children.get(index)));
+                    parsed.add(parseExpression(path + ".children[" + index + "]", children.get(index), depth + 1, nodes));
                 }
-                return operator.equals("ALL") ? new RuleExpression.All(parsed) : new RuleExpression.Any(parsed);
+                return translating(path, () -> operator.equals("ALL")
+                        ? new RuleExpression.All(parsed)
+                        : new RuleExpression.Any(parsed));
             }
             case "AMOUNT_AT_LEAST", "AMOUNT_LESS_THAN" -> {
                 rejectUnknownFields(path, node, Set.of("operator", "amountMinor"));
@@ -152,34 +179,71 @@ public final class PolicySchema {
                     throw new PolicyValidationException(path + ".amountMinor",
                             "amountMinor must be an integer number of currency minor units");
                 }
-                return operator.equals("AMOUNT_AT_LEAST")
-                        ? new RuleExpression.AmountAtLeast(amount.asLong())
-                        : new RuleExpression.AmountLessThan(amount.asLong());
+                long amountMinor = amount.asLong();
+                if (amountMinor < 0 || amountMinor > DecisionInput.MAX_AMOUNT_MINOR) {
+                    throw new PolicyValidationException(path + ".amountMinor",
+                            "amountMinor must be between 0 and " + DecisionInput.MAX_AMOUNT_MINOR + " but was " + amountMinor);
+                }
+                return translating(path, () -> operator.equals("AMOUNT_AT_LEAST")
+                        ? new RuleExpression.AmountAtLeast(amountMinor)
+                        : new RuleExpression.AmountLessThan(amountMinor));
             }
             case "CURRENCY_IN" -> {
                 rejectUnknownFields(path, node, Set.of("operator", "currencies"));
-                return new RuleExpression.CurrencyIn(codeSet(path + ".currencies", node.get("currencies")));
+                Set<String> currencies = codeSet(path + ".currencies", node.get("currencies"), 3);
+                return translating(path + ".currencies", () -> new RuleExpression.CurrencyIn(currencies));
             }
             default -> {
                 rejectUnknownFields(path, node, Set.of("operator", "countries"));
-                Set<String> countries = codeSet(path + ".countries", node.get("countries"));
-                return operator.equals("COUNTRY_IN")
+                Set<String> countries = codeSet(path + ".countries", node.get("countries"), 2);
+                return translating(path + ".countries", () -> operator.equals("COUNTRY_IN")
                         ? new RuleExpression.CountryIn(countries)
-                        : new RuleExpression.CountryOutside(countries);
+                        : new RuleExpression.CountryOutside(countries));
             }
         }
     }
 
-    private static Set<String> codeSet(String path, JsonNode node) {
+    /**
+     * Runs a value-object construction, converting its input validation into a policy validation
+     * failure with a path.
+     *
+     * <p>Only {@link IllegalArgumentException} is translated, and only around constructing these
+     * immutable rule types, whose constructors exist precisely to reject bad input. Anything else
+     * propagates unchanged, so a programming error or a storage failure keeps its own classification
+     * rather than being reported to a caller as a bad request.
+     */
+    private static <T> T translating(String path, java.util.function.Supplier<T> construction) {
+        try {
+            return construction.get();
+        } catch (IllegalArgumentException rejected) {
+            throw new PolicyValidationException(path, rejected.getMessage());
+        }
+    }
+
+    /**
+     * @param length exact number of letters each code must have: 3 for a currency, 2 for a country
+     */
+    private static Set<String> codeSet(String path, JsonNode node, int length) {
         if (node == null || !node.isArray() || node.isEmpty()) {
             throw new PolicyValidationException(path, "must be a non-empty array of codes");
+        }
+        if (node.size() > MAX_CODE_SET) {
+            throw new PolicyValidationException(path,
+                    "at most " + MAX_CODE_SET + " codes are allowed but found " + node.size());
         }
         Set<String> values = new LinkedHashSet<>();
         for (JsonNode element : node) {
             if (!element.isTextual()) {
                 throw new PolicyValidationException(path, "codes must be strings");
             }
-            values.add(element.asText());
+            String code = element.asText().strip().toUpperCase(Locale.ROOT);
+            // Checked here so a malformed code is reported with its path rather than escaping from
+            // the expression's own constructor as an unchecked exception.
+            if (!code.matches("[A-Z]{" + length + "}")) {
+                throw new PolicyValidationException(path,
+                        "code " + element.asText() + " must contain exactly " + length + " ASCII letters");
+            }
+            values.add(code);
         }
         return values;
     }

@@ -24,15 +24,30 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 
 ## Verification record
 
-Local evidence recorded **2026-09-10 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
+Local evidence recorded **2026-09-11 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
 **3.9.1**.
 
-- Pinned-wrapper build and suite: **149 tests passed**, with **0 failures, 0 errors, and 0 skipped**
-  (86 domain and contract units, 4 architecture rules, 35 PostgreSQL integration tests, 24 tests
-  against both PostgreSQL and a real single-node broker). All 84 tests from the previous milestone are
+- Pinned-wrapper build and suite: **186 tests passed**, with **0 failures, 0 errors, and 0 skipped**
+  (107 domain and contract units, 4 architecture rules, 48 PostgreSQL integration tests, 27 tests
+  against both PostgreSQL and a real single-node broker). Every test from the earlier milestones is
   still present and passing.
-- Packaged application in the local Compose stack: `scripts/demo.sh` passed all **12 HTTP checks** and
-  `scripts/async-demo.sh` passed all **27 checks**.
+- A review-driven correction pass fixed five correctness defects and one inaccurate claim in this
+  ledger. Each correction has a regression test that failed before it and passes after; the failure
+  counts and the evidence are recorded in [verification.md](verification.md). The completed-checkpoint
+  count is unchanged: this was corrective work inside checkpoints 4 to 6, not new scope.
+  - Unhealthy health statuses answered HTTP 200, because a custom status mapping replaces Spring
+    Boot's defaults rather than adding to them. A readiness probe reported DOWN in its body while
+    returning a success code.
+  - A shadow worker whose claim had been taken over still committed its comparison, so a task could be
+    marked successful while its only stored comparison recorded a failure.
+  - An obsolete replay owner could commit results and item transitions, and completion was decided in
+    separate transactions from the totals it published.
+  - Event validation accepted values the consumer's own tables reject, so an unprocessable record was
+    retried as a transient storage outage and blocked its partition indefinitely.
+  - Invalid policy definitions reached the generic handler as HTTP 500 instead of the structured 400
+    contract.
+- Packaged application in the local Compose stack, rebuilt after the corrections: `scripts/demo.sh`
+  passed all **12 HTTP checks** and `scripts/async-demo.sh` passed all **27 checks**.
 - The asynchronous demo observed: a payment authorized with the broker container stopped; retained
   event intent with the breaker OPEN and `/actuator/health/async` DEGRADED while readiness stayed UP;
   delivery resuming after restart with the original event id and the breaker closing through its
@@ -73,8 +88,11 @@ These are known and deliberate, not oversights:
 - **A candidate policy is never authoritative.** There is no promotion workflow and no code path that
   could make one decide a real payment. That remains future work.
 - **Candidates cannot define new decision flags or move the outcome thresholds.** They vary rules only.
-- **A candidate score above 100 is capped** and the cap is recorded. Information above 100 is not
-  recoverable from the stored comparison.
+- **A candidate score above 100 is capped for the outcome decision, and the raw total is kept.**
+  Replay results and shadow comparisons store and return `candidateScore` (capped at 100),
+  `candidateRawScore` (the uncapped total), `candidateScoreCapped`, and every contributing reason, so
+  the excess is recoverable and the explanation reconciles against the raw total. Only the outcome
+  thresholds see the capped value.
 - **Shadow evaluation does not backfill.** It applies to authorizations observed while enabled; use a
   replay job for history.
 - **Replay membership omits a payment that was still uncommitted** when the job was created. This is a

@@ -6,6 +6,7 @@ import java.time.Clock;
 import org.springframework.boot.actuate.health.Health;
 import org.springframework.boot.actuate.health.HealthIndicator;
 import org.springframework.boot.actuate.health.Status;
+import org.springframework.dao.DataAccessException;
 import org.springframework.stereotype.Component;
 
 /**
@@ -43,6 +44,22 @@ public class AsyncDeliveryHealthIndicator implements HealthIndicator {
 
     @Override
     public Health health() {
+        try {
+            return describe();
+        } catch (DataAccessException databaseUnavailable) {
+            // This indicator reads the backlog from PostgreSQL. Letting the failure escape would
+            // abort the whole health document and surface a generic error response instead of a
+            // health status, so the inability to answer is reported as the answer. Asynchronous
+            // delivery genuinely cannot run without the database, hence DOWN rather than DEGRADED.
+            return Health.down()
+                    .withDetail("reason", "backlog state is unreadable because the database is unavailable")
+                    .withDetail("brokerBreaker", breaker.state().name())
+                    .withDetail("paymentApiAffected", false)
+                    .build();
+        }
+    }
+
+    private Health describe() {
         long pending = outbox.countByStatus("PENDING") + outbox.countByStatus("CLAIMED");
         long failed = outbox.countByStatus("FAILED");
         long ageSeconds = outbox.oldestUndeliveredAgeSeconds(clock.instant());

@@ -7,6 +7,9 @@ name: decisionrail-test
 services:
   test-database:
     image: postgres:16-alpine
+    # The suite keeps one cached Spring context per test configuration, each holding its own
+    # connection pool, so the default limit of 100 is reached well before the suite finishes.
+    command: ["postgres", "-c", "max_connections=400"]
     environment:
       POSTGRES_DB: decisionrail_test
       POSTGRES_USER: decisionrail

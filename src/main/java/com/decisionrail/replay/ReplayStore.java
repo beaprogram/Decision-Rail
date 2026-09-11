@@ -122,6 +122,32 @@ public class ReplayStore {
 
     public record ClaimedJob(UUID jobId, String merchantId, String candidateVersion, UUID leaseToken) {}
 
+    /**
+     * Takes a row lock on the job, but only if this worker still owns its lease.
+     *
+     * <p>Every path that writes results, moves item state, recomputes totals, or finalises the job
+     * must hold this first. Two things follow from it. A worker whose lease was taken over finds no
+     * row and must write nothing, so an obsolete owner cannot commit results or item transitions.
+     * And because {@link #claimJob} selects with {@code FOR UPDATE SKIP LOCKED}, a job with a batch
+     * in flight is skipped rather than handed to a second worker, so finalisation cannot observe
+     * totals that a concurrent batch is about to change.
+     *
+     * <p>Until now that second property held only by accident: inserting into replay_results takes a
+     * key-share lock on this row for its foreign key, which happens to block a concurrent claim. That
+     * is not a guarantee to rely on, since it disappears for a batch that inserts nothing.
+     *
+     * <p>Lock order is always this row first, then items and results, in every path.
+     *
+     * @return true while this worker still owns the job
+     */
+    public boolean lockOwnedJob(UUID jobId, UUID leaseToken) {
+        return !jdbc.queryForList("""
+                SELECT 1 FROM replay_jobs
+                WHERE id = ? AND lease_token = ? AND status = 'RUNNING'
+                FOR UPDATE
+                """, Integer.class, jobId, leaseToken).isEmpty();
+    }
+
     /** Claims a bounded batch of not-yet-processed items. */
     public List<ReplayItem> claimItems(UUID jobId, int limit) {
         return jdbc.query("""

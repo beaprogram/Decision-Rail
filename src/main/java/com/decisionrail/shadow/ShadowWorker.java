@@ -152,30 +152,43 @@ public class ShadowWorker {
 
     private enum Outcome { EVALUATED, FAILED, ALREADY_RECORDED, RETRY_SCHEDULED, LEASE_LOST }
 
+    /**
+     * What a completion attempt actually achieved.
+     *
+     * <p>{@code LOST_OWNERSHIP} is deliberately distinct from {@code DUPLICATE}. A duplicate means
+     * this worker still owns the task and a comparison for that candidate and payment already
+     * exists, which is the normal idempotent outcome of a redelivery. Lost ownership means the claim
+     * was taken over, and the correct response is to write nothing and leave the new owner alone.
+     */
+    private enum Completion { RECORDED, DUPLICATE, LOST_OWNERSHIP }
+
     private Outcome evaluate(ShadowTask task) {
         try {
             var snapshot = policies.snapshot(task.candidateVersion());
             // Injected delay and failure live here so slow and throwing candidates can be
             // exercised without a real misbehaving policy. Inert outside local and test config.
-            faults.beforeShadowEvaluation(task.paymentId());
+            faults.beforeShadowEvaluation(workerId, task.paymentId());
             DecisionInput input = new DecisionInput(task.amountMinor(), task.currency(), task.country());
             long startedAt = System.nanoTime();
             PolicyEvaluation evaluation = engine.evaluatePolicy(snapshot, input);
             long elapsedNanos = System.nanoTime() - startedAt;
             boolean diverged = !evaluation.outcome().name().equals(task.baselineOutcome());
-            boolean inserted = orFalse(transactions.execute(status -> {
-                boolean recorded = store.recordComparison(task, evaluation.outcome().name(), evaluation.score(),
-                        evaluation.rawScore(), evaluation.scoreCapped(), encodeReasons(evaluation.reasons()),
-                        diverged, elapsedNanos, null);
-                store.finishTask(task.eventId(), task.leaseToken(), "DONE", null, clock.instant());
-                return recorded;
-            }));
-            if (inserted) {
-                metrics.counter("decisionrail.shadow.comparisons", "diverged", Boolean.toString(diverged)).increment();
-                return Outcome.EVALUATED;
+            Completion completion = complete(task, "DONE", null, () -> store.recordComparison(task,
+                    evaluation.outcome().name(), evaluation.score(), evaluation.rawScore(),
+                    evaluation.scoreCapped(), encodeReasons(evaluation.reasons()), diverged, elapsedNanos, null));
+            switch (completion) {
+                case RECORDED -> {
+                    metrics.counter("decisionrail.shadow.comparisons", "diverged", Boolean.toString(diverged)).increment();
+                    return Outcome.EVALUATED;
+                }
+                case DUPLICATE -> {
+                    metrics.counter("decisionrail.shadow.duplicates").increment();
+                    return Outcome.ALREADY_RECORDED;
+                }
+                default -> {
+                    return lostOwnership(task);
+                }
             }
-            metrics.counter("decisionrail.shadow.duplicates").increment();
-            return Outcome.ALREADY_RECORDED;
         } catch (RuntimeException failure) {
             return recordFailure(task, failure);
         }
@@ -186,19 +199,50 @@ public class ShadowWorker {
         metrics.counter("decisionrail.shadow.failures").increment();
         if (task.attempts() >= maxAttempts) {
             // Terminal: record why, so a failed candidate is visible instead of silently missing.
-            boolean recorded = orFalse(transactions.execute(status -> {
-                boolean inserted = store.recordComparison(task, null, null, null, false, null, false, 0,
-                        truncate(failure.getClass().getSimpleName()));
-                store.finishTask(task.eventId(), task.leaseToken(), "FAILED", detail, clock.instant());
-                return inserted;
-            }));
+            Completion completion = complete(task, "FAILED", detail, () -> store.recordComparison(task,
+                    null, null, null, false, null, false, 0, truncate(failure.getClass().getSimpleName())));
+            if (completion == Completion.LOST_OWNERSHIP) {
+                return lostOwnership(task);
+            }
             log.warn("Shadow evaluation for payment {} failed terminally after {} attempts: {}",
                     task.paymentId(), task.attempts(), failure.getClass().getSimpleName());
-            return recorded ? Outcome.FAILED : Outcome.ALREADY_RECORDED;
+            return completion == Completion.RECORDED ? Outcome.FAILED : Outcome.ALREADY_RECORDED;
         }
         boolean scheduled = orFalse(transactions.execute(status ->
                 store.scheduleRetry(task.eventId(), task.leaseToken(), clock.instant().plus(retryDelay), detail)));
         return scheduled ? Outcome.RETRY_SCHEDULED : Outcome.LEASE_LOST;
+    }
+
+    /**
+     * Writes the comparison and the task transition under the task's ownership lock, in one
+     * transaction.
+     *
+     * <p>The lock is taken first and the comparison is written only if it succeeds, so a worker
+     * whose claim was taken over commits nothing: no comparison, no task change. Without this, a
+     * stale worker's comparison committed even though its lease-fenced task update matched no rows,
+     * which left a task marked DONE by the new owner while the only stored comparison recorded the
+     * stale worker's failure.
+     */
+    private Completion complete(ShadowTask task, String state, String error, java.util.function.BooleanSupplier write) {
+        Completion result = transactions.execute(status -> {
+            if (!store.lockOwnedTask(task.eventId(), task.leaseToken())) {
+                return Completion.LOST_OWNERSHIP;
+            }
+            boolean inserted = write.getAsBoolean();
+            if (!store.finishTask(task.eventId(), task.leaseToken(), state, error, clock.instant())) {
+                // Unreachable while the lock is held: the row matched the same predicate moments ago.
+                throw new IllegalStateException("Shadow task " + task.eventId() + " changed owner while locked");
+            }
+            return inserted ? Completion.RECORDED : Completion.DUPLICATE;
+        });
+        return result == null ? Completion.LOST_OWNERSHIP : result;
+    }
+
+    private Outcome lostOwnership(ShadowTask task) {
+        metrics.counter("decisionrail.shadow.ownership.lost").increment();
+        log.warn("Shadow task {} for payment {} was taken over by another worker; discarding this result",
+                task.eventId(), task.paymentId());
+        return Outcome.LEASE_LOST;
     }
 
     private String encodeReasons(List<ReasonContribution> reasons) {
