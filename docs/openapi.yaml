@@ -34,6 +34,19 @@ info:
     creation and cannot call merchant APIs. Privileged routes are matched before the broad
     merchant rule so they cannot fall through to it. The local server uses loopback HTTP.
     Any public deployment must provide TLS.
+
+    There are two audiences and two security chains. Scripts and integrations use /v1 with
+    stateless Basic auth, unchanged. The operator dashboard uses /ui with a server-managed
+    session cookie and CSRF protection, because a cookie is attached automatically by the
+    browser and a request that a cookie authenticates can be forged from another origin. The
+    two are deliberately separate: a session cookie buys nothing on /v1, and Basic credentials
+    are not accepted on /ui. The same identities and the same authority boundaries apply on
+    both. Every /ui endpoint delegates to the same services /v1 uses; no payment command is
+    implemented twice.
+
+    The compiled dashboard is served from /dashboard on the same origin. Its single-page
+    fallback is scoped to that prefix only, so an unknown or denied API path keeps its own
+    status code and never becomes HTML with 200.
 servers:
   - url: http://localhost:8080
     description: Local synthetic demo only
@@ -993,6 +1006,328 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/AsyncDeliveryHealth'
+  /ui/identity:
+    get:
+      operationId: readBrowserIdentity
+      tags: [Browser session]
+      summary: Who the browser is signed in as, and what that identity may do
+      description: |
+        Reachable without authentication, so the dashboard can tell "not signed in" from "something
+        went wrong" and show a sign-in screen rather than an error. This is also the request during
+        which the CSRF cookie is issued, which a later sign-in needs.
+
+        The capabilities object exists so the dashboard can avoid offering an action that would be
+        refused. It is presentation, not authorisation: every endpoint enforces its own rule, and a
+        forged capability flag grants nothing.
+      security: []
+      responses:
+        '200':
+          description: The current identity, or an anonymous one
+          headers:
+            Cache-Control:
+              description: Always no-store. An identity must never be served from a cache.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Identity'
+  /ui/session:
+    post:
+      operationId: browserSignIn
+      tags: [Browser session]
+      summary: Start a browser session
+      description: |
+        Form-encoded, because this posts to Spring Security's own login filter. That is deliberate:
+        session fixation protection and CSRF token rotation on authentication come from the framework
+        rather than from hand-written code.
+
+        Requires the CSRF token issued by GET /ui/identity, echoed in X-XSRF-TOKEN. A refusal here
+        means the credentials are wrong, which the dashboard reports differently from an expired
+        session.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: Signed in. The response is the new identity and its capabilities.
+          headers:
+            Set-Cookie:
+              description: |
+                A new session id, HttpOnly and SameSite=Lax, plus a rotated CSRF token. Secure is set
+                when SESSION_COOKIE_SECURE is true, which any HTTPS deployment must do.
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Identity'
+        '401':
+          description: The username or password is not correct
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 401
+                code: AUTHENTICATION_FAILED
+                detail: The username or password is not correct.
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+    delete:
+      operationId: browserSignOut
+      tags: [Browser session]
+      summary: End the browser session on the server
+      description: |
+        A real logout: the session is destroyed server-side and its cookies cleared, so a copied
+        cookie cannot be replayed afterwards. CSRF-protected like any other state change.
+      responses:
+        '204':
+          description: Signed out
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/CsrfRejected'
+  /ui/accounts:
+    get:
+      operationId: listBrowserAccounts
+      tags: [Browser session]
+      summary: Accounts owned by the signed-in merchant
+      description: |
+        Bounded to 100. Exists so the dashboard never has to be told which accounts a merchant may
+        use; ownership comes from authentication and is part of the query.
+      responses:
+        '200':
+          description: Accounts, oldest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Account'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /ui/payments:
+    get:
+      operationId: searchBrowserPayments
+      tags: [Browser session]
+      summary: Authoritative, merchant-scoped payment search
+      description: |
+        Reads the payments table rather than the asynchronous activity projection, so a payment is
+        findable as soon as its transaction commits and stays findable while the broker is down and
+        nothing has been delivered.
+
+        Ordering is created_at DESC, id DESC. Paging is by opaque keyset cursor rather than offset,
+        because payments are created continuously and an offset shifts under the reader: a row inserted
+        during paging would push everything down and the next page would silently skip a payment. A
+        malformed cursor is rejected rather than ignored, so paging cannot silently restart and return
+        rows the caller has already seen.
+
+        Every filter is an enumerated value, a UUID, or an instant, validated before it reaches SQL and
+        bound as a parameter. An unsupported value is a 400, never a silently dropped filter.
+      parameters:
+        - name: paymentId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: accountId
+          in: query
+          schema: { type: string, format: uuid }
+        - name: status
+          in: query
+          description: One or more payment statuses, comma separated
+          schema: { type: string }
+          example: AUTHORIZED,CAPTURED
+        - name: riskOutcome
+          in: query
+          description: One or more stored risk outcomes, comma separated. Not the same thing as status.
+          schema: { type: string }
+          example: REVIEW,DECLINE
+        - name: currency
+          in: query
+          schema: { type: string, enum: [CAD, USD] }
+        - name: createdFrom
+          in: query
+          description: Inclusive lower bound on creation time, ISO-8601
+          schema: { type: string, format: date-time }
+        - name: createdTo
+          in: query
+          description: Inclusive upper bound on creation time, ISO-8601
+          schema: { type: string, format: date-time }
+        - name: limit
+          in: query
+          description: Page size, 1 to 200. Outside that range is a 400, not a clamp.
+          schema: { type: integer, default: 25, minimum: 1, maximum: 200 }
+        - name: cursor
+          in: query
+          description: Opaque position from a previous page's nextCursor
+          schema: { type: string }
+      responses:
+        '200':
+          description: One bounded page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentSearchPage'
+        '400':
+          description: A filter value or cursor was not accepted
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 400
+                code: INVALID_SEARCH_REQUEST
+                detail: Unsupported payment status SETTLED.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /ui/payments/{id}/timeline:
+    get:
+      operationId: readBrowserPaymentTimeline
+      tags: [Browser session]
+      summary: A payment's lifecycle, with each kind of evidence kept distinct
+      description: |
+        Assembled from records that can actually answer what happened in what order: the audit trail
+        written inside each payment transaction, the outbox rows with their durable per-payment
+        sequence, and each consumer group's own deduplication records.
+
+        Three things stay separate because collapsing them would misinform an operator. Committed is
+        when the payment transaction wrote the event intent, and is the only stage certain for every
+        listed event. Published is a broker acknowledgement and does not mean any consumer processed
+        the event. Consumed is per consumer group; a group absent from an event's list has not recorded
+        it, which is different from having failed.
+
+        Nothing is interpolated. An unpublished event has no publication timestamp rather than an
+        invented one, and no transition is synthesised to fill a gap. Bounded to 200 events and 200
+        commands. Failure detail is reduced to an exception type: diagnostic text is administrative and
+        appears on the failed-event list instead.
+      parameters:
+        - $ref: '#/components/parameters/PaymentId'
+      responses:
+        '200':
+          description: The payment's lifecycle
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentTimeline'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /ui/ops/delivery:
+    get:
+      operationId: readBrowserDeliveryStatus
+      tags: [Browser session]
+      summary: Delivery health as three distinct signals, plus backlog detail
+      description: |
+        ADMIN only. Liveness, readiness and asynchronous capability stay separate answers because they
+        mean different things: readiness excludes the broker, so a broker outage degrades the
+        asynchronous signal while readiness correctly stays up and payment traffic keeps arriving.
+      responses:
+        '200':
+          description: Current delivery status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeliveryStatus'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /ui/ops/outbox/failed:
+    get:
+      operationId: listBrowserFailedEvents
+      tags: [Browser session]
+      summary: Terminally failed events, with enough detail to choose a redrive target
+      description: |
+        ADMIN only. Aggregate counts cannot be inspected or acted on; this is the list an operator
+        needs. Oldest first, because the oldest terminal failure for a payment is the one blocking its
+        stream. blocksLaterEvents marks the failures holding a whole payment stream.
+
+        Carries the stored failure detail in full, bounded to 500 characters by the schema. That is
+        administrative diagnostic text and deliberately does not appear on the merchant timeline.
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, default: 25, minimum: 1, maximum: 100 }
+        - name: offset
+          in: query
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        '200':
+          description: One page of failed events
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FailedEventPage'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /ui/ops/outbox/redrive:
+    post:
+      operationId: browserRedrive
+      tags: [Browser session]
+      summary: Redrive an explicit selection of failed events
+      description: |
+        ADMIN only, and unlike the scripted API this refuses a request with no target at all. In a
+        browser an empty filter set is almost always a mistake rather than an instruction to redrive
+        everything that has ever failed, and the cost of that mistake is a large burst of redelivery.
+
+        Event identity, payload and per-payment ordering are untouched: a redriven event is
+        deduplicated by consumers exactly like any other redelivery, and a later event still waits for
+        its predecessor to publish.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              description: Supply eventIds, or a paymentId to redrive every failed event for one payment.
+              properties:
+                paymentId: { type: string, format: uuid }
+                eventIds:
+                  type: array
+                  maxItems: 500
+                  items: { type: string, format: uuid }
+      responses:
+        '200':
+          description: What was redriven and what remains
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RedriveResult'
+        '400':
+          description: No target was supplied
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                status: 400
+                code: REDRIVE_TARGET_REQUIRED
+                detail: Select specific events or a payment to redrive. Redriving every failed event is not offered here.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 components:
   securitySchemes:
     merchantBasic:
@@ -1151,6 +1486,20 @@ components:
         application/problem+json:
           schema:
             $ref: '#/components/schemas/Problem'
+    CsrfRejected:
+      description: |
+        The request could not be verified as coming from the dashboard. Every state-changing browser
+        request must carry the CSRF token issued in the XSRF-TOKEN cookie, echoed in X-XSRF-TOKEN. A
+        missing or wrong token is refused, which is what stops another origin driving a mutation with
+        the user's session cookie.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            status: 403
+            code: CSRF_TOKEN_INVALID
+            detail: The request could not be verified as coming from the dashboard. Reload and try again.
     ReplayJobNotFound:
       description: |
         No replay job with this identifier belongs to the authenticated merchant. A job owned by
@@ -2029,6 +2378,225 @@ components:
           type: object
           additionalProperties: true
       additionalProperties: true
+    Identity:
+      type: object
+      required: [authenticated, roles, capabilities]
+      properties:
+        authenticated:
+          type: boolean
+          description: False for an anonymous caller, so the page can show a sign-in screen rather than an error
+        username:
+          type: [string, 'null']
+        roles:
+          type: array
+          items: { type: string }
+          example: [ROLE_MERCHANT]
+        capabilities:
+          $ref: '#/components/schemas/Capabilities'
+    Capabilities:
+      type: object
+      description: |
+        What the signed-in identity may do, derived on the server from its roles. Presentation only:
+        the dashboard uses these to avoid offering an action that would be refused, and every endpoint
+        enforces its own rule regardless. OPERATIONS has every flag false except viewMetrics; it stays
+        the metrics-only identity.
+      properties:
+        viewPayments: { type: boolean }
+        createPayments: { type: boolean }
+        viewAccounts: { type: boolean }
+        viewPolicies: { type: boolean }
+        registerPolicies: { type: boolean }
+        viewReplay: { type: boolean }
+        createReplay: { type: boolean }
+        viewShadowComparisons: { type: boolean }
+        administerDelivery: { type: boolean }
+        configureShadow: { type: boolean }
+        viewMetrics: { type: boolean }
+    PaymentSummary:
+      type: object
+      description: |
+        One search result. riskOutcome is the stored risk decision and is a different fact from status:
+        a DECLINED payment with an APPROVE riskOutcome was declined for insufficient funds, which
+        failureCode names.
+      required: [id, accountId, amountMinor, currency, country, status, riskOutcome, riskScore, policyVersion, createdAt, updatedAt]
+      properties:
+        id: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        amountMinor:
+          $ref: '#/components/schemas/PaymentAmount'
+        currency:
+          $ref: '#/components/schemas/Currency'
+        country: { type: string, example: CA }
+        status: { type: string, enum: [AUTHORIZED, CAPTURED, VOIDED, DECLINED, REVIEW] }
+        riskOutcome: { type: string, enum: [APPROVE, REVIEW, DECLINE] }
+        riskScore: { type: integer, minimum: 0, maximum: 100 }
+        policyVersion: { type: string, example: demo-v1 }
+        failureCode: { type: [string, 'null'], example: INSUFFICIENT_FUNDS }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+    PaymentSearchPage:
+      type: object
+      required: [payments, matchedCount, matchedCountCapped, matchedCountLimit]
+      properties:
+        payments:
+          type: array
+          items:
+            $ref: '#/components/schemas/PaymentSummary'
+        nextCursor:
+          type: [string, 'null']
+          description: Opaque position for the next page, or null at the end
+        matchedCount:
+          type: integer
+          format: int64
+          description: Matches for the current filters, counted only up to matchedCountLimit
+        matchedCountCapped:
+          type: boolean
+          description: |
+            True when counting stopped at its limit, so the real total is at least matchedCount. An
+            exact total would mean scanning every matching row on every page request, which is the one
+            part of a search that cannot be bounded; reporting "at least" is honest and cheap.
+        matchedCountLimit:
+          type: integer
+    PaymentTimeline:
+      type: object
+      required: [paymentId, accountId, status, createdAt, updatedAt, commands, events]
+      properties:
+        paymentId: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        status: { type: string, enum: [AUTHORIZED, CAPTURED, VOIDED, DECLINED, REVIEW] }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        commands:
+          type: array
+          description: Accepted commands, from the audit record written inside each payment transaction
+          items:
+            type: object
+            properties:
+              action: { type: string, example: payment.authorized.v1 }
+              occurredAt: { type: string, format: date-time }
+        events:
+          type: array
+          description: Lifecycle events in durable per-payment sequence order
+          items:
+            $ref: '#/components/schemas/TimelineEvent'
+        projection:
+          oneOf:
+            - $ref: '#/components/schemas/TimelineProjection'
+            - type: 'null'
+          description: |
+            The read model's current state, or null when no event for this payment has been projected.
+            Null does not mean the payment is incomplete: the payment record is authoritative either way.
+    TimelineEvent:
+      type: object
+      required: [eventId, sequence, eventType, committedAt, deliveryStatus, attempts, consumers]
+      properties:
+        eventId: { type: string, format: uuid }
+        sequence:
+          type: integer
+          format: int64
+          description: Durable per-payment sequence. This is what establishes order.
+        eventType: { type: string }
+        committedAt:
+          type: string
+          format: date-time
+          description: When the payment transaction wrote the event intent
+        deliveryStatus: { type: string, enum: [PENDING, CLAIMED, PUBLISHED, FAILED] }
+        publishedAt:
+          type: [string, 'null']
+          format: date-time
+          description: |
+            Broker acknowledgement time, or null. Null means not published; it is never filled with an
+            approximation. A publication time does not imply any consumer has processed the event.
+        attempts: { type: integer }
+        brokerPartition: { type: [integer, 'null'] }
+        brokerOffset: { type: [integer, 'null'], format: int64 }
+        lastFailureKind:
+          type: [string, 'null']
+          description: |
+            The most recent failure's exception type only. Deliberately not the stored message, which is
+            administrative diagnostic text and appears on the failed-event list instead.
+        consumers:
+          type: array
+          description: |
+            Consumer groups that have recorded this event, from their own deduplication records. A group
+            absent here has not recorded it, which is different from having failed.
+          items:
+            type: object
+            properties:
+              consumerGroup: { type: string }
+              consumedAt: { type: string, format: date-time }
+    TimelineProjection:
+      type: object
+      properties:
+        lastStatus: { type: string }
+        lastEventType: { type: string }
+        lastSequence: { type: integer, format: int64 }
+        appliedEventCount: { type: integer }
+        firstEventAt: { type: string, format: date-time }
+        lastEventAt: { type: string, format: date-time }
+    DeliveryStatus:
+      type: object
+      required: [liveness, readiness, asyncDelivery, breakerState, countsByStatus]
+      properties:
+        liveness: { type: string, example: UP }
+        readiness:
+          type: string
+          description: Includes the database and excludes the broker, so a broker outage does not take a correct payment API out of rotation
+          example: UP
+        asyncDelivery: { type: string, enum: [UP, DEGRADED, DOWN] }
+        breakerState: { type: string, enum: [CLOSED, HALF_OPEN, OPEN] }
+        countsByStatus:
+          type: object
+          additionalProperties: { type: integer, format: int64 }
+        oldestPendingAt: { type: [string, 'null'], format: date-time }
+        oldestPendingAgeSeconds: { type: integer, format: int64 }
+        blockedPaymentCount:
+          type: integer
+          format: int64
+          description: Payments whose later events cannot be delivered until an earlier failure is resolved
+    FailedEvent:
+      type: object
+      required: [eventId, paymentId, merchantId, eventType, aggregateSequence, attempts, occurredAt, blocksLaterEvents]
+      properties:
+        eventId: { type: string, format: uuid }
+        paymentId: { type: string, format: uuid }
+        merchantId: { type: string }
+        eventType: { type: string }
+        aggregateSequence: { type: integer, format: int64 }
+        attempts: { type: integer }
+        occurredAt: { type: string, format: date-time }
+        lastAttemptAt: { type: [string, 'null'], format: date-time }
+        lastError:
+          type: [string, 'null']
+          description: Stored failure detail, bounded to 500 characters. Administrative; not shown to merchants.
+        blocksLaterEvents:
+          type: boolean
+          description: |
+            True when this payment has further unpublished events queued behind this one. Redriving only
+            a later event cannot help while an earlier one is still failed.
+    FailedEventPage:
+      type: object
+      required: [events, offset, limit, hasMore, totalFailed]
+      properties:
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/FailedEvent'
+        offset: { type: integer }
+        limit: { type: integer }
+        hasMore: { type: boolean }
+        totalFailed: { type: integer, format: int64 }
+    RedriveResult:
+      type: object
+      required: [redrivenCount, redrivenEventIds, stillBlockedPaymentCount, remainingFailedCount]
+      properties:
+        redrivenCount: { type: integer }
+        redrivenEventIds:
+          type: array
+          items: { type: string, format: uuid }
+          description: Original event identities. Redrive never mints replacement events.
+        stillBlockedPaymentCount: { type: integer, format: int64 }
+        remainingFailedCount: { type: integer, format: int64 }
     Health:
       type: object
       required: [status]

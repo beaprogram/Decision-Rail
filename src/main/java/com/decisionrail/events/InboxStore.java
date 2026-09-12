@@ -1,5 +1,8 @@
 package com.decisionrail.events;
 
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
@@ -114,6 +117,26 @@ public class InboxStore {
                 FROM payment_activity WHERE merchant_id = ?
                 ORDER BY last_event_at DESC, payment_id LIMIT ?
                 """, InboxStore::mapActivity, merchantId, limit);
+    }
+
+    /**
+     * Which consumer groups have recorded each of a payment's events, from their own deduplication
+     * records.
+     *
+     * <p>A group absent from an event's list has not recorded that event. That is different from the
+     * group having failed, and different again from the event not having been published, so the
+     * timeline presents the three separately rather than inferring one from another.
+     */
+    public Map<UUID, List<ConsumptionRecordView>> consumptionsForPayment(UUID aggregateId, int limit) {
+        Map<UUID, List<ConsumptionRecordView>> byEvent = new LinkedHashMap<>();
+        jdbc.query("""
+                SELECT event_id, consumer_group, consumed_at FROM consumed_events
+                WHERE aggregate_id = ? ORDER BY aggregate_sequence, consumer_group LIMIT ?
+                """, rs -> {
+            byEvent.computeIfAbsent(rs.getObject(1, UUID.class), key -> new ArrayList<>())
+                    .add(new ConsumptionRecordView(rs.getString(2), rs.getTimestamp(3).toInstant()));
+        }, aggregateId, limit);
+        return byEvent;
     }
 
     public long consumedCount(String group, UUID aggregateId) {

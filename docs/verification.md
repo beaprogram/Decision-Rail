@@ -17,6 +17,29 @@ KAFKA_BOOTSTRAP_SERVERS=127.0.0.1:19092 \
   ./mvnw --batch-mode --no-transfer-progress verify
 ```
 
+`verify` also typechecks, lints, unit-tests and builds the dashboard, using a Node toolchain the build
+downloads and pins, and copies the bundle into the jar. Use `-Dskip.frontend=true` for fast Java-only
+iteration; the resulting jar then has no dashboard, which is why it is not the default.
+
+### Browser tests
+
+These need the application actually running, because they drive a real browser against it:
+
+```bash
+# A running stack with the dashboard in it.
+DB_PORT=55434 KAFKA_PORT=19093 BACKEND_PORT=8080 docker compose up --build -d
+
+cd frontend
+npm ci
+npx playwright install chromium
+set -a; source ../.env; set +a          # the tests use the real identities
+COMPOSE_FILE_PATH=../compose.yaml npx playwright test
+```
+
+The suite stops and restarts the broker container to produce a real outage, which is why it needs the
+Compose file. The application deliberately exposes no endpoint that could do that. Set
+`SCREENSHOT_DIR` to collect screenshots of each completed screen.
+
 Those are also the test profile's defaults, so `./mvnw verify` alone works once the stack is up.
 
 To reset the stack between runs:
@@ -39,7 +62,7 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 Recorded **2026-09-11 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw verify` passed **186 tests** with **0 failures, 0 errors, and 0 skipped**:
+`./mvnw verify` passed **209 backend tests** with **0 failures, 0 errors, and 0 skipped**:
 
 | Group | Tests | Infrastructure |
 | --- | --- | --- |
@@ -47,6 +70,34 @@ Recorded **2026-09-11 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Ka
 | Architecture rules | 4 | None |
 | PostgreSQL integration | 48 | Real PostgreSQL, including health status codes, worker takeover races, and the migration upgrade check |
 | PostgreSQL and Kafka integration | 27 | Real PostgreSQL and a real single-node broker |
+| Browser authentication | 11 | Real HTTP and a real cookie jar, not MockMvc: cookie attributes, CSRF round trips, and session identity only exist once a real client and container exchange headers |
+| Dashboard read APIs | 12 | Real PostgreSQL: search, filters, keyset paging, timeline, failed events, and tenant isolation on every route |
+
+The frontend adds **17 unit tests** covering exact money conversion and idempotent command handling,
+and **30 browser end-to-end tests** run by a real Chromium against the packaged application with real
+PostgreSQL and Kafka.
+
+### Browser verification
+
+These are integration tests, not unit tests with a fake network. Exactly one response is intercepted
+in the whole suite, to hold a request open while the signed-in identity changes, and even there the
+response itself is the server's own.
+
+| Case | Evidence | Failure prevented |
+| --- | --- | --- |
+| Sign in, wrong password, sign out, expiry | The refusal names neither half of the credential; expiry clears the screen and asks again | A failed login reported as an expired session, or tenant rows surviving a sign-out |
+| Two-merchant isolation including a late response | A held response for the previous identity never lands on the next one's screen | One tenant's data decorating another's dashboard after a switch |
+| Authorization and its stored explanation | Outcome, score, policy version and reason contributions, read from the stored decision | A recomputed explanation that no longer matches what was applied |
+| Capture and void on separate eligible payments | Confirmation restates the concrete payment and amount; the journal appears after capture | A confirmation that says only "are you sure" |
+| Search, filters, paging, timeline, deep-link refresh | Filters live in the URL and survive a reload; pages do not overlap | A shareable view that resets, or paging that skips rows |
+| Candidate registration and validation errors | The server's JSON path is shown for a rejected definition | An input error presented as a server fault |
+| Replay to completion and comparison | Baseline and candidate explanations side by side, denominator stated | A completed job whose report was fetched while it was still running |
+| Shadow divergence | Candidate DECLINE alongside a live APPROVE, with the payment untouched | A candidate outcome mistaken for a real one |
+| Failed-event inspection and redrive | An isolated failed event created during an outage, redriven from an explicit selection | An empty filter becoming "redrive everything" |
+| Rejected CSRF mutations | A cookie-authenticated POST with no token, and with a wrong one, are both refused | Another origin driving a payment with the user's session |
+| Broker outage presentation | Payments authorize and read normally while delivery reports DEGRADED | A broker outage presented as a payment failure |
+| Loading, empty, unavailable, conflict states | Each has its own presentation; a null rate reads "Not available", never zero | An absent measurement rendered as a real one |
+| Narrow width, keyboard, labels, dialogs | No horizontal page scroll at 390px, every control labelled, focus visible, Escape closes without acting | A console that cannot be operated without a mouse |
 
 Every test from the earlier milestones is still present and passing. Two assertions were **strengthened**, not relaxed: two policy checks previously accepted any `IllegalArgumentException` for an invalid document and now require the structured validation failure with its JSON path, because the old expectation encoded the defect that such inputs were reported as server faults.
 
@@ -72,7 +123,7 @@ Two environmental details were corrected while adding these tests, both test-onl
 - **The disposable test database now allows 400 connections.** The suite keeps one cached Spring context per test configuration for the whole run, each with its own pool, and the added classes pushed the total past the server's default of 100. The test profile's pool is also reduced to 6, which is ample for its concurrency checks.
 - **A freshly enqueued row is not claimed by a cycle run in the same millisecond.** The row takes its due time from the database clock while the worker compares it against the JVM clock, and the two differ by a few milliseconds in a container. Tests that drive a single cycle backdate the due time rather than depending on that agreement. Production is unaffected: the workers poll continuously.
 
-Both demo scripts passed against the packaged application in the local Compose stack after these corrections: `scripts/demo.sh` (**12 HTTP checks**) and `scripts/async-demo.sh` (**27 checks**). The asynchronous demo observed a payment authorized with the broker container stopped, the breaker OPEN with `/actuator/health/async` DEGRADED while readiness stayed UP, delivery resuming after restart with the original event id and the breaker closing again, a projection applied count that stayed at 1 after the same event was delivered twice more, a replay job whose membership stayed at 4 inputs when a later payment committed, a 409 when a policy version id was rebound to different content, and a shadow divergence (live APPROVE, candidate DECLINE at score 60) after which the balance was unchanged and held funds moved only by the new authorization's own hold.
+Both demo scripts passed against the packaged application in the local Compose stack: `scripts/demo.sh` (**12 HTTP checks**) and `scripts/async-demo.sh` (**27 checks**). The browser suite passed **30 of 30** against that same packaged application. The asynchronous demo observed a payment authorized with the broker container stopped, the breaker OPEN with `/actuator/health/async` DEGRADED while readiness stayed UP, delivery resuming after restart with the original event id and the breaker closing again, a projection applied count that stayed at 1 after the same event was delivered twice more, a replay job whose membership stayed at 4 inputs when a later payment committed, a 409 when a policy version id was rebound to different content, and a shadow divergence (live APPROVE, candidate DECLINE at score 60) after which the balance was unchanged and held funds moved only by the new authorization's own hold.
 
 ## Failure cases and rationale
 

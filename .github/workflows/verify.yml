@@ -16,7 +16,7 @@ concurrency:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     # PostgreSQL and Kafka come from compose.test.yaml rather than workflow service
     # containers, so CI runs the same infrastructure definition the documented local
     # workflow uses. Infrastructure behaviour is never skipped: if either dependency is
@@ -41,6 +41,13 @@ jobs:
           cache-dependency-path: |
             pom.xml
             .mvn/wrapper/maven-wrapper.properties
+      # Node is installed here for the browser tests only. The Maven build downloads and pins its own
+      # Node for compiling the dashboard, so the bundle in the jar does not depend on this one.
+      - uses: actions/setup-node@v6.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
       - name: Start dedicated PostgreSQL and Kafka
         run: docker compose -f compose.test.yaml up -d --wait --wait-timeout 240
       - name: Compile, test, and package
@@ -68,6 +75,21 @@ jobs:
           COMPOSE_FILE_PATH=compose.test.yaml BROKER_SERVICE=test-broker \
             DATABASE_SERVICE=test-database DATABASE_NAME=decisionrail_test \
             ADMIN_PASSWORD="$ADMIN_PASSWORD" ./scripts/async-demo.sh
+      # Browser verification runs against that same packaged container and the same real PostgreSQL
+      # and Kafka. It is not a smoke test with mocked responses: it signs in, authorizes, captures,
+      # replays a candidate policy, and stops the broker to see delivery degrade.
+      - name: Install browser
+        run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
+        working-directory: frontend
+      - name: Run browser end-to-end tests
+        working-directory: frontend
+        env:
+          DASHBOARD_BASE_URL: http://localhost:8080
+          COMPOSE_FILE_PATH: ../compose.test.yaml
+          BROKER_SERVICE: test-broker
+          DATABASE_SERVICE: test-database
+          DATABASE_NAME: decisionrail_test
+        run: npx playwright test
       - name: Show container logs on failure
         if: failure()
         run: |
@@ -93,3 +115,15 @@ jobs:
             target/failsafe-reports/
           if-no-files-found: ignore
           retention-days: 7
+      # Kept only for a failure, and only briefly: a browser trace can contain session cookies and
+      # tenant data, so it is never committed and not retained longer than it takes to diagnose.
+      - name: Save browser report on failure
+        if: failure()
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: browser-report
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          if-no-files-found: ignore
+          retention-days: 3

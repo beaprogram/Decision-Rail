@@ -148,6 +148,10 @@ class MalformedEventPartitionTest {
         Waits.until("its offset is committed", BUDGET,
                 () -> BrokerProbe.committedOffset(PROJECTION_GROUP, TOPIC, PARTITION) > 0);
         long settledOffset = BrokerProbe.committedOffset(PROJECTION_GROUP, TOPIC, PARTITION);
+        // Sibling tests in this class quarantine records of their own, so this compares against a
+        // baseline captured here rather than against a class-wide total. Assertions that assume an
+        // empty table make a test depend on the order its siblings happened to run in.
+        long quarantinedBeforeFault = quarantineCountFor(PROJECTION_GROUP);
 
         String trigger = "test_block_quarantine_" + UUID.randomUUID().toString().replace("-", "");
         jdbc.execute("CREATE FUNCTION " + trigger + "() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN "
@@ -161,14 +165,17 @@ class MalformedEventPartitionTest {
             // Holding the partition is the correct outcome: skipping would lose the event silently.
             Waits.neverDuring("the offset advances while quarantine cannot be persisted", Duration.ofSeconds(8),
                     () -> BrokerProbe.committedOffset(PROJECTION_GROUP, TOPIC, PARTITION) > settledOffset);
-            assertThat(quarantineCountFor(PROJECTION_GROUP)).isZero();
+            assertThat(quarantineCountFor(PROJECTION_GROUP))
+                    .as("no new quarantine row can exist while the insert is failing")
+                    .isEqualTo(quarantinedBeforeFault);
         } finally {
             jdbc.execute("DROP TRIGGER IF EXISTS " + trigger + " ON consumer_quarantine");
             jdbc.execute("DROP FUNCTION IF EXISTS " + trigger + "()");
         }
 
         // Once storage recovers, the same record is quarantined and progress resumes. Nothing was lost.
-        Waits.until("the refusal is recorded after storage recovers", BUDGET, () -> quarantineCountFor(PROJECTION_GROUP) > 0);
+        Waits.until("the refusal is recorded after storage recovers", BUDGET,
+                () -> quarantineCountFor(PROJECTION_GROUP) > quarantinedBeforeFault);
         Waits.until("the offset advances after storage recovers", BUDGET,
                 () -> BrokerProbe.committedOffset(PROJECTION_GROUP, TOPIC, PARTITION) > settledOffset);
         assertThat(projectionExists(refused)).isFalse();

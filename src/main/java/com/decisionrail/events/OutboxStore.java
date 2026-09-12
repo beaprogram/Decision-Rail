@@ -230,6 +230,65 @@ public class OutboxStore {
         return new OutboxBacklog(Map.copyOf(counts), oldestAt, ageSeconds, blocked == null ? 0 : blocked, breakerState);
     }
 
+    /**
+     * One payment's events in lifecycle order, with their delivery state.
+     *
+     * <p>Ordered by the durable per-payment sequence, which is the only thing that establishes order.
+     * The failure detail is reduced to its exception type: the full stored message is administrative
+     * diagnostic text and does not belong in a merchant-facing response.
+     */
+    public List<DeliveryRecordView> eventsForPayment(UUID aggregateId, int limit) {
+        return jdbc.query("""
+                SELECT id, aggregate_sequence, event_type, occurred_at, status, published_at, attempts,
+                       broker_partition, broker_offset, last_error
+                FROM outbox_events WHERE aggregate_id = ?
+                ORDER BY aggregate_sequence LIMIT ?
+                """, (rs, n) -> new DeliveryRecordView(
+                        rs.getObject(1, UUID.class), rs.getLong(2), rs.getString(3),
+                        rs.getTimestamp(4).toInstant(), rs.getString(5),
+                        rs.getTimestamp(6) == null ? null : rs.getTimestamp(6).toInstant(),
+                        rs.getInt(7), (Integer) rs.getObject(8), (Long) rs.getObject(9),
+                        failureKind(rs.getString(10))),
+                aggregateId, limit);
+    }
+
+    /**
+     * Terminally failed events, oldest first, for administrative inspection.
+     *
+     * <p>Oldest first because the oldest terminal failure is the one blocking its payment's stream.
+     * {@code blocksLaterEvents} reports whether that payment has further unpublished events queued
+     * behind this one, which is what tells an operator that redriving this event unblocks a stream
+     * rather than just clearing one row.
+     */
+    public List<FailedEventView> failedEvents(int limit, int offset) {
+        return jdbc.query("""
+                SELECT failed.id, failed.aggregate_id, failed.merchant_id, failed.event_type,
+                       failed.aggregate_sequence, failed.attempts, failed.occurred_at,
+                       failed.last_attempt_at, failed.last_error,
+                       EXISTS (SELECT 1 FROM outbox_events later
+                               WHERE later.aggregate_id = failed.aggregate_id
+                                 AND later.aggregate_sequence > failed.aggregate_sequence
+                                 AND later.status <> 'PUBLISHED') AS blocks_later
+                FROM outbox_events failed
+                WHERE failed.status = 'FAILED'
+                ORDER BY failed.occurred_at, failed.id
+                LIMIT ? OFFSET ?
+                """, (rs, n) -> new FailedEventView(
+                        rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getString(3), rs.getString(4),
+                        rs.getLong(5), rs.getInt(6), rs.getTimestamp(7).toInstant(),
+                        rs.getTimestamp(8) == null ? null : rs.getTimestamp(8).toInstant(),
+                        rs.getString(9), rs.getBoolean(10)),
+                limit, offset);
+    }
+
+    /** The exception type from a stored "Type: message" failure, without the message. */
+    private static String failureKind(String lastError) {
+        if (lastError == null || lastError.isBlank()) return null;
+        int separator = lastError.indexOf(':');
+        String kind = separator < 0 ? lastError : lastError.substring(0, separator);
+        return kind.length() <= 64 ? kind.strip() : kind.substring(0, 64).strip();
+    }
+
     public long countByStatus(String status) {
         Long count = jdbc.queryForObject("SELECT count(*) FROM outbox_events WHERE status = ?", Long.class, status);
         return count == null ? 0 : count;

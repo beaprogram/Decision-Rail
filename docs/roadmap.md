@@ -12,7 +12,7 @@ A checkpoint is complete only when its implementation and relevant verification 
 | 4 | Event delivery | Outbox dispatcher, broker integration, bounded retries, delivery status, and idempotent consumers. | Included |
 | 5 | Replay and shadow evaluation | Historical replay against a chosen ruleset, comparison reports, and a shadow path that cannot alter live state. | Included |
 | 6 | Resilience controls | Timeouts, bounded retries, dependency fault behavior, circuit-breaker behaviour, and explicit degradation policies. | Included |
-| 7 | Operator experience | Searchable payments and decisions, policy comparison views, lifecycle timelines, and an accessible operator UI. | Planned |
+| 7 | Operator experience | Searchable payments and decisions, policy comparison views, lifecycle timelines, and an accessible operator UI. | Complete |
 | 8 | Telemetry and measured performance | Correlated traces and structured logs, operational metrics, load tests, published methodology, and measured limits. | Planned |
 | 9 | Extended lifecycle and recovery | Refunds/reversals, reconciliation, recovery procedures, and financial correction evidence. | Planned |
 | 10 | Public demo and release | Free-budget hosting assessment, secure configuration, synthetic demo data, deployment validation, and a recorded walkthrough. | Planned |
@@ -76,3 +76,18 @@ features. Describe delivery as at-least-once with idempotent consumers, never as
 Throughput, latency, availability, and recovery claims should be added after repeatable measurements
 exist, and fraud accuracy claims only if labelled data ever exists. Do not imply affiliation with
 Mastercard, a bank, or a payment network.
+
+## Definition of done for checkpoint 7
+
+- [x] Browser sign-in, sign-out, session expiry, and an identity response carrying server-resolved capabilities.
+- [x] CSRF protection on browser login, logout, and every state-changing request, on a security chain separate from the stateless Basic API.
+- [x] Session fixation protection, a real server-side logout, and `HttpOnly` session cookies with an appropriate `SameSite` policy.
+- [x] Merchant, administrator, and operations boundaries unchanged; the operations identity gains no dashboard capability.
+- [x] An authoritative, merchant-scoped payment search with bounded keyset pagination, deterministic ordering, and validated filters.
+- [x] A payment detail screen showing the stored decision, its reason contributions, funding failure separately from risk outcome, the capture journal, and a lifecycle that distinguishes the payment transaction, broker publication, and each consumer group.
+- [x] Synthetic authorization, capture, and void from the browser, with exact minor-unit conversion and one idempotency key per logical command reused across retries.
+- [x] Policy browsing and candidate registration with structured, path-level validation errors.
+- [x] Replay and shadow screens using the server's own report semantics, including the divergence denominator and unavailable rather than zero for a missing measurement.
+- [x] An administrative workspace with liveness, readiness, and asynchronous capability as distinct signals, a paginated failed-event list, and redrive from an explicit selection.
+- [x] The dashboard is built into the application artifact and served from the same origin, with the single-page fallback scoped so an unknown or denied API path is never rewritten.
+- [x] Backend, frontend, and real-browser verification, plus both existing demos, all passing against real PostgreSQL and Kafka.

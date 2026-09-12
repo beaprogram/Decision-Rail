@@ -24,13 +24,20 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 
 ## Verification record
 
-Local evidence recorded **2026-09-11 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
-**3.9.1**.
+Local evidence recorded **2026-09-11 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka
+**3.9.1**, and Node **22.14.0**.
 
-- Pinned-wrapper build and suite: **186 tests passed**, with **0 failures, 0 errors, and 0 skipped**
-  (107 domain and contract units, 4 architecture rules, 48 PostgreSQL integration tests, 27 tests
-  against both PostgreSQL and a real single-node broker). Every test from the earlier milestones is
-  still present and passing.
+- Pinned-wrapper build and suite: **209 backend tests passed**, with **0 failures, 0 errors, and 0
+  skipped** (107 domain and contract units, 4 architecture rules, 48 PostgreSQL integration tests, 27
+  against both PostgreSQL and a real single-node broker, and 23 covering browser authentication and the
+  dashboard read APIs). Every test from the earlier milestones is still present and passing.
+- Dashboard: **17 frontend unit tests** and **30 browser end-to-end tests**, the latter run by a real
+  Chromium against the packaged application with real PostgreSQL and Kafka, all passing.
+- Checkpoint 7 delivered the operator console: browser session authentication with CSRF protection on
+  its own security chain, an authoritative merchant payment search, a lifecycle timeline, an
+  administrative failed-event list, and seven screens covering payments, accounts, policy versions,
+  replay, shadow, and event delivery. The dashboard is built into the application jar and served from
+  the same origin as the API it calls.
 - A review-driven correction pass fixed five correctness defects and one inaccurate claim in this
   ledger. Each correction has a regression test that failed before it and passes after; the failure
   counts and the evidence are recorded in [verification.md](verification.md). The completed-checkpoint

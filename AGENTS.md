@@ -4,7 +4,7 @@ DecisionRail is an independent, synthetic payment decisioning portfolio project.
 
 ## Current delivery boundary
 
-Read docs/PROGRESS.md and docs/roadmap.md before continuing. Six of ten checkpoints are complete: foundation, financial correctness, explainable versioned rules, Kafka event delivery, replay and shadow evaluation, and resilience controls. Operator UI, tracing and measured performance, refunds and reconciliation, Redis features, candidate policy promotion, and public deployment require later milestones. Do not represent planned capabilities as shipped.
+Read docs/PROGRESS.md and docs/roadmap.md before continuing. Seven of ten checkpoints are complete: foundation, financial correctness, explainable versioned rules, Kafka event delivery, replay and shadow evaluation, resilience controls, and the operator console. Tracing and measured performance, refunds and reconciliation, Redis features, candidate policy promotion, and public deployment require later milestones. Do not represent planned capabilities as shipped.
 
 ## Invariants
 
@@ -23,6 +23,11 @@ Read docs/PROGRESS.md and docs/roadmap.md before continuing. Six of ten checkpoi
 - Replay and shadow must not depend on PaymentService, PaymentStore or OutboxStore. ArchUnit enforces this; do not relax it for convenience.
 - A broker or worker failure must never cause a fail-open decision, and a database failure must never return a successful financial response.
 - Real funds, card numbers and invented performance results do not belong in this project. No fraud accuracy metrics without labelled data.
+- The browser API lives on /ui with a session cookie and CSRF protection; /v1 stays stateless Basic with CSRF disabled. They are separate chains on purpose: a session cookie must buy nothing on /v1, and neither chain may borrow the other's protections. Do not merge them.
+- Capabilities in the identity response are presentation only. Hiding a control is not authorization; every endpoint enforces its own rule. OPERATIONS stays metrics-only however operator-shaped the product becomes.
+- The single-page fallback is scoped to /dashboard/**. An unknown or denied API path must keep its status code and never become HTML with 200.
+- Money stays integer minor units end to end. Never convert a typed amount by multiplying a parsed float; the browser converts on the digit string and rejects excess precision rather than rounding it.
+- One idempotency key per logical command, reused across retries. A timeout is an unknown outcome, not a failure, and must never mint a new key.
 
 ## Validation and workflow
 
@@ -30,7 +35,7 @@ Use Java 21 and ./mvnw verify against the dedicated disposable stack in compose.
 
 Prefer injected clocks, explicit failpoints and bounded polling over sleeps. A test named for a restart must leave the state a killed process leaves and recover through durable state, not call the same method twice. Scope assertions and fault injection to the payments a test created, because the suite shares one database.
 
-Run both demos for changes affecting runtime or API behavior: scripts/demo.sh and scripts/async-demo.sh. Keep schema changes in new Flyway migrations after V5, never edit an applied one, and extend the migration upgrade check when a migration backfills anything. Maintain docs/openapi.yaml and document meaningful tradeoffs in an ADR.
+Run both demos for changes affecting runtime or API behavior: scripts/demo.sh and scripts/async-demo.sh. Changes touching the dashboard or the browser API also need the Playwright suite in frontend/, run against a running application with real infrastructure; ./mvnw verify already typechecks, lints, unit-tests and builds the frontend. Keep generated assets, node_modules, browser traces and screenshots untracked. Keep schema changes in new Flyway migrations after V6, never edit an applied one, and extend the migration upgrade check when a migration backfills anything. Maintain docs/openapi.yaml and document meaningful tradeoffs in an ADR.
 
 Commit only reviewed source and docs. Keep .env, .local, database files and build output untracked. An existing .env from an earlier milestone lacks ADMIN_PASSWORD; append one rather than regenerating the file, and never rotate existing credentials. Fault injection (app.events.fault-injection-enabled) stays false outside local and test configuration, and must never gain an HTTP surface.
 

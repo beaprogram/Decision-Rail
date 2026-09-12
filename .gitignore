@@ -12,3 +12,16 @@
 *.log
 /local-data/
 /.local/
+
+# Frontend build output and tooling caches. Generated assets never belong in the repository; the
+# dashboard bundle is produced by the Maven build and copied into target.
+/frontend/node_modules/
+/frontend/dist/
+/frontend/coverage/
+/frontend/playwright-report/
+/frontend/test-results/
+/frontend/.vite/
+/frontend/tsconfig.*.tsbuildinfo
+# Browser traces and screenshots from end-to-end runs can contain session cookies and tenant data.
+/frontend/e2e-artifacts/
+/screenshots/

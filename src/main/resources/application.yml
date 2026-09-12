@@ -27,6 +27,19 @@ server:
   error:
     include-message: never
     include-stacktrace: never
+  servlet:
+    session:
+      # The browser session cookie. HttpOnly so page script cannot read it, SameSite=Lax so another
+      # site cannot drive a state-changing request with it while ordinary navigation into the
+      # dashboard still works.
+      cookie:
+        http-only: true
+        same-site: lax
+        # Must be true wherever the dashboard is served over HTTPS. It defaults to false only because
+        # the documented local stack is loopback HTTP, where a Secure cookie would never be sent and
+        # sign-in would be impossible. This is the one deliberate local exception.
+        secure: ${SESSION_COOKIE_SECURE:false}
+      timeout: ${SESSION_TIMEOUT:30m}
 management:
   endpoints:
     web:
@@ -65,6 +78,9 @@ management:
           DEGRADED: 200
 app:
   demo-enabled: ${DEMO_ENABLED:false}
+  ui:
+    # Applies the same rule to the CSRF cookie as to the session cookie above.
+    secure-cookies: ${SESSION_COOKIE_SECURE:false}
   events:
     topic: ${EVENTS_TOPIC:decisionrail.payments.v1}
     projection-group: ${EVENTS_PROJECTION_GROUP:decisionrail-projection}

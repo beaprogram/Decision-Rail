@@ -9,6 +9,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -50,6 +51,121 @@ public class PaymentStore {
         List<PaymentView> values = jdbc.query("SELECT * FROM payments WHERE merchant_id=? AND id=?" + (lock ? " FOR UPDATE" : ""), this::mapPayment, merchant, id);
         if (values.isEmpty()) throw new PaymentException("PAYMENT_NOT_FOUND", 404, "Payment was not found.");
         return values.getFirst();
+    }
+
+    /** Every account this merchant owns, oldest first. Ownership is part of the query. */
+    public List<AccountView> accounts(String merchant, int limit) {
+        return jdbc.query("""
+                SELECT id, currency, balance_minor, held_minor FROM accounts
+                WHERE merchant_id = ? ORDER BY created_at, id LIMIT ?
+                """, (rs, n) -> new AccountView(rs.getObject(1, UUID.class), rs.getString(2).trim(),
+                        rs.getLong(3), rs.getLong(4), rs.getLong(3) - rs.getLong(4)), merchant, limit);
+    }
+
+    /**
+     * Authoritative, merchant-scoped payment search.
+     *
+     * <p>Reads the {@code payments} table, not the activity projection, so a payment is findable the
+     * moment its transaction commits and stays findable while the broker is unreachable and nothing has
+     * been delivered.
+     *
+     * <p>Every filter value is bound as a parameter; only the number of placeholders varies with how
+     * many enumerated values were supplied. The merchant predicate is always present and is not
+     * derived from anything the caller sent.
+     */
+    public PaymentSearchPage search(String merchant, PaymentSearchQuery query) {
+        List<Object> filters = new ArrayList<>();
+        StringBuilder where = new StringBuilder("merchant_id = ?");
+        filters.add(merchant);
+        if (query.paymentId() != null) {
+            where.append(" AND id = ?");
+            filters.add(query.paymentId());
+        }
+        if (query.accountId() != null) {
+            where.append(" AND account_id = ?");
+            filters.add(query.accountId());
+        }
+        if (!query.statuses().isEmpty()) {
+            where.append(" AND status IN (").append(placeholders(query.statuses().size())).append(')');
+            query.statuses().forEach(status -> filters.add(status.name()));
+        }
+        if (!query.riskOutcomes().isEmpty()) {
+            where.append(" AND (decision ->> 'outcome') IN (").append(placeholders(query.riskOutcomes().size())).append(')');
+            filters.addAll(query.riskOutcomes());
+        }
+        if (query.currency() != null) {
+            where.append(" AND currency = ?");
+            filters.add(query.currency());
+        }
+        if (query.createdFrom() != null) {
+            where.append(" AND created_at >= ?");
+            filters.add(Timestamp.from(query.createdFrom()));
+        }
+        if (query.createdTo() != null) {
+            where.append(" AND created_at <= ?");
+            filters.add(Timestamp.from(query.createdTo()));
+        }
+
+        // Counted separately from the page, and without the cursor, so it describes the filters rather
+        // than the remaining rows. Bounded by its own limit: an exact total would mean scanning every
+        // match on every page request.
+        Long counted = jdbc.queryForObject(
+                "SELECT count(*) FROM (SELECT 1 FROM payments WHERE " + where + " LIMIT " + (MATCH_COUNT_LIMIT + 1) + ") AS bounded",
+                Long.class, filters.toArray());
+        long matched = counted == null ? 0 : counted;
+        boolean capped = matched > MATCH_COUNT_LIMIT;
+
+        List<Object> pageArguments = new ArrayList<>(filters);
+        StringBuilder pageWhere = new StringBuilder(where);
+        if (query.cursor() != null) {
+            // Row comparison against the full ordering tuple, so a page boundary is stable even when
+            // several payments share a created_at.
+            pageWhere.append(" AND (created_at, id) < (?, ?)");
+            pageArguments.add(Timestamp.from(query.cursor().createdAt()));
+            pageArguments.add(query.cursor().id());
+        }
+        pageArguments.add(query.limit() + 1);
+        List<PaymentSummaryView> rows = jdbc.query("""
+                SELECT id, account_id, amount_minor, currency, country, status,
+                       decision ->> 'outcome'          AS risk_outcome,
+                       (decision ->> 'score')::integer AS risk_score,
+                       decision ->> 'ruleSetVersion'   AS policy_version,
+                       failure_code, created_at, updated_at
+                FROM payments WHERE %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT ?
+                """.formatted(pageWhere), PaymentStore::mapSummary, pageArguments.toArray());
+
+        // One row beyond the page size proves there is a next page without a second query.
+        boolean more = rows.size() > query.limit();
+        List<PaymentSummaryView> page = more ? List.copyOf(rows.subList(0, query.limit())) : List.copyOf(rows);
+        String nextCursor = more
+                ? new PaymentCursor(page.getLast().createdAt(), page.getLast().id()).encode()
+                : null;
+        return new PaymentSearchPage(page, nextCursor, capped ? MATCH_COUNT_LIMIT : matched, capped, MATCH_COUNT_LIMIT);
+    }
+
+    /** Accepted commands for one payment, from the audit record written inside each transaction. */
+    public List<PaymentTimelineView.CommandEntry> commands(String merchant, UUID paymentId, int limit) {
+        return jdbc.query("""
+                SELECT action, occurred_at FROM audit_events
+                WHERE merchant_id = ? AND payment_id = ? ORDER BY occurred_at, id LIMIT ?
+                """, (rs, n) -> new PaymentTimelineView.CommandEntry(rs.getString(1), rs.getTimestamp(2).toInstant()),
+                merchant, paymentId, limit);
+    }
+
+    private static final int MATCH_COUNT_LIMIT = 1_000;
+
+    private static String placeholders(int count) {
+        return String.join(",", java.util.Collections.nCopies(count, "?"));
+    }
+
+    private static PaymentSummaryView mapSummary(ResultSet rs, int n) throws SQLException {
+        return new PaymentSummaryView(rs.getObject("id", UUID.class), rs.getObject("account_id", UUID.class),
+                rs.getLong("amount_minor"), rs.getString("currency").trim(), rs.getString("country").trim(),
+                PaymentStatus.valueOf(rs.getString("status")), rs.getString("risk_outcome"), rs.getInt("risk_score"),
+                rs.getString("policy_version"), rs.getString("failure_code"),
+                rs.getTimestamp("created_at").toInstant(), rs.getTimestamp("updated_at").toInstant());
     }
 
     public void insert(String merchant, PaymentView payment) {

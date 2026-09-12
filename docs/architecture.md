@@ -30,6 +30,8 @@ flowchart LR
 
 Everything in the diagram is implemented. Note what the diagram does **not** show: no arrow runs from the broker, the shadow worker, or a replay job back into the payment lifecycle or the ledger. That absence is the central property of this phase, and architecture tests assert it rather than leaving it to review.
 
+A browser is now a first-class client. The compiled dashboard is served by the same application from `/dashboard/`, and it calls a session-authenticated API at `/ui/**` that delegates to the same services the scripted `/v1/**` API uses. The two APIs have separate security chains on purpose, which [ADR 0005](adr/0005-browser-session-authentication.md) explains: a session cookie is attached automatically by the browser, so an endpoint a cookie authenticates can be forged from another origin, while a request carrying an `Authorization` header cannot. Keeping them apart means a session cookie buys nothing on `/v1/**`, Basic credentials are not accepted on `/ui/**`, and neither chain can silently borrow the other's protections.
+
 The modules share one deployable Spring Boot application and one PostgreSQL transaction boundary. This keeps the payment lifecycle and ledger invariants enforceable while the codebase establishes domain boundaries. The system is intentionally a modular monolith at this stage.
 
 ## What crosses the commit boundary
@@ -81,6 +83,26 @@ Both features evaluate alternative policies. Neither can touch money.
 - **Pinned inputs.** A replay job materialises its membership *and* the original inputs and baseline decision when it is created. Evaluation never reads today's account balance or hold to reconstruct a historical feature, and a payment committing later cannot join the job or move its denominator.
 - **Baseline is the stored risk decision.** Never the payment's lifecycle status. A payment declined for insufficient funds recorded an `APPROVE` risk decision and is compared as one; treating its status as a policy decline would systematically overstate agreement with any strict candidate.
 - **Derived work, not a callback.** Shadow work comes from committed authorization events in its own consumer group, so it survives restarts and cannot stall the projection consumer. Nothing on the authorization path waits for it, so a slow or throwing candidate cannot delay or fail a payment.
+
+## What the dashboard adds, and what it does not
+
+Checkpoint 7 added three read capabilities and no new way to change anything:
+
+| Addition | Why it could not reuse something existing |
+| --- | --- |
+| Merchant payment search | `/v1/activity` is a bounded list of an asynchronous projection. A payment must be findable the moment its transaction commits, including while the broker is down and nothing has been projected, so search reads the payments table. Paging is by keyset cursor, because payments are created continuously and an offset shifts under the reader. |
+| Payment lifecycle timeline | The projection holds only a payment's latest state, so it cannot say what happened in what order. The timeline is assembled from the audit trail, the outbox rows with their durable sequence, and each consumer group's own deduplication records, and keeps those three distinct. |
+| Administrative failed-event list | The backlog endpoint gives aggregate counts, which cannot be inspected or acted on. Choosing a redrive target needs the events themselves. |
+
+Every mutation the dashboard performs goes through the existing `PaymentService`, `ReplayService`,
+`ShadowService` and `PolicyService`. There is no second transaction boundary, no alternative financial
+path, and no command implemented twice.
+
+Two presentation rules follow from the domain rather than from taste. The stored risk decision and the
+payment's financial status are shown as separate facts, because an APPROVE risk decision next to a
+DECLINED payment is a normal, correct combination that collapsing them would hide. And a measurement
+the server did not provide is rendered as unavailable rather than as zero, because a divergence rate
+with no denominator is not zero divergence.
 
 ## Failure boundaries
 
@@ -141,7 +163,8 @@ A rolled-back transaction must not leave a successful payment without its journa
 - A candidate policy is never authoritative. There is no promotion workflow and no code path that could make one decide a real payment.
 - Replay and shadow reports contain no fraud accuracy metrics. No labelled outcome data exists for synthetic traffic, so precision, recall, and false-positive rates would be invented.
 - Replay timings are observed values for a single run with no warmup control. They are not a benchmark.
-- There is no refund lifecycle, reconciliation, operator UI, distributed tracing, measured performance limit, failover system, or public hosted environment yet.
+- The operator console is a locally-scoped interface over synthetic data. Sessions are in memory, so a restart signs everyone out and more than one instance would need shared session storage. Credentials are the four environment-configured accounts; there is no user management and no rate limiting on sign-in.
+- There is no refund lifecycle, reconciliation, distributed tracing, measured performance limit, failover system, or public hosted environment yet.
 
 ## Growth path
 

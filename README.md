@@ -6,13 +6,13 @@
 
 DecisionRail is a Java payment decisioning and resilience portfolio project. It answers a deceptively difficult question: **when a payment request is retried, races another request, or is declined, can we explain the outcome and prove that the money state is still correct?**
 
-It now answers a second one: **when the broker is down, a worker dies mid-send, or someone wants to change a rule, what happens to the committed events and to the money?**
+It now answers a second one: **when the broker is down, a worker dies mid-send, or someone wants to change a rule, what happens to the committed events and to the money?** And a third: **can an operator open a browser and see why a payment got the decision it did, how a different policy compares, and whether delivery is healthy?**
 
-The transactional payment core handles synthetic funds with merchant isolation, concurrency-safe authorizations, durable idempotency, versioned policy decisions, and a balanced capture journal. On top of that, committed events are delivered to Kafka in per-payment order with idempotent consumers, candidate policies can be replayed against real history or evaluated alongside live traffic without touching it, and the new dependencies have explicit, tested failure behaviour.
+The transactional payment core handles synthetic funds with merchant isolation, concurrency-safe authorizations, durable idempotency, versioned policy decisions, and a balanced capture journal. On top of that, committed events are delivered to Kafka in per-payment order with idempotent consumers, candidate policies can be replayed against real history or evaluated alongside live traffic without touching it, and the new dependencies have explicit, tested failure behaviour. All of it is now usable through an operator console served by the same application.
 
-**Status:** **6 of 10 planned scope checkpoints** · Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Kafka 3.9
+**Status:** **7 of 10 planned scope checkpoints** · Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Kafka 3.9 · React 19 + TypeScript
 
-“Approximately 60%” refers to those equally weighted scope checkpoints, not elapsed effort or production readiness. See the [delivery ledger](docs/roadmap.md) for the exact boundary and [PROGRESS.md](docs/PROGRESS.md) for the material limitations.
+“Approximately 70%” refers to those equally weighted scope checkpoints, not elapsed effort or production readiness. See the [delivery ledger](docs/roadmap.md) for the exact boundary and [PROGRESS.md](docs/PROGRESS.md) for the material limitations.
 
 ## What is implemented
 
@@ -60,7 +60,7 @@ One Spring Boot application owns the transaction boundary. What the diagram deli
 
 ## Run locally
 
-**Prerequisites:** Docker Engine with Compose. The demo script also needs Bash, OpenSSL, `curl`, and `jq`. Building outside Docker requires JDK 21; the checked-in Maven wrapper downloads pinned Maven 3.9.12 on its first run.
+**Prerequisites:** Docker Engine with Compose. The demo scripts also need Bash, OpenSSL, `curl`, and `jq`. Building outside Docker requires JDK 21; the checked-in Maven wrapper downloads pinned Maven 3.9.12 and, for the dashboard, pinned Node 22.14.0 on its first run. Working on the frontend directly needs Node 20.19 or later installed locally.
 
 ```bash
 git clone https://github.com/beaprogram/Decision-Rail.git
@@ -77,6 +77,21 @@ curl --fail http://localhost:8080/actuator/health
 ./scripts/demo.sh        # transactional lifecycle: 12 checks
 ./scripts/async-demo.sh  # delivery, replay, shadow, failure and recovery: 27 checks
 ```
+
+Then open the operator console at **<http://localhost:8080/dashboard/>** and sign in with a username
+from the table below and its password from the generated `.env`.
+
+| Sign in as | What the console offers |
+| --- | --- |
+| `demo-merchant` or `other-merchant` | Payment search, payment detail with its stored decision and lifecycle, authorize, capture, void, accounts, policy replay, shadow comparisons |
+| `admin` | Policy versions and candidate registration, event delivery health, failed events and redrive, shadow configuration |
+| `operations` | Nothing. It remains the metrics-only identity and the console says so rather than widening it. |
+
+The dashboard is built into the application jar, so there is no second thing to deploy and no CORS to
+configure: it is served from the same origin as the API it calls. The browser uses a session cookie
+with CSRF protection on a separate security chain from the scripted Basic-auth API; see
+[ADR 0005](docs/adr/0005-browser-session-authentication.md) for why they are separate and what the
+limitations are.
 
 The setup script generates local passwords in an ignored `.env` file with owner-only permissions. Existing credentials are preserved. Application startup requires four distinct passwords of 16–72 characters and rejects missing or placeholder credentials. Compose binds the database, broker, and API to `127.0.0.1`. Demo seeding is enabled explicitly by Compose.
 
@@ -177,11 +192,25 @@ docker compose -f compose.test.yaml up -d --wait
 
 The test profile already defaults to that stack. Use a dedicated database and broker: integration tests install triggers that inject storage failures, publish synthetic events, and create a throwaway database for the migration upgrade check.
 
-Local verification on **2026-09-11 UTC** passed **186 tests** on Java 21.0.11, PostgreSQL 16.15, and Kafka 3.9.1 with zero failures, errors, or skipped tests: 107 domain and contract units, 4 architecture rules, 48 PostgreSQL integration tests, and 27 against both PostgreSQL and a real broker. Every test from the earlier milestones still passes. The packaged application passed **12** transactional demo checks and **27** asynchronous demo checks.
+Local verification on **2026-09-11 UTC** passed **209 backend tests**, **17 frontend unit tests**, and **30 browser end-to-end tests** on Java 21.0.11, PostgreSQL 16.15, Kafka 3.9.1, and Node 22.14.0, with zero failures, errors, or skipped tests. The backend total covers 107 domain and contract units, 4 architecture rules, 48 PostgreSQL integration tests, 27 against both PostgreSQL and a real broker, and 23 covering browser authentication and the dashboard read APIs. Every test from the earlier milestones still passes. The packaged application passed **12** transactional demo checks and **27** asynchronous demo checks.
+
+The browser tests run a real Chromium against the packaged application with real PostgreSQL and Kafka. They sign in and out, prove one merchant cannot reach another's data even when a response from the previous identity arrives late, authorize and capture and void, register a candidate policy and read back its validation errors, run a replay to completion, observe a shadow divergence, inspect and redrive a failed event, and stop the broker to watch delivery degrade while payment reads stay available.
 
 Timing-sensitive behaviour is tested with injected clocks, explicit failpoints, and bounded polling rather than sleeps. A test named for recovery leaves behind exactly the state a killed process leaves, so recovery has to happen through durable state and lease expiry. The [verification guide](docs/verification.md) explains the failure cases and why real infrastructure matters.
 
 [The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34556041913) passed the same 186 tests and both demos on revision `3bc2998`, against PostgreSQL 16 and Kafka. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+
+## Operator console
+
+Seven screens, all against real data from the same application:
+
+- **Payments.** Authoritative search over committed payments with filters for status, risk outcome, currency, account, and creation time. A payment is findable the moment its transaction commits, including while the broker is down and nothing has been delivered. Paging is by keyset cursor, so a payment created mid-paging cannot shift a boundary and hide a row.
+- **Payment detail.** The stored decision that produced the outcome: risk outcome, score, policy version, flags, and every reason contribution. A funding decline is presented separately from a policy decline, because an APPROVE risk decision sitting next to a DECLINED payment is a normal, correct combination. Plus the capture journal and a lifecycle that keeps the payment transaction, broker publication, and each consumer group's own record distinct.
+- **Authorize, capture, void.** Typed amounts convert to integer minor units exactly, never by multiplying a float. Each command carries one idempotency key reused across retries, and a timed-out command is reported as an unknown outcome rather than a failure.
+- **Accounts.** Balance, held, and available per account, subtotalled per currency and never combined across them.
+- **Policy versions.** Immutable versions with their rules, order, conditions, contributions, flags, and terminal behaviour. Administrators register candidates through a validated editor that surfaces the server's field paths.
+- **Policy replay and shadow.** Compare a candidate against real history or alongside live authorizations, with baseline and candidate explanations side by side and the divergence denominator stated.
+- **Event delivery.** Liveness, readiness, and asynchronous capability as three distinct signals, plus backlog counts, stalled payment streams, and a redrive control that requires an explicit selection.
 
 ## What comes next
 

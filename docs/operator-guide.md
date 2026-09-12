@@ -18,6 +18,8 @@ Run `./scripts/prepare-local-env.sh` once from the repository. It generates an i
 | `DEMO_ENABLED` | Explicitly enable synthetic account seed data; defaults to `false` in the application. |
 | `PORT` | HTTP port; defaults to `8080`. |
 | `DB_PORT`, `KAFKA_PORT`, `BACKEND_PORT` | Optional Compose host-port overrides so this stack can coexist with another local PostgreSQL or broker. |
+| `SESSION_COOKIE_SECURE` | Marks the browser session and CSRF cookies `Secure`. Defaults to `false` because the documented local stack is loopback HTTP, where a `Secure` cookie would never be sent and sign-in would be impossible. **Any deployment over HTTPS must set this to `true`.** |
+| `SESSION_TIMEOUT` | Browser session idle timeout; defaults to `30m`. |
 | `EVENTS_DISPATCHER_ENABLED` | Set `false` to stop this instance publishing events. Committed intent still accumulates. |
 | `REPLAY_ENABLED`, `SHADOW_WORKER_ENABLED` | Set `false` to stop this instance running the replay or shadow worker. |
 | `EVENTS_FAULT_INJECTION_ENABLED` | Local and test only. Leave `false`; see "Controlled failure injection". |
@@ -86,6 +88,57 @@ set +a
 ```
 
 Do not run the Compose backend and native backend on the same port simultaneously. If you already run PostgreSQL on port `5432`, choose a separate database port and update both the Compose port mapping and native `JDBC_URL`.
+
+## Open the operator console
+
+Once the stack is running, the dashboard is at **<http://localhost:8080/dashboard/>**. It is built into
+the application jar and served from the same origin as the API it calls, so there is nothing else to
+start and no CORS to configure.
+
+Sign in with a username below and its password from the generated `.env`:
+
+| Identity | What it can do in the console |
+| --- | --- |
+| `demo-merchant`, `other-merchant` | Payment search and detail, authorize, capture, void, accounts, policy replay, shadow comparisons, policy reads |
+| `admin` | Policy versions and candidate registration, event delivery health, failed events and redrive, shadow configuration |
+| `operations` | Nothing. The console tells it plainly that it has no workspace, because it remains the metrics-only identity. |
+
+A short walkthrough from a payment to its explanation and back to delivery health:
+
+1. **Payments → New authorization.** Pick an account, type `25.00`, and note the field showing the
+   exact minor-unit value that will be sent. Review and authorize.
+2. **Open payment.** The stored decision panel shows the outcome, score, policy version, flags, and
+   every reason contribution recorded when the payment was authorized. Nothing is recomputed here.
+3. **Lifecycle.** The command, the event's delivery state, and what each consumer group has recorded
+   appear as three separate facts. An unpublished event says so rather than showing an invented time.
+4. **Capture.** The confirmation restates the concrete payment and amount. After capturing, the
+   balanced journal appears.
+5. **Policy versions** (as `admin`). Register a candidate; a bad definition comes back with the JSON
+   path that was wrong.
+6. **Policy replay** (as a merchant). Create a job against that candidate and watch it complete, then
+   compare baseline and candidate explanations side by side.
+7. **Event delivery** (as `admin`). Liveness, readiness, and asynchronous capability are three
+   separate signals, with backlog counts and any stalled payment streams.
+
+Two things the console will not do, deliberately: it has no control that stops the broker, edits
+database rows, or arms a failure hook, and it never offers to redrive without an explicit selection.
+Use `scripts/async-demo.sh` to see an outage.
+
+### Working on the dashboard
+
+`./mvnw verify` builds the dashboard with a Node toolchain it downloads and pins, so no local Node is
+needed to build the application. Working on the frontend directly needs Node 20.19 or later:
+
+```bash
+DB_PORT=55434 KAFKA_PORT=19093 BACKEND_PORT=8080 docker compose up -d database broker backend
+cd frontend
+npm ci
+npm run dev        # http://localhost:5173, proxying /ui and /actuator to the backend
+```
+
+The dev server proxies the API so the browser still sees one origin; without that the session cookie
+would not be sent. Other useful commands: `npm run typecheck`, `npm run lint`, `npm test`, and
+`npm run e2e` for the browser suite (which needs the application running and `../.env` loaded).
 
 ## Walk through the transaction lifecycle
 
@@ -300,6 +353,10 @@ The ledger endpoint returns an array of entries with `id`, `journalId`, `ledgerA
 | Replay job has fewer inputs than expected | Membership is fixed at creation. Payments committed afterwards, or outside the `from` window, are not members. |
 | Shadow comparison never appears | Shadow must be enabled *before* the authorization, the event must be delivered, and the shadow worker must be running. |
 | `409 POLICY_VERSION_CONFLICT` | That version id already exists with different content. Policy versions are immutable; use a new id. |
+| The dashboard shows a sign-in screen immediately after signing in | The session cookie was rejected. Check `SESSION_COOKIE_SECURE`: if it is `true` over plain HTTP the browser will never send the cookie back. |
+| A browser mutation returns `CSRF_TOKEN_INVALID` | The page did not send the token from the `XSRF-TOKEN` cookie. Reload the dashboard; a hard refresh reissues it. |
+| Everyone is signed out after a restart | Expected. Sessions are held in memory, which is why more than one instance would need shared session storage. |
+| `/dashboard/` returns 404 | The jar was built without the frontend, most likely with `-Dskip.frontend=true`. Rebuild without it. |
 | Startup fails naming the built-in policy | The in-code `demo-v1` rules changed. Historical decisions name that version, so its meaning must not change: introduce a new version id instead. |
 
 ## Operating boundary

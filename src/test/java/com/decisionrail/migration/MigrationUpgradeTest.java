@@ -45,12 +45,17 @@ class MigrationUpgradeTest {
 
             Seeded seeded = seedRecordsAsV1WouldHaveWritten(url, target);
 
-            // Now apply everything this phase added.
+            // Now apply everything added after V2.
             Flyway toLatest = Flyway.configure()
                     .dataSource(url, target.username(), target.password())
                     .locations("classpath:db/migration")
                     .load();
-            assertThat(toLatest.migrate().migrationsExecuted).isEqualTo(3);
+            // Counted from the migrations on the classpath rather than hard-coded, so adding one does
+            // not break this check. What the check is for is that every one of them applies cleanly to
+            // a database that already holds real records, which the assertions below then inspect.
+            int expectedUpgrades = migrationsAfterVersionTwo();
+            assertThat(expectedUpgrades).as("there are upgrade migrations to apply").isGreaterThanOrEqualTo(4);
+            assertThat(toLatest.migrate().migrationsExecuted).isEqualTo(expectedUpgrades);
 
             try (Connection connection = DriverManager.getConnection(url, target.username(), target.password())) {
                 assertFinancialRecordsSurvived(connection, seeded);
@@ -61,6 +66,21 @@ class MigrationUpgradeTest {
         } finally {
             dropDatabase(target, database);
         }
+    }
+
+    /** Counts V3 and later on the classpath, so this check follows the migrations rather than a constant. */
+    private int migrationsAfterVersionTwo() throws Exception {
+        java.net.URL location = getClass().getClassLoader().getResource("db/migration");
+        assertThat(location).as("migrations are on the classpath").isNotNull();
+        java.io.File[] files = new java.io.File(location.toURI()).listFiles();
+        assertThat(files).isNotNull();
+        int count = 0;
+        for (java.io.File file : files) {
+            java.util.regex.Matcher matcher = java.util.regex.Pattern.compile("^V(\\d+)__.*\\.sql$")
+                    .matcher(file.getName());
+            if (matcher.matches() && Integer.parseInt(matcher.group(1)) > 2) count++;
+        }
+        return count;
     }
 
     private record Seeded(UUID accountId, UUID capturedPayment, UUID authorizedPayment,

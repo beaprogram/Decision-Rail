@@ -4,7 +4,13 @@
   <parent><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-parent</artifactId><version>3.5.16</version><relativePath/></parent>
   <groupId>com.decisionrail</groupId><artifactId>decisionrail</artifactId><version>0.1.0</version>
   <name>DecisionRail</name><description>Explainable payment decisioning with a transactional financial core</description>
-  <properties><java.version>21</java.version><project.build.outputTimestamp>2026-09-09T00:00:00Z</project.build.outputTimestamp></properties>
+  <properties>
+    <java.version>21</java.version>
+    <project.build.outputTimestamp>2026-09-09T00:00:00Z</project.build.outputTimestamp>
+    <!-- Pinned so every build produces the dashboard bundle with the same toolchain. -->
+    <node.version>v22.14.0</node.version>
+    <skip.frontend>false</skip.frontend>
+  </properties>
   <dependencies>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-web</artifactId></dependency>
     <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-validation</artifactId></dependency>
@@ -22,6 +28,51 @@
   </dependencies>
   <build><plugins>
     <plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin>
+    <!--
+      The dashboard is part of the application artifact, not a separate deployment. The frontend is
+      built with a Node toolchain this plugin downloads and pins, so the bundle in the jar does not
+      depend on whatever Node happens to be installed on the machine doing the build. Set
+      -Dskip.frontend=true to build the backend alone during Java-only iteration; the resulting jar
+      then has no dashboard, which is why it is not the default.
+    -->
+    <plugin>
+      <groupId>com.github.eirslett</groupId><artifactId>frontend-maven-plugin</artifactId><version>1.15.1</version>
+      <configuration>
+        <workingDirectory>frontend</workingDirectory>
+        <installDirectory>${project.build.directory}/node</installDirectory>
+        <skip>${skip.frontend}</skip>
+      </configuration>
+      <executions>
+        <execution><id>install-node-and-npm</id><phase>generate-resources</phase><goals><goal>install-node-and-npm</goal></goals>
+          <configuration><nodeVersion>${node.version}</nodeVersion></configuration></execution>
+        <!-- ci rather than install: the committed lockfile decides the versions, not resolution. -->
+        <execution><id>npm-ci</id><phase>generate-resources</phase><goals><goal>npm</goal></goals>
+          <configuration><arguments>ci --no-audit --no-fund</arguments></configuration></execution>
+        <execution><id>frontend-typecheck</id><phase>generate-resources</phase><goals><goal>npm</goal></goals>
+          <configuration><arguments>run typecheck</arguments></configuration></execution>
+        <execution><id>frontend-lint</id><phase>generate-resources</phase><goals><goal>npm</goal></goals>
+          <configuration><arguments>run lint</arguments></configuration></execution>
+        <execution><id>frontend-test</id><phase>generate-resources</phase><goals><goal>npm</goal></goals>
+          <configuration><arguments>run test</arguments></configuration></execution>
+        <execution><id>frontend-build</id><phase>generate-resources</phase><goals><goal>npm</goal></goals>
+          <configuration><arguments>run build</arguments></configuration></execution>
+      </executions>
+    </plugin>
+    <!--
+      Copies the built bundle onto the classpath. It lands in target rather than in src, so no
+      generated asset is ever written into the source tree or risks being committed.
+    -->
+    <plugin>
+      <groupId>org.apache.maven.plugins</groupId><artifactId>maven-resources-plugin</artifactId>
+      <executions>
+        <execution><id>copy-dashboard</id><phase>process-resources</phase><goals><goal>copy-resources</goal></goals>
+          <configuration>
+            <skip>${skip.frontend}</skip>
+            <outputDirectory>${project.build.outputDirectory}/static/dashboard</outputDirectory>
+            <resources><resource><directory>frontend/dist</directory><filtering>false</filtering></resource></resources>
+          </configuration></execution>
+      </executions>
+    </plugin>
     <plugin><groupId>org.apache.maven.plugins</groupId><artifactId>maven-enforcer-plugin</artifactId><executions><execution><id>toolchain</id><goals><goal>enforce</goal></goals><configuration><rules><requireJavaVersion><version>[21,)</version></requireJavaVersion><requireMavenVersion><version>[3.9,)</version></requireMavenVersion></rules></configuration></execution></executions></plugin>
     <plugin><groupId>org.jacoco</groupId><artifactId>jacoco-maven-plugin</artifactId><version>0.8.14</version><executions><execution><goals><goal>prepare-agent</goal></goals></execution><execution><id>report</id><phase>verify</phase><goals><goal>report</goal></goals></execution></executions></plugin>
   </plugins></build>
