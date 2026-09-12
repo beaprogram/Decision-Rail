@@ -120,6 +120,24 @@ A short walkthrough from a payment to its explanation and back to delivery healt
 7. **Event delivery** (as `admin`). Liveness, readiness, and asynchronous capability are three
    separate signals, with backlog counts and any stalled payment streams.
 
+### When something is uncertain
+
+Three screens deliberately refuse to guess, because guessing wrong about money is worse than saying so.
+
+- **A command whose outcome is unknown.** If a reply never arrives, the console does not report success
+  or failure. It shows the exact command it submitted — account, amount in minor units, request, and
+  idempotency key — and offers **Retry safely**, which resends precisely those bytes under the original
+  key. Editing the form afterwards does not change what a retry sends, and a new command cannot be
+  started until this one resolves. If the original did commit, the retry returns its result rather than
+  creating a second payment.
+- **A sign-out the server did not confirm.** Everything on screen is cleared immediately either way, but
+  the console says the session may still be open and offers a retry. It never claims a session was
+  destroyed on the strength of a request that failed.
+- **A funding result.** It is read from the payment's lifecycle state, not from the absence of a failure
+  code. A policy decline reads "No funds reserved", a capture reads "Funds captured" rather than
+  implying the hold is still standing, and an insufficient-funds decline names the failure while keeping
+  the separate APPROVE risk decision visible next to it.
+
 Two things the console will not do, deliberately: it has no control that stops the broker, edits
 database rows, or arms a failure hook, and it never offers to redrive without an explicit selection.
 Use `scripts/async-demo.sh` to see an outage.

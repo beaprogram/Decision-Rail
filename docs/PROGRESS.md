@@ -30,8 +30,10 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 
 ## Verification record
 
-Local evidence recorded **2026-09-12 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka
-**3.9.1**, and Node **22.14.0**.
+Local evidence recorded **2026-09-12 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
+**3.9.1**. The build compiles the dashboard with the Node it downloads and pins, **22.14.0**; the
+browser suite was driven by the machine's own Node **25.2.1**, since Playwright is run directly rather
+than through the build.
 
 - Pinned-wrapper build and suite: **213 backend tests passed**, with **0 failures, 0 errors, and
   0 skipped**. Every test from the earlier milestones is still present and passing; the breakdown by
@@ -76,8 +78,8 @@ Local evidence recorded **2026-09-12 UTC** using Java **21.0.11**, PostgreSQL **
   ledger, and outbox records in their original shape, then applies the later migrations and asserts the
   sequence backfill, delivery status, payload routing identity, preserved financial records, and that
   the sealed-journal guarantee still holds.
-- PostgreSQL 16 and Docker runtime verification: [the remote run](@@CI_URL@@) passed on revision
-  `@@CI_SHA@@`, running the same `compose.test.yaml` stack, the full backend suite, the frontend build
+- PostgreSQL 16 and Docker runtime verification: [the remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) passed on revision
+  `4754fab`, running the same `compose.test.yaml` stack, the full backend suite, the frontend build
   and unit tests, the image build, container startup, both demos, and the browser suite against the
   packaged container. Do not equate a checked-in CI workflow with a passing remote build; inspect the
   workflow result for the revision you care about.

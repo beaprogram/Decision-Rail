@@ -86,7 +86,7 @@ Both features evaluate alternative policies. Neither can touch money.
 
 ## What the dashboard adds, and what it does not
 
-Checkpoint 7 added three read capabilities and no new way to change anything:
+Checkpoint 7 added three read capabilities. Every change it can make is an existing operation reached through a second, session-authenticated route with its own CSRF protection; no new way to alter financial state was introduced, and no business rule was reimplemented in the browser:
 
 | Addition | Why it could not reuse something existing |
 | --- | --- |
@@ -170,7 +170,7 @@ A rolled-back transaction must not leave a successful payment without its journa
 
 The event stream is now the seam for further asynchronous work. A new consumer joins with its own group and its own deduplication records, without touching the producer or the payment core.
 
-The operator interface is built on that same data and adds no new way to change anything. Remaining milestones build on what exists rather than revisiting it: correlated tracing and measured performance limits, refunds and reconciliation as new operations against the append-only ledger, and a hosting assessment.
+The operator interface is built on that same data, and every change it offers is an existing operation behind a session-authenticated route rather than a new one. Remaining milestones build on what exists rather than revisiting it: correlated tracing and measured performance limits, refunds and reconciliation as new operations against the append-only ledger, and a hosting assessment.
 
 Two things would justify revisiting this design. Consumers needing ordering *across* payments would require a different sequencing strategy than a per-aggregate counter. Measured backlog drain time exceeding what a single dispatcher can sustain would justify partitioned workers.
 

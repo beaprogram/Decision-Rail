@@ -12,7 +12,7 @@ A checkpoint is complete only when its implementation and relevant verification 
 | 4 | Event delivery | Outbox dispatcher, broker integration, bounded retries, delivery status, and idempotent consumers. | Included |
 | 5 | Replay and shadow evaluation | Historical replay against a chosen ruleset, comparison reports, and a shadow path that cannot alter live state. | Included |
 | 6 | Resilience controls | Timeouts, bounded retries, dependency fault behavior, circuit-breaker behaviour, and explicit degradation policies. | Included |
-| 7 | Operator experience | Searchable payments and decisions, policy comparison views, lifecycle timelines, and an accessible operator UI. | Complete |
+| 7 | Operator experience | Searchable payments and decisions, policy comparison views, lifecycle timelines, and an accessible operator UI. | Included |
 | 8 | Telemetry and measured performance | Correlated traces and structured logs, operational metrics, load tests, published methodology, and measured limits. | Planned |
 | 9 | Extended lifecycle and recovery | Refunds/reversals, reconciliation, recovery procedures, and financial correction evidence. | Planned |
 | 10 | Public demo and release | Free-budget hosting assessment, secure configuration, synthetic demo data, deployment validation, and a recorded walkthrough. | Planned |
