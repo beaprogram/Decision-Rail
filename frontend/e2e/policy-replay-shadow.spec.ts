@@ -85,8 +85,10 @@ test.describe('policy, replay and shadow', () => {
     await expect(page.getByText('Pinned inputs')).toBeVisible();
     await capture(page, '18-replay-report');
 
-    // The report states its denominator and refuses to invent accuracy figures.
-    await expect(page.getByText(/completedCount/)).toBeVisible();
+    // The report states its denominator and refuses to invent accuracy figures. The denominator
+    // appears both as the rate's own note and in the explanatory notice, depending on whether a rate
+    // exists at all, so this asserts it is present rather than that it appears exactly once.
+    await expect(page.getByText(/completedCount/).first()).toBeVisible();
     await expect(page.getByText(/No labelled fraud outcomes exist/)).toBeVisible();
     await expect(page.getByText(/not a benchmark/)).toBeVisible();
 

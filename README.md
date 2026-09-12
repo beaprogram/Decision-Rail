@@ -198,7 +198,7 @@ The browser tests run a real Chromium against the packaged application with real
 
 Timing-sensitive behaviour is tested with injected clocks, explicit failpoints, and bounded polling rather than sleeps. A test named for recovery leaves behind exactly the state a killed process leaves, so recovery has to happen through durable state and lease expiry. The [verification guide](docs/verification.md) explains the failure cases and why real infrastructure matters.
 
-[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34556041913) passed the same 186 tests and both demos on revision `3bc2998`, against PostgreSQL 16 and Kafka. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34664229852) passed the backend, frontend, and browser suites plus both demos on revision `87e34cb`, against PostgreSQL 16 and Kafka. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 ## Operator console
 

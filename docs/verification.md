@@ -54,7 +54,7 @@ Tests share one database on purpose, and append-only history is retained so the 
 
 CI runs the same `compose.test.yaml` stack rather than workflow service containers, so the documented local command and the remote build exercise identical infrastructure. It then builds the Docker image, starts the container, and runs both demo scripts without publishing the image.
 
-[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34556041913) passed on revision `3bc2998`: the same 186 tests against PostgreSQL 16 and a real broker, the image build, container startup, and both demos (12 and 27 checks). CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34664229852) passed on revision `87e34cb`: 209 backend tests, 17 frontend unit tests, and 30 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, and both demos (12 and 27 checks). CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 Test reports are written under `target/surefire-reports/`; the JaCoCo report is generated under `target/site/jacoco/`. CI uploads available reports when a verification job finishes, including on failure. Coverage is a diagnostic aid, not a substitute for meaningful assertions.
 

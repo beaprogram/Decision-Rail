@@ -22,7 +22,7 @@ import org.springframework.security.web.csrf.CsrfToken;
 import org.springframework.security.web.csrf.CsrfTokenRequestAttributeHandler;
 import org.springframework.security.web.csrf.CsrfTokenRequestHandler;
 import org.springframework.security.web.csrf.XorCsrfTokenRequestAttributeHandler;
-import org.springframework.security.web.util.matcher.AntPathRequestMatcher;
+import org.springframework.security.web.servlet.util.matcher.PathPatternRequestMatcher;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
@@ -126,7 +126,7 @@ public class BrowserSessionConfig {
                                 401, "AUTHENTICATION_FAILED", "The username or password is not correct."))
                         .permitAll())
                 .logout(logout -> logout
-                        .logoutRequestMatcher(new AntPathRequestMatcher("/ui/session", "DELETE"))
+                        .logoutRequestMatcher(PathPatternRequestMatcher.withDefaults().matcher(HttpMethod.DELETE, "/ui/session"))
                         // A real server-side logout: the session is destroyed, not just forgotten by
                         // the client, so a copied cookie cannot be replayed afterwards.
                         .invalidateHttpSession(true)

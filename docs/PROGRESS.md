@@ -67,9 +67,10 @@ Local evidence recorded **2026-09-11 UTC** using Java **21.0.11**, PostgreSQL **
   ledger, and outbox records in their original shape, then applies V3 to V5 and asserts the sequence
   backfill, delivery status, payload routing identity, preserved financial records, and that the
   sealed-journal guarantee still holds.
-- PostgreSQL 16 and Docker runtime verification: [the remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34556041913) passed on revision
-  `3bc2998`, running the same `compose.test.yaml` stack, the full 186-test suite, the image build,
-  container startup, and both demos (12 and 27 checks). Do not equate a checked-in CI workflow with a
+- PostgreSQL 16 and Docker runtime verification: [the remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34664229852) passed on revision
+  `87e34cb`, running the same `compose.test.yaml` stack, the full 209-test backend suite, the frontend
+  build and unit tests, the image build, container startup, both demos (12 and 27 checks), and the
+  30-test browser suite against the packaged container. Do not equate a checked-in CI workflow with a
   passing remote build; inspect the workflow result for the revision you care about.
 - Public deployment: not performed.
 
