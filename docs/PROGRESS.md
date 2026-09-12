@@ -1,7 +1,7 @@
 # Current delivery and continuation
 
-The plan is ten equally weighted scope checkpoints. Six are now complete: **approximately 60% of
-planned scope**, not 60% of effort or production readiness. Calling it that is planning shorthand, and
+The plan is ten equally weighted scope checkpoints. Seven are now complete: **approximately 70% of
+planned scope**, not 70% of effort or production readiness. Calling it that is planning shorthand, and
 the checkpoints are not equally difficult. The detailed scope and completion criteria are in
 [roadmap.md](roadmap.md).
 
@@ -21,64 +21,72 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 6. Resilience controls: explicit send deadlines, a documented retry budget across both layers, a
    circuit breaker at the broker boundary, worker limits and backpressure, durable backlog and failure
    visibility, and liveness, readiness, and degraded asynchronous capability as three separate signals.
+7. The operator console: browser session authentication with CSRF protection on its own security chain,
+   an authoritative merchant payment search with keyset paging, a lifecycle timeline that keeps the
+   payment transaction, broker publication, and each consumer group distinct, an administrative
+   failed-event list with redrive, and seven screens covering payments, accounts, policy versions,
+   replay, shadow, and event delivery. The dashboard is built into the application jar and served from
+   the same origin as the API it calls.
 
 ## Verification record
 
-Local evidence recorded **2026-09-11 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka
+Local evidence recorded **2026-09-12 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka
 **3.9.1**, and Node **22.14.0**.
 
-- Pinned-wrapper build and suite: **209 backend tests passed**, with **0 failures, 0 errors, and 0
-  skipped** (107 domain and contract units, 4 architecture rules, 48 PostgreSQL integration tests, 27
-  against both PostgreSQL and a real single-node broker, and 23 covering browser authentication and the
-  dashboard read APIs). Every test from the earlier milestones is still present and passing.
-- Dashboard: **17 frontend unit tests** and **30 browser end-to-end tests**, the latter run by a real
-  Chromium against the packaged application with real PostgreSQL and Kafka, all passing.
-- Checkpoint 7 delivered the operator console: browser session authentication with CSRF protection on
-  its own security chain, an authoritative merchant payment search, a lifecycle timeline, an
-  administrative failed-event list, and seven screens covering payments, accounts, policy versions,
-  replay, shadow, and event delivery. The dashboard is built into the application jar and served from
-  the same origin as the API it calls.
-- A review-driven correction pass fixed five correctness defects and one inaccurate claim in this
-  ledger. Each correction has a regression test that failed before it and passes after; the failure
-  counts and the evidence are recorded in [verification.md](verification.md). The completed-checkpoint
-  count is unchanged: this was corrective work inside checkpoints 4 to 6, not new scope.
-  - Unhealthy health statuses answered HTTP 200, because a custom status mapping replaces Spring
-    Boot's defaults rather than adding to them. A readiness probe reported DOWN in its body while
-    returning a success code.
-  - A shadow worker whose claim had been taken over still committed its comparison, so a task could be
-    marked successful while its only stored comparison recorded a failure.
-  - An obsolete replay owner could commit results and item transitions, and completion was decided in
-    separate transactions from the totals it published.
-  - Event validation accepted values the consumer's own tables reject, so an unprocessable record was
-    retried as a transient storage outage and blocked its partition indefinitely.
-  - Invalid policy definitions reached the generic handler as HTTP 500 instead of the structured 400
-    contract.
+- Pinned-wrapper build and suite: **213 backend tests passed**, with **0 failures, 0 errors, and
+  0 skipped**. Every test from the earlier milestones is still present and passing; the breakdown by
+  group is in [verification.md](verification.md).
+- Dashboard: **41 frontend unit tests** and **41 browser end-to-end tests**, the latter
+  run by a real Chromium against the packaged application with real PostgreSQL and Kafka, all passing.
+  The browser suite runs with **retries disabled**, locally and in CI, so a first-attempt failure cannot
+  be hidden by a passing second attempt.
+- A second review-driven correction pass fixed seven defects in the checkpoint 7 work. Each has a
+  regression test that failed before the fix and passes after; the reproduced failure counts are
+  recorded in [verification.md](verification.md). The completed-checkpoint count is unchanged: this was
+  corrective work inside checkpoint 7, not new scope.
+  - Authentication transitions left the browser with no CSRF token. Rotation on login expired the old
+    cookie and deferred writing the replacement, and a successful login short-circuits the filter chain,
+    so nothing downstream ever materialised it. The login response's only `XSRF-TOKEN` header was the
+    expiry. Signing out then failed with 403, and the earlier logout test only passed because it read
+    the payment list in between, which is what issued the token.
+  - A failed sign-out was presented as a completed one. The screen was cleared in a `finally` block
+    whatever the server said, and the rejected promise was discarded, so a session that still existed
+    was reported as destroyed.
+  - A retried command was rebuilt from current form state, so editing the amount or the candidate
+    policy after submitting changed what the original idempotency key stood for.
+  - An incomplete successful response was treated as success with no data. The request deadline ended at
+    the response headers and body-parse failures became `null`, so a mutation whose outcome was unknown
+    discarded its idempotency key.
+  - Identity fencing ran after side effects and not after body processing, so a response belonging to a
+    previous identity could broadcast session expiry or write into the new identity's command state.
+  - Payment details labelled funds as reserved whenever no failure code was present, including for a
+    policy-declined payment that never held anything.
+  - This ledger contradicted itself: six checkpoints and 60% alongside a delivered operator console.
 - Packaged application in the local Compose stack, rebuilt after the corrections: `scripts/demo.sh`
   passed all **12 HTTP checks** and `scripts/async-demo.sh` passed all **27 checks**.
 - The asynchronous demo observed: a payment authorized with the broker container stopped; retained
   event intent with the breaker OPEN and `/actuator/health/async` DEGRADED while readiness stayed UP;
   delivery resuming after restart with the original event id and the breaker closing through its
   half-open probe; a projection applied count that stayed at 1 after the same event was delivered
-  twice more; a replay job whose membership stayed at 4 pinned inputs when a later payment committed;
-  a 409 when a policy version id was rebound to different content; and a shadow divergence (live
-  APPROVE, candidate DECLINE at score 60) after which the balance was unchanged and held funds moved
-  only by the new authorization's own hold.
+  twice more; a replay job whose membership stayed fixed when a later payment committed; a 409 when a
+  policy version id was rebound to different content; and a shadow divergence (live APPROVE, candidate
+  DECLINE at score 60) after which the balance was unchanged and held funds moved only by the new
+  authorization's own hold.
 - A migration upgrade check applies V1 and V2 to a throwaway database, seeds payment, idempotency,
-  ledger, and outbox records in their original shape, then applies V3 to V5 and asserts the sequence
-  backfill, delivery status, payload routing identity, preserved financial records, and that the
-  sealed-journal guarantee still holds.
-- PostgreSQL 16 and Docker runtime verification: [the remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34664229852) passed on revision
-  `87e34cb`, running the same `compose.test.yaml` stack, the full 209-test backend suite, the frontend
-  build and unit tests, the image build, container startup, both demos (12 and 27 checks), and the
-  30-test browser suite against the packaged container. Do not equate a checked-in CI workflow with a
-  passing remote build; inspect the workflow result for the revision you care about.
+  ledger, and outbox records in their original shape, then applies the later migrations and asserts the
+  sequence backfill, delivery status, payload routing identity, preserved financial records, and that
+  the sealed-journal guarantee still holds.
+- PostgreSQL 16 and Docker runtime verification: [the remote run](@@CI_URL@@) passed on revision
+  `@@CI_SHA@@`, running the same `compose.test.yaml` stack, the full backend suite, the frontend build
+  and unit tests, the image build, container startup, both demos, and the browser suite against the
+  packaged container. Do not equate a checked-in CI workflow with a passing remote build; inspect the
+  workflow result for the revision you care about.
 - Public deployment: not performed.
 
 Record actual commands, test counts, failures, and meaningful limitations here after verification.
 
 ## Remaining checkpoints
 
-- [ ] 7. Operator interface for payment state, explanations, and comparisons.
 - [ ] 8. Correlated telemetry, reproducible load tests, and measured performance limits.
 - [ ] 9. Refunds/reversals, reconciliation, financial corrections, and recovery procedures.
 - [ ] 10. Free-budget hosting assessment, secure public demo deployment, and release walkthrough.
@@ -93,6 +101,11 @@ These are known and deliberate, not oversights:
   delivery outage and a lost volume is lost events; the outbox is what makes that survivable.
 - **A terminally failed event blocks its own payment's stream** until an operator redrives it. Other
   payments keep draining. There is no automatic quarantine path.
+- **Dashboard authentication is a local development arrangement.** Identities and passwords come from
+  the generated `.env`; there is no user store, no password rotation, no multi-factor step, and no
+  account lockout. It is not hardened for exposure to the public internet.
+- **Sessions are in-memory and single-instance.** Restarting the application signs everyone out, and
+  running two instances behind a load balancer would need shared session storage that does not exist.
 - **A candidate policy is never authoritative.** There is no promotion workflow and no code path that
   could make one decide a real payment. That remains future work.
 - **Candidates cannot define new decision flags or move the outcome thresholds.** They vary rules only.
@@ -111,27 +124,32 @@ These are known and deliberate, not oversights:
 - **Breaker and backoff defaults are not derived from measurement.** They are reasonable development
   values; the retry budget is documented so it can be reasoned about.
 - **No outbox or event retention policy yet.** Published rows accumulate.
-- **Still absent:** refunds, reconciliation, an operator UI, distributed tracing, measured performance
-  limits, and any public deployment.
+- **Still absent:** refunds, reconciliation, distributed tracing, measured performance limits, and any
+  public deployment.
 
 ## Guidance for the next implementation session
 
 Read [architecture.md](architecture.md), the [ADRs](adr/), and the [API contract](openapi.yaml) before
-extending this. Checkpoint 7 is the operator interface, and the data it needs mostly exists: the
-activity projection, replay reports and results, shadow comparisons, and the outbox backlog view.
+extending this. Checkpoint 8 is correlated telemetry and measured performance limits. The signals it
+needs already exist as distinct health and metrics surfaces; what is missing is correlation across the
+payment transaction, the dispatcher, and the consumer, and any measurement with a stated method.
 
 Start by confirming the current suite and both demos, with the test stack from `compose.test.yaml`.
 Integration tests install failure-injection triggers and create a throwaway database, so they must not
-run against a development or concurrently used database.
+run against a development or concurrently used database. Browser tests need the application actually
+running; they drive the Compose stack directly to produce a broker outage, and they run with retries
+disabled on purpose.
 
 Preserve the payment transaction boundary, merchant-scoped request identity, the immutable ledger, and
 stored decision evidence. Preserve the newer guarantees too: the per-payment event sequence and its
 claim predicate, lease fencing, consumer deduplication committing with its effect, policy version
 immutability, the materialised replay snapshot, and the structural isolation of replay and shadow from
-financial mutation. The architecture tests enforce the last of those; do not relax them to make a new
-dependency convenient.
+financial mutation. Preserve the dashboard's own: the `/ui` session chain separate from stateless Basic
+`/v1`, CSRF on every browser mutation including login and logout, one immutable submitted command per
+idempotency key, and an unknown outcome reported as unknown rather than as success or failure. The
+architecture tests enforce the isolation rules; do not relax them to make a new dependency convenient.
 
-Schema changes go in new Flyway migrations after V5. Do not edit an applied migration, and extend the
+Schema changes go in new Flyway migrations after V6. Do not edit an applied migration, and extend the
 migration upgrade check when a new one backfills anything.
 
 Keep generated credentials, `.env`, local database and runtime files under `.local/`, and build output

@@ -170,7 +170,7 @@ A rolled-back transaction must not leave a successful payment without its journa
 
 The event stream is now the seam for further asynchronous work. A new consumer joins with its own group and its own deduplication records, without touching the producer or the payment core.
 
-Remaining milestones build on what exists rather than revisiting it: an operator interface over the projection and comparison data, correlated tracing and measured performance limits, refunds and reconciliation as new operations against the append-only ledger, and a hosting assessment.
+The operator interface is built on that same data and adds no new way to change anything. Remaining milestones build on what exists rather than revisiting it: correlated tracing and measured performance limits, refunds and reconciliation as new operations against the append-only ledger, and a hosting assessment.
 
 Two things would justify revisiting this design. Consumers needing ordering *across* payments would require a different sequencing strategy than a per-aggregate counter. Measured backlog drain time exceeding what a single dispatcher can sustain would justify partitioned workers.
 

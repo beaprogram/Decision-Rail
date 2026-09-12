@@ -40,6 +40,14 @@ The suite stops and restarts the broker container to produce a real outage, whic
 Compose file. The application deliberately exposes no endpoint that could do that. Set
 `SCREENSHOT_DIR` to collect screenshots of each completed screen.
 
+**Retries are zero, locally and in CI.** `playwright.config.ts` sets `retries: 0` unconditionally. A
+browser test that only passes on a second attempt is reporting a real defect in the application or in
+itself, and retrying would hide exactly the first-attempt failures this suite exists to catch. CI runs
+the same command with the same setting, so a green CI run means the suite was green on first attempt.
+Some tests create fixtures of their own — an account, a candidate policy — rather than asserting against
+the seeded demo balances, so that a test which moves money never depends on, or disturbs, the state the
+walkthrough uses.
+
 Those are also the test profile's defaults, so `./mvnw verify` alone works once the stack is up.
 
 To reset the stack between runs:
@@ -60,9 +68,9 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 ## Recorded local result
 
-Recorded **2026-09-11 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
+Recorded **2026-09-12 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw verify` passed **209 backend tests** with **0 failures, 0 errors, and 0 skipped**:
+`./mvnw clean verify` passed **213 backend tests** with **0 failures, 0 errors, and 0 skipped**:
 
 | Group | Tests | Infrastructure |
 | --- | --- | --- |
@@ -70,18 +78,22 @@ Recorded **2026-09-11 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Ka
 | Architecture rules | 4 | None |
 | PostgreSQL integration | 48 | Real PostgreSQL, including health status codes, worker takeover races, and the migration upgrade check |
 | PostgreSQL and Kafka integration | 27 | Real PostgreSQL and a real single-node broker |
-| Browser authentication | 11 | Real HTTP and a real cookie jar, not MockMvc: cookie attributes, CSRF round trips, and session identity only exist once a real client and container exchange headers |
+| Browser authentication | 15 | Real HTTP and a real cookie jar, not MockMvc: cookie attributes, CSRF round trips across login and logout with no intervening request, and session identity only exist once a real client and container exchange headers |
 | Dashboard read APIs | 12 | Real PostgreSQL: search, filters, keyset paging, timeline, failed events, and tenant isolation on every route |
 
-The frontend adds **17 unit tests** covering exact money conversion and idempotent command handling,
-and **30 browser end-to-end tests** run by a real Chromium against the packaged application with real
-PostgreSQL and Kafka.
+The frontend adds **41 unit tests** covering exact money conversion, response classification at
+the transport boundary, idempotent command submission and replay, and funding presentation, and
+**41 browser end-to-end tests** run by a real Chromium against the packaged application with
+real PostgreSQL and Kafka, with retries disabled.
 
 ### Browser verification
 
-These are integration tests, not unit tests with a fake network. Exactly one response is intercepted
-in the whole suite, to hold a request open while the signed-in identity changes, and even there the
-response itself is the server's own.
+These are integration tests, not unit tests with a fake network. Responses are intercepted in five
+places, and in each the response being withheld is the server's own: one is held open while the signed-in
+identity changes, one sign-out is stopped before it reaches the server, and three commands are allowed to
+reach the server and commit before their reply is dropped. Nothing is stubbed; an interception decides
+only whether a real reply arrives, because "the server did the work and you never found out" cannot be
+produced any other way.
 
 | Case | Evidence | Failure prevented |
 | --- | --- | --- |
@@ -98,10 +110,16 @@ response itself is the server's own.
 | Broker outage presentation | Payments authorize and read normally while delivery reports DEGRADED | A broker outage presented as a payment failure |
 | Loading, empty, unavailable, conflict states | Each has its own presentation; a null rate reads "Not available", never zero | An absent measurement rendered as a real one |
 | Narrow width, keyboard, labels, dialogs | No horizontal page scroll at 390px, every control labelled, focus visible, Escape closes without acting | A console that cannot be operated without a mouse |
+| Sign in, out, and in again on one page, with no reload | Each transition leaves a usable CSRF token, proven without navigating, because a reload obtains one as a side effect | A sign-in that only works after a reload, and a reload concealing it |
+| Sign out immediately after signing in, as an identity with no workspace | The sign-out is accepted although no workspace request was ever made | Authentication that depends on an unrelated data request to work |
+| A sign-out that never reaches the server | Reported as unconfirmed with a retry, not as a completed sign-out; the retry reconciles | A live session presented as destroyed |
+| A sign-out that commits but loses its response | Reconciled against the server and reported as signed out | An unresolved notice for work that actually completed |
+| A command whose response is withheld after the server commits | The retry resends the submitted bytes under the original key after the form was edited, and the database shows one payment, one job, one journal | A retry that means something different from the command it is recovering |
+| CSRF still required after a transition | A mutation with no token is refused once signed in again | A transition quietly lowering protection |
 
 Every test from the earlier milestones is still present and passing. Two assertions were **strengthened**, not relaxed: two policy checks previously accepted any `IllegalArgumentException` for an invalid document and now require the structured validation failure with its JSON path, because the old expectation encoded the defect that such inputs were reported as server faults.
 
-### Corrections verified in this run
+### Corrections verified in the asynchronous-path pass
 
 Each correction was demonstrated by a test that failed before it and passes after.
 
@@ -116,6 +134,25 @@ Each correction was demonstrated by a test that failed before it and passes afte
 
 The partition-blocking case was confirmed by temporarily restoring the original currency check: the valid record queued behind the refused one was still unprocessed after 40 seconds, which is the blocked partition. With the correction it is processed.
 
+### Corrections verified in the operator-console pass
+
+A second review pass against the checkpoint 7 work. Each correction has a test that failed before it and
+passes after, and the failure counts below are the ones actually observed against the unfixed code.
+
+| Correction | Regression test | Failures reproduced before the fix |
+| --- | --- | --- |
+| A CSRF token was not available after an authentication transition | `BrowserSessionIntegrationTest` (4 added cases) | 1 failure, 3 errors of 15. The login response's only `XSRF-TOKEN` header was `XSRF-TOKEN=; Max-Age=0`, so the cookie jar held no token at all and the three transition cases threw rather than asserting |
+| The same defect through a real browser | `session-transitions.spec.ts` | A network probe against the unfixed build recorded `GET /ui/identity -> 200`, `POST /ui/session -> 200`, `DELETE /ui/session -> 403`, with only `JSESSIONID` present afterwards and the UI still showing signed out |
+| A failed sign-out was reported as completed | `session-transitions.spec.ts` (sign-out never reaching the server, and committed-but-response-lost) | The unfixed client set anonymous in a `finally` block and the rejected promise was discarded, so neither case could be distinguished |
+| A retry rebuilt the command from current form state | `command.test.ts`, `command-recovery.spec.ts` | `AssertionError: expected 9900 to be 2500` — the retry sent the edited amount under the original key |
+| An unreadable successful response was treated as success | `client.test.ts` | 9 of 13 failed, including a genuine hang (`Test timed out in 5000ms`) for a body that never completes, because the deadline ended at the headers |
+| Identity fencing ran after side effects | `client.test.ts` | Included in the 9 above: a stale 401 broadcast session expiry, and a stale body failure wrote into the new identity's state |
+| Funding labels were derived from the absence of a failure code | `funding.test.ts` | 7 of 7 failed, including a policy-declined payment labelled "Funds reserved" |
+
+The CSRF reproduction was run twice, the second time from a clean build, after an IDE-written class file
+in `target/classes` produced a misleading result. Treat a surprising test outcome as suspect until the
+build it came from is known to be Maven's own.
+
 ### Test infrastructure notes
 
 Two environmental details were corrected while adding these tests, both test-only:
@@ -123,7 +160,21 @@ Two environmental details were corrected while adding these tests, both test-onl
 - **The disposable test database now allows 400 connections.** The suite keeps one cached Spring context per test configuration for the whole run, each with its own pool, and the added classes pushed the total past the server's default of 100. The test profile's pool is also reduced to 6, which is ample for its concurrency checks.
 - **A freshly enqueued row is not claimed by a cycle run in the same millisecond.** The row takes its due time from the database clock while the worker compares it against the JVM clock, and the two differ by a few milliseconds in a container. Tests that drive a single cycle backdate the due time rather than depending on that agreement. Production is unaffected: the workers poll continuously.
 
-Both demo scripts passed against the packaged application in the local Compose stack: `scripts/demo.sh` (**12 HTTP checks**) and `scripts/async-demo.sh` (**27 checks**). The browser suite passed **30 of 30** against that same packaged application. The asynchronous demo observed a payment authorized with the broker container stopped, the breaker OPEN with `/actuator/health/async` DEGRADED while readiness stayed UP, delivery resuming after restart with the original event id and the breaker closing again, a projection applied count that stayed at 1 after the same event was delivered twice more, a replay job whose membership stayed at 4 inputs when a later payment committed, a 409 when a policy version id was rebound to different content, and a shadow divergence (live APPROVE, candidate DECLINE at score 60) after which the balance was unchanged and held funds moved only by the new authorization's own hold.
+- **A page's own `fetch` cannot replay a cookie.** `Cookie` is a forbidden header name, so a browser
+  drops it silently. Two sign-out tests originally checked that a destroyed session's cookie no longer
+  authenticates by calling `fetch` from the page with that header, which the browser removed; the request
+  then went out with the jar the page already had, which after a sign-out is empty. Both returned 401
+  whether or not the server had destroyed anything. They now replay the cookie from an API request
+  context outside the browser, where the header is honoured.
+
+- **Killing a run mid-test can leave fault injection installed.** The tests that inject storage failures
+  create a trigger and drop it in a `finally` block, which a terminated JVM never reaches. A leftover
+  trigger on `consumer_quarantine` blocks every quarantine insert, and since holding the partition is the
+  correct response to a storage failure, the symptom is four unrelated-looking consumer timeouts rather
+  than an error naming the cause. Check `SELECT tgname FROM pg_trigger WHERE NOT tgisinternal` for a
+  `test_` prefix, or reset the stack with `down -v`, before believing such a failure.
+
+Both demo scripts passed against the packaged application in the local Compose stack: `scripts/demo.sh` (**12 HTTP checks**) and `scripts/async-demo.sh` (**27 checks**). The browser suite passed **41 of 41** against that same packaged application, on first attempt with retries disabled. The asynchronous demo observed a payment authorized with the broker container stopped, the breaker OPEN with `/actuator/health/async` DEGRADED while readiness stayed UP, delivery resuming after restart with the original event id and the breaker closing again, a projection applied count that stayed at 1 after the same event was delivered twice more, a replay job whose membership stayed at 4 inputs when a later payment committed, a 409 when a policy version id was rebound to different content, and a shadow divergence (live APPROVE, candidate DECLINE at score 60) after which the balance was unchanged and held funds moved only by the new authorization's own hold.
 
 ## Failure cases and rationale
 
@@ -172,6 +223,12 @@ Both demo scripts passed against the packaged application in the local Compose s
 | Invalid policy definition | `400` with the offending JSON path, and no version row persisted. | An input error reported to the caller as a server fault. |
 | Cross-tenant replay and shadow access | Another merchant's job, results, and comparisons read as absent. | Cross-tenant disclosure through new endpoints. |
 | Privileged route matching | Merchants and the metrics account are refused admin routes; admin is refused merchant routes. | A privileged path falling through to the broad merchant rule. |
+| CSRF token across an authentication transition | Login and logout responses each carry a usable token; the next mutation is accepted with nothing in between. | A transition that leaves the page unable to make its next request, or a reload hiding it. |
+| A sign-out the server never confirmed | Data is cleared immediately; the outcome is reported as unconfirmed and reconciled when the server answers. | A session that still exists being presented as destroyed. |
+| A retried command after the form changed | The original method, path, body and key are resent byte for byte. | A retry that recovers a different command from the one it claims. |
+| A successful response whose body cannot be read | Classified indeterminate; the snapshot and key are kept for retry. | An unknown outcome recorded as a success with no data. |
+| A response arriving after the identity changed | Rejected before any identity-sensitive side effect, and again after the body is read. | A previous identity's failure expiring or corrupting the new one's state. |
+| Funding presentation per lifecycle state | Reserved, captured, released, or none, derived from status; a funding decline keeps the separate risk outcome visible. | Held funds claimed for a payment that never reserved any. |
 
 These are the design targets for the relevant checks. The source tests and their actual results are the authority on which cases are currently exercised; do not infer a passing result from this table.
 

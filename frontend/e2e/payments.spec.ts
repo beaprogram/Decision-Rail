@@ -1,5 +1,5 @@
 import { expect, test } from '@playwright/test';
-import { authorizeThroughUi, capture, identities, signIn } from './support';
+import { authorizeThroughUi, capture, createIsolatedAccount, identities, signIn, sql } from './support';
 
 /** Authorization, decision evidence, lifecycle actions, search, and the timeline. */
 test.describe('payment workspace', () => {
@@ -59,8 +59,39 @@ test.describe('payment workspace', () => {
     await expect(decision.getByText('HIGH_AMOUNT').first()).toBeVisible();
     // A policy decline has no funding failure code.
     await expect(page.getByText('Declined for funds, not by policy')).toHaveCount(0);
+    // And it never reserved anything. The funding row is derived from the lifecycle state: having no
+    // failure code used to be read as success here, which labelled this payment "Funds reserved".
+    await expect(page.getByText('No funds reserved').first()).toBeVisible();
+    await expect(page.getByText('Declined by policy before any reservation was attempted.')).toBeVisible();
+    await expect(page.getByText('Funds reserved', { exact: true })).toHaveCount(0);
     expect(paymentId).toMatch(/^[0-9a-f-]{36}$/);
     await capture(page, '07-policy-decline');
+  });
+
+  test('shows a funding decline as a funding failure while keeping the policy approval visible', async ({ page }) => {
+    // Its own account, with barely any balance, so the decline comes from funds and no seeded account
+    // is touched. 20.00 against 5.00 available is refused by funds while the policy approves it.
+    const account = await createIsolatedAccount('demo-merchant', 'CAD', 500);
+    await page.goto('/dashboard/payments/new');
+    await page.getByLabel('Account').selectOption(account);
+    await page.getByLabel(/^Amount/).fill('20.00');
+    await expect(page.getByText('This is more than the account currently has available')).toBeVisible();
+    await page.getByRole('button', { name: 'Review and authorize' }).click();
+    await page.getByRole('button', { name: 'Authorize', exact: true }).click();
+    await page.getByRole('button', { name: 'Open payment' }).click();
+
+    // Two separate facts, kept separate: the risk decision approved, and the funding failed.
+    const decision = page.locator('section.card', { hasText: 'Stored decision' });
+    await expect(decision.getByText('APPROVE').first()).toBeVisible();
+    await expect(page.getByText('Declined for funds, not by policy')).toBeVisible();
+    await expect(page.getByText('INSUFFICIENT_FUNDS').first()).toBeVisible();
+    await expect(
+      page.getByText('The policy approved this payment. It was declined because the account did not have enough available funds, so nothing was reserved.'),
+    ).toBeVisible();
+    // Nothing was held, whatever the risk outcome said.
+    await expect(page.getByText('Funds reserved', { exact: true })).toHaveCount(0);
+    expect(await sql(`SELECT held_minor FROM accounts WHERE id = '${account}'`)).toBe('0');
+    await capture(page, '41-funding-decline');
   });
 
   test('captures one payment and voids another, then reflects both', async ({ page }) => {

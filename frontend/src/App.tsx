@@ -51,7 +51,12 @@ function Authenticated() {
     );
   }
   if (state.status === 'anonymous') {
-    return <SignInPage sessionExpired={state.reason === 'expired'} />;
+    return (
+      <SignInPage
+        sessionExpired={state.reason === 'expired'}
+        {...(state.unconfirmedSignOut ? { unconfirmedSignOut: state.unconfirmedSignOut } : {})}
+      />
+    );
   }
 
   return (

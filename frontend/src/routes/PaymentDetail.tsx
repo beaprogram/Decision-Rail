@@ -4,8 +4,9 @@ import { Link, useParams } from 'react-router-dom';
 import { ApiError } from '../api/client';
 import { merchantApi } from '../api/endpoints';
 import { useSession } from '../auth/session';
-import { useIdempotentCommand } from '../lib/command';
+import { useIdempotentCommand, type CommandHandle } from '../lib/command';
 import { formatMinorUnits } from '../lib/money';
+import { fundingPresentation } from '../components/funding';
 import { PageHeader } from '../components/Shell';
 import {
   Badge,
@@ -27,6 +28,7 @@ import {
   Stat,
   TableScroll,
   Timestamp,
+  UnresolvedCommand,
 } from '../components/ui';
 import type { Payment, PaymentTimeline } from '../api/types';
 
@@ -61,8 +63,8 @@ export function PaymentDetailPage() {
     void queries.invalidateQueries({ queryKey: ['accounts'] });
   };
 
-  const capture = useIdempotentCommand('capture', (key) => merchantApi.capture(key, paymentId));
-  const voidCommand = useIdempotentCommand('void', (key) => merchantApi.voidPayment(key, paymentId));
+  const capture = useIdempotentCommand<Payment>('capture');
+  const voidCommand = useIdempotentCommand<Payment>('void');
   const [pending, setPending] = useState<'capture' | 'void' | null>(null);
 
   if (payment.isPending) {
@@ -99,16 +101,26 @@ export function PaymentDetailPage() {
   }
 
   const record = payment.data;
+  const funding = fundingPresentation(record.status, record.failureCode, record.decision.outcome);
   const fundingDecline = record.status === 'DECLINED' && record.decision.outcome === 'APPROVE';
   const canCapture = can.createPayments && record.status === 'AUTHORIZED';
   const canVoid = can.createPayments && record.status === 'AUTHORIZED';
 
   const runCommand = async (kind: 'capture' | 'void') => {
     const handle = kind === 'capture' ? capture : voidCommand;
-    const result = await handle.run(undefined);
+    // Captured once, so a retry replays the same command against the same payment.
+    await handle.submit({
+      method: 'POST',
+      path: `/ui/payments/${paymentId}/${kind === 'capture' ? 'capture' : 'void'}`,
+      summary: [
+        { label: 'Payment', value: paymentId },
+        { label: 'Command', value: kind === 'capture' ? 'Capture' : 'Void' },
+      ],
+    });
     setPending(null);
-    if (result) refreshEverything();
-    else refreshEverything(); // A rejection or conflict also means re-reading the real state.
+    // Whether it succeeded, was refused, or conflicted, the authoritative state is re-read rather
+    // than inferred from the response.
+    refreshEverything();
   };
 
   return (
@@ -120,12 +132,21 @@ export function PaymentDetailPage() {
         actions={
           <>
             {canCapture && (
-              <button type="button" className="primary" onClick={() => setPending('capture')}>
+              <button
+                type="button"
+                className="primary"
+                onClick={() => setPending('capture')}
+                disabled={capture.unresolved || voidCommand.unresolved}
+              >
                 Capture
               </button>
             )}
             {canVoid && (
-              <button type="button" onClick={() => setPending('void')}>
+              <button
+                type="button"
+                onClick={() => setPending('void')}
+                disabled={capture.unresolved || voidCommand.unresolved}
+              >
                 Void
               </button>
             )}
@@ -155,8 +176,8 @@ export function PaymentDetailPage() {
           <Stat label="Risk score" value={record.decision.score} note={`Policy ${record.decision.ruleSetVersion}`} />
           <Stat
             label="Funding result"
-            value={record.failureCode ? <Badge tone="danger">{record.failureCode}</Badge> : <Badge tone="success">Funds reserved</Badge>}
-            note={record.status === 'VOIDED' ? 'Hold released' : undefined}
+            value={<Badge tone={funding.tone}>{funding.label}</Badge>}
+            note={funding.note}
           />
         </div>
 
@@ -169,6 +190,7 @@ export function PaymentDetailPage() {
                 ['Amount', <Money minorUnits={record.amountMinor} currency={record.currency} />],
                 ['Country', record.country],
                 ['Status', <PaymentStatusBadge status={record.status} />],
+                ['Funding result', <Badge tone={funding.tone}>{funding.label}</Badge>],
                 ['Funding failure', record.failureCode ?? '—'],
                 ['Created', <Timestamp value={record.createdAt} />],
                 ['Updated', <Timestamp value={record.updatedAt} />],
@@ -345,23 +367,18 @@ function CommandOutcome({
   handle,
 }: {
   kind: 'capture' | 'void';
-  handle: ReturnType<typeof useIdempotentCommand<undefined, Payment>>;
+  handle: CommandHandle<Payment>;
 }) {
   const label = kind === 'capture' ? 'Capture' : 'Void';
-  if (handle.state.phase === 'uncertain') {
+  if (handle.state.phase === 'uncertain' && handle.submitted) {
     return (
-      <Notice tone="warning" title={`${label} may or may not have been applied`}>
-        <span>{handle.state.error.detail}</span>
-        <span>
-          Retrying uses the same idempotency key, so if the command did go through you will get its
-          original result rather than a second one.
-        </span>
-        <div className="row">
-          <button type="button" onClick={() => void handle.retry()} disabled={handle.busy}>
-            Retry safely
-          </button>
-        </div>
-      </Notice>
+      <UnresolvedCommand
+        title={`${label} may or may not have been applied`}
+        detail={handle.state.error.detail}
+        submitted={handle.submitted}
+        busy={handle.busy}
+        onRetry={() => void handle.retry()}
+      />
     );
   }
   if (handle.state.phase === 'failed') {

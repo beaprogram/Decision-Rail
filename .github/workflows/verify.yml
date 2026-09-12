@@ -89,6 +89,9 @@ jobs:
           BROKER_SERVICE: test-broker
           DATABASE_SERVICE: test-database
           DATABASE_NAME: decisionrail_test
+        # No --retries override on purpose: playwright.config.ts pins retries to 0, so a first-attempt
+        # failure fails the build here exactly as it would locally. Do not add retries to settle a flaky
+        # test; fix the test or the application.
         run: npx playwright test
       - name: Show container logs on failure
         if: failure()

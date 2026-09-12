@@ -37,9 +37,19 @@ export class ApiError extends Error {
     return this.status === 409;
   }
 
-  /** True when the answer is genuinely unknown, so a command must not be reported as failed. */
+  /**
+   * True when the answer is genuinely unknown, so a command must not be reported as failed.
+   *
+   * RESPONSE_UNREADABLE belongs here for the same reason a timeout does. A mutation that returned a
+   * success status but no usable body has very likely been applied; calling that a failure invites the
+   * operator to repeat a reservation that already exists.
+   */
   get indeterminate(): boolean {
-    return this.code === 'REQUEST_TIMED_OUT' || this.code === 'NETWORK_UNAVAILABLE';
+    return (
+      this.code === 'REQUEST_TIMED_OUT' ||
+      this.code === 'NETWORK_UNAVAILABLE' ||
+      this.code === 'RESPONSE_UNREADABLE'
+    );
   }
 }
 
@@ -100,6 +110,14 @@ const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 export interface RequestOptions {
   method?: string;
   body?: unknown;
+  /**
+   * A body that was serialized once, earlier, and must be resent byte for byte.
+   *
+   * Used by retries of a command whose outcome is unknown: rebuilding the body from live state would
+   * send different content under the original idempotency key, which the server would then refuse as a
+   * conflicting reuse of that key, destroying the only means of recovering the original command.
+   */
+  rawBody?: string;
   /** Sent as form encoding rather than JSON. Used only by the login endpoint. */
   form?: Record<string, string>;
   idempotencyKey?: string;
@@ -112,6 +130,13 @@ export interface RequestOptions {
    * never had one, and would hide the real reason they were refused.
    */
   authenticationAttempt?: boolean;
+  /**
+   * Whether a successful response must carry a usable JSON body. Defaults to true, because almost
+   * every endpoint here returns one and a success without it is not a usable answer. Set false for
+   * the endpoints that legitimately return nothing, so this is endpoint-aware rather than a blanket
+   * rule applied to every call.
+   */
+  expectsBody?: boolean;
 }
 
 const DEFAULT_TIMEOUT_MS = 15_000;
@@ -138,66 +163,143 @@ export async function apiFetch<T>(path: string, options: RequestOptions = {}): P
   if (options.form) {
     headers['Content-Type'] = 'application/x-www-form-urlencoded';
     body = new URLSearchParams(options.form).toString();
+  } else if (options.rawBody !== undefined) {
+    headers['Content-Type'] = 'application/json';
+    body = options.rawBody;
   } else if (options.body !== undefined) {
     headers['Content-Type'] = 'application/json';
     body = JSON.stringify(options.body);
   }
 
   const timeout = new AbortController();
-  const timer = setTimeout(() => timeout.abort(new DOMException('timeout', 'TimeoutError')), options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+  const timer = setTimeout(
+    () => timeout.abort(new DOMException('timeout', 'TimeoutError')),
+    options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  );
   const signal = options.signal ? anySignal([options.signal, timeout.signal]) : timeout.signal;
 
-  let response: Response;
   try {
-    response = await fetch(path, {
-      method,
-      headers,
-      body,
-      signal,
-      // The session cookie is the credential; it travels automatically on a same-origin request.
-      credentials: 'same-origin',
-      // Authenticated responses must not be reused from a cache.
-      cache: 'no-store',
-      redirect: 'error',
-    });
-  } catch (cause) {
-    clearTimeout(timer);
-    if (options.signal?.aborted) throw cause;
-    if (cause instanceof DOMException && cause.name === 'TimeoutError') {
-      throw new ApiError(0, 'REQUEST_TIMED_OUT',
-        'The request took too long and its outcome is unknown. Retrying is safe.', null);
+    let response: Response;
+    try {
+      response = await fetch(path, {
+        method,
+        headers,
+        body,
+        signal,
+        // The session cookie is the credential; it travels automatically on a same-origin request.
+        credentials: 'same-origin',
+        // Authenticated responses must not be reused from a cache.
+        cache: 'no-store',
+        redirect: 'error',
+      });
+    } catch (cause) {
+      // Fenced before anything else. A transport failure belonging to a previous identity must not
+      // put the identity that exists now into an uncertain state.
+      if (generation !== currentIdentityGeneration()) throw new StaleIdentityError();
+      if (options.signal?.aborted) throw cause;
+      if (timeout.signal.aborted) {
+        throw new ApiError(0, 'REQUEST_TIMED_OUT',
+          'The request took too long and its outcome is unknown. Retrying is safe.', null);
+      }
+      throw new ApiError(0, 'NETWORK_UNAVAILABLE',
+        'The server could not be reached. Its outcome is unknown.', null);
     }
-    throw new ApiError(0, 'NETWORK_UNAVAILABLE',
-      'The server could not be reached. Its outcome is unknown.', null);
+
+    // Fenced before any identity-sensitive side effect. Ending the session on a 401 that belongs to a
+    // previous identity would sign out the person who just signed in.
+    if (generation !== currentIdentityGeneration()) throw new StaleIdentityError();
+
+    if (response.status === 401 && !options.authenticationAttempt) {
+      // Tell the app once, so every screen clears together rather than each discovering it alone.
+      notifySessionEnded();
+      throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Your session has ended. Sign in again.', null);
+    }
+
+    if (response.status === 204) return undefined as T;
+
+    // The body is read under the same deadline as the headers. Ending the deadline once headers
+    // arrive leaves a response whose body never completes hanging forever, which is the one outcome a
+    // caller can do nothing with.
+    let raw: string | null = null;
+    let bodyFailed = false;
+    try {
+      raw = await readBody(response, signal);
+    } catch (cause) {
+      if (options.signal?.aborted) throw cause;
+      bodyFailed = true;
+    }
+
+    // Reading the body is an asynchronous boundary of its own, so identity is checked again. A body
+    // that finished arriving after someone else signed in must not be handed back as their data.
+    if (generation !== currentIdentityGeneration()) throw new StaleIdentityError();
+
+    const contentType = response.headers.get('content-type') ?? '';
+    let payload: unknown = null;
+    let payloadReadable = false;
+    if (!bodyFailed && raw !== null && raw.trim() !== '' && contentType.includes('json')) {
+      try {
+        payload = JSON.parse(raw);
+        payloadReadable = true;
+      } catch {
+        payloadReadable = false;
+      }
+    }
+
+    if (!response.ok) {
+      // A refusal is a definite answer even when its explanation is unreadable. It keeps its status
+      // and falls back to a usable message rather than becoming an unknown outcome.
+      const problem = (payloadReadable ? payload : {}) as Record<string, unknown>;
+      throw new ApiError(
+        response.status,
+        typeof problem.code === 'string' ? problem.code : `HTTP_${response.status}`,
+        typeof problem.detail === 'string' && problem.detail !== ''
+          ? problem.detail
+          : fallbackDetail(response),
+        typeof problem.requestId === 'string' ? problem.requestId : null,
+      );
+    }
+
+    if (!payloadReadable) {
+      if (options.expectsBody ?? true) {
+        // Succeeded as far as the status line goes, but produced nothing the caller can use. For a
+        // mutation that means it may have committed, so the outcome is unknown rather than either
+        // a success or a failure.
+        throw new ApiError(0, 'RESPONSE_UNREADABLE',
+          'The server replied but its response could not be read, so the outcome is unknown. Retrying is safe.',
+          null);
+      }
+      // Nothing was expected and nothing arrived, which is a complete answer rather than an empty one.
+      return undefined as T;
+    }
+    return payload as T;
   } finally {
     clearTimeout(timer);
   }
+}
 
-  if (response.status === 401 && !options.authenticationAttempt) {
-    // Tell the app once, so every screen clears together rather than each discovering it alone.
-    notifySessionEnded();
-    throw new ApiError(401, 'AUTHENTICATION_REQUIRED', 'Your session has ended. Sign in again.', null);
-  }
+/**
+ * Reads a response body, giving up when the deadline or the caller's cancellation fires.
+ *
+ * A real fetch body rejects on abort, but racing the signal explicitly means the deadline also covers
+ * a body that simply never completes, which is the case that used to hang.
+ */
+async function readBody(response: Response, signal: AbortSignal): Promise<string> {
+  return Promise.race([
+    response.text(),
+    new Promise<never>((_resolve, reject) => {
+      const fail = () =>
+        reject(signal.reason instanceof Error ? signal.reason : new DOMException('aborted', 'AbortError'));
+      if (signal.aborted) fail();
+      else signal.addEventListener('abort', fail, { once: true });
+    }),
+  ]);
+}
 
-  if (generation !== currentIdentityGeneration()) {
-    throw new StaleIdentityError();
-  }
-
-  if (response.status === 204) return undefined as T;
-
-  const contentType = response.headers.get('content-type') ?? '';
-  const payload = contentType.includes('json') ? await response.json().catch(() => null) : null;
-
-  if (!response.ok) {
-    const problem = (payload ?? {}) as Record<string, unknown>;
-    throw new ApiError(
-      response.status,
-      typeof problem.code === 'string' ? problem.code : `HTTP_${response.status}`,
-      typeof problem.detail === 'string' ? problem.detail : response.statusText,
-      typeof problem.requestId === 'string' ? problem.requestId : null,
-    );
-  }
-  return payload as T;
+/** A usable message for a refusal whose problem document could not be read. */
+function fallbackDetail(response: Response): string {
+  return response.statusText && response.statusText.trim() !== ''
+    ? response.statusText
+    : `The server refused the request with status ${response.status}.`;
 }
 
 /** Combines abort signals, so a caller's cancellation and the timeout both apply. */

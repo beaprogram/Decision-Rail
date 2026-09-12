@@ -34,7 +34,8 @@ export const identityApi = {
       authenticationAttempt: true,
     }),
 
-  signOut: () => apiFetch<void>('/ui/session', { method: 'DELETE' }),
+  // Logout answers 204 with no body, so no usable body is required of it.
+  signOut: () => apiFetch<void>('/ui/session', { method: 'DELETE', expectsBody: false }),
 };
 
 export interface PaymentSearchParams {
@@ -49,6 +50,15 @@ export interface PaymentSearchParams {
   cursor?: string | null;
 }
 
+/**
+ * Merchant-scoped reads.
+ *
+ * Financial mutations are deliberately absent here, as they are from {@link replayApi}. Every command
+ * goes through {@link useIdempotentCommand}, which captures the method, path, body and idempotency key
+ * as one immutable submitted command so a retry resends exactly what was submitted. A convenience
+ * helper in this module would be a second way to issue the same command that quietly loses that
+ * guarantee.
+ */
 export const merchantApi = {
   accounts: (signal?: AbortSignal) => apiFetch<Account[]>('/ui/accounts', { signal }),
 
@@ -68,21 +78,6 @@ export const merchantApi = {
   shadowComparisons: (divergedOnly: boolean, limit: number, signal?: AbortSignal) =>
     apiFetch<ShadowComparison[]>(`/ui/shadow-comparisons${queryString({ divergedOnly, limit })}`, { signal }),
 
-  /**
-   * Each command carries an idempotency key the caller owns. The key is generated once per logical
-   * command and reused on every retry, so a retry after an uncertain outcome returns the original
-   * result instead of reserving funds a second time.
-   */
-  authorize: (
-    idempotencyKey: string,
-    body: { accountId: string; amountMinor: number; currency: string; country: string },
-  ) => apiFetch<Payment>('/ui/payments/authorizations', { method: 'POST', body, idempotencyKey }),
-
-  capture: (idempotencyKey: string, paymentId: string) =>
-    apiFetch<Payment>(`/ui/payments/${paymentId}/capture`, { method: 'POST', idempotencyKey }),
-
-  voidPayment: (idempotencyKey: string, paymentId: string) =>
-    apiFetch<Payment>(`/ui/payments/${paymentId}/void`, { method: 'POST', idempotencyKey }),
 };
 
 export const policyApi = {
@@ -99,8 +94,6 @@ export const replayApi = {
   report: (id: string, signal?: AbortSignal) => apiFetch<ReplayReport>(`/ui/replay-jobs/${id}/report`, { signal }),
   results: (id: string, divergedOnly: boolean, limit: number, offset: number, signal?: AbortSignal) =>
     apiFetch<ReplayResult[]>(`/ui/replay-jobs/${id}/results${queryString({ divergedOnly, limit, offset })}`, { signal }),
-  create: (idempotencyKey: string, body: { candidateVersion: string; limit: number; from?: string }) =>
-    apiFetch<ReplayJob>('/ui/replay-jobs', { method: 'POST', body, idempotencyKey }),
 };
 
 export const opsApi = {

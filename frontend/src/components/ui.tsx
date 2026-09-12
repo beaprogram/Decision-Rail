@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, type ReactNode } from 'react';
 import { ApiError } from '../api/client';
 import { formatMinorUnits } from '../lib/money';
 import type { ReasonContribution, RiskOutcome } from '../api/types';
+import type { SubmittedCommand } from '../lib/command';
 
 /** Shared presentation pieces. Everything renders server strings as text, never as markup. */
 
@@ -377,6 +378,66 @@ export function ConfirmDialog({
         </button>
       </div>
     </dialog>
+  );
+}
+
+/**
+ * A command whose outcome the server never confirmed.
+ *
+ * Shows exactly what was submitted, because "retry safely" is only trustworthy if the operator can see
+ * which command is being retried. Retrying replays the captured submission under its original
+ * idempotency key, so if the command did land the server returns its original result rather than
+ * performing it a second time.
+ */
+export function UnresolvedCommand({
+  title,
+  detail,
+  submitted,
+  busy,
+  onRetry,
+}: {
+  title: string;
+  detail: string;
+  submitted: SubmittedCommand;
+  busy: boolean;
+  onRetry: () => void;
+}) {
+  return (
+    <Notice tone="warning" title={title}>
+      <span>{detail}</span>
+      <span>
+        Retrying resends exactly this command under its original key, so if it did go through you will
+        see its original result rather than a second one.
+      </span>
+      <div className="confirm-summary stack tight" style={{ marginTop: 'var(--space-2)' }}>
+        <span className="comparison-label">Submitted command</span>
+        {submitted.summary.map((entry) => (
+          <div className="row between" key={entry.label}>
+            <span className="field-label">{entry.label}</span>
+            <span className="mono">{entry.value}</span>
+          </div>
+        ))}
+        <div className="row between">
+          <span className="field-label">Request</span>
+          <span className="mono">
+            {submitted.method} {submitted.path}
+          </span>
+        </div>
+        <div className="row between">
+          <span className="field-label">Idempotency key</span>
+          <span className="mono">{submitted.idempotencyKey}</span>
+        </div>
+        <div className="row between">
+          <span className="field-label">Attempts</span>
+          <span className="mono">{submitted.attempts}</span>
+        </div>
+      </div>
+      <div className="row">
+        <button type="button" onClick={onRetry} disabled={busy}>
+          {busy ? 'Retrying…' : 'Retry safely'}
+        </button>
+      </div>
+    </Notice>
   );
 }
 

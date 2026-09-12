@@ -11,7 +11,7 @@ import { Notice } from './ui';
  * path gets a refusal rather than data.
  */
 export function Shell({ children }: { children: ReactNode }) {
-  const { can, username, signOut, state } = useSession();
+  const { can, username, signOut, state, idle } = useSession();
   const roles = state.status === 'authenticated' ? state.identity.roles : [];
   const readableRole = roles.map((role) => role.replace(/^ROLE_/, '')).join(', ') || 'none';
 
@@ -61,8 +61,11 @@ export function Shell({ children }: { children: ReactNode }) {
             <div className="identity-name">{username}</div>
             <div className="identity-role">Role: {readableRole}</div>
           </div>
-          <button type="button" onClick={() => void signOut()}>
-            Sign out
+          {/* Disabled while a transition is outstanding, so a second click cannot start an
+              overlapping identity change. The outcome is reported through session state rather than
+              discarded: a refused sign-out shows as unconfirmed on the sign-in screen. */}
+          <button type="button" onClick={() => void signOut()} disabled={!idle}>
+            {idle ? 'Sign out' : 'Signing out…'}
           </button>
         </div>
       </nav>

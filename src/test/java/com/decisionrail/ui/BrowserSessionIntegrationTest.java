@@ -198,6 +198,76 @@ class BrowserSessionIntegrationTest {
         assertThat(replayed.statusCode()).isEqualTo(401);
     }
 
+    /**
+     * A transition must leave the browser able to make its next request.
+     *
+     * <p>Authentication rotates the CSRF token, and a successful login short-circuits the filter chain,
+     * so the filter that normally writes the token cookie never runs on that response. The browser was
+     * therefore left holding the pre-login value, which the server had already replaced. The previous
+     * logout test did not notice because it read the payment list in between, and that unrelated GET was
+     * what materialised the rotated token. These tests deliberately make no intervening request.
+     */
+    @Test
+    void signingInIssuesTheRotatedCsrfTokenOnTheLoginResponseItself() throws Exception {
+        get("/ui/identity");
+        String beforeLogin = csrfToken();
+        assertThat(beforeLogin).isNotBlank();
+
+        Reply signedIn = login("demo-merchant", "demo-test-password-123");
+
+        assertThat(signedIn.status()).isEqualTo(200);
+        // Rotation expires the old cookie and then issues its replacement, so this response carries two
+        // XSRF-TOKEN headers. What matters is that a usable one is among them: before the fix the expiry
+        // was the only one sent, and asserting merely that some header was present would have passed.
+        assertThat(issuedCookies(signedIn, "XSRF-TOKEN"))
+                .anySatisfy(value -> assertThat(value).doesNotContain("HttpOnly"));
+        assertThat(csrfToken()).isNotBlank().isNotEqualTo(beforeLogin);
+    }
+
+    @Test
+    void aMutationImmediatelyAfterSigningInIsAcceptedWithNoInterveningRequest() throws Exception {
+        get("/ui/identity");
+        login("demo-merchant", "demo-test-password-123");
+
+        // The only token this client can possibly hold is the one the login response issued.
+        Reply loggedOut = delete("/ui/session");
+
+        assertThat(loggedOut.status()).isEqualTo(204);
+        assertThat(get("/ui/identity").body().path("authenticated").asBoolean()).isFalse();
+    }
+
+    @Test
+    void signingOutIssuesAFreshTokenSoTheNextSignInNeedsNoPageReload() throws Exception {
+        get("/ui/identity");
+        login("demo-merchant", "demo-test-password-123");
+        String whileSignedIn = csrfToken();
+
+        Reply loggedOut = delete("/ui/session");
+        assertThat(loggedOut.status()).isEqualTo(204);
+        // Destroying the session must not leave the browser with nothing to prove its next request came
+        // from it, so the token cookie is replaced rather than deleted.
+        assertThat(issuedCookies(loggedOut, "XSRF-TOKEN")).isNotEmpty();
+        assertThat(csrfToken()).isNotBlank().isNotEqualTo(whileSignedIn);
+
+        // And the replacement is usable: a second sign-in on the same client, nothing in between.
+        Reply signedInAgain = login("demo-merchant", "demo-test-password-123");
+        assertThat(signedInAgain.status()).isEqualTo(200);
+        assertThat(signedInAgain.body().path("authenticated").asBoolean()).isTrue();
+    }
+
+    @Test
+    void aSignedOutBrowserStillCannotMutateWithTheTokenItWasGiven() throws Exception {
+        get("/ui/identity");
+        login("demo-merchant", "demo-test-password-123");
+        delete("/ui/session");
+
+        // The fresh token proves origin, never identity. Without a session it buys nothing.
+        Reply refused = postJson("/ui/payments/authorizations",
+                "{\"accountId\":\"11111111-1111-1111-1111-111111111111\",\"amountMinor\":100,"
+                        + "\"currency\":\"CAD\",\"country\":\"CA\"}");
+        assertThat(refused.status()).isEqualTo(401);
+    }
+
     @Test
     void aStateChangingBrowserRequestWithoutAValidCsrfTokenIsRefused() throws Exception {
         get("/ui/identity");
@@ -334,6 +404,19 @@ class BrowserSessionIntegrationTest {
                 .filter(cookie -> cookie.getName().equals(name))
                 .map(java.net.HttpCookie::getValue)
                 .findFirst().orElse(null);
+    }
+
+    /**
+     * The {@code Set-Cookie} headers for one name that actually issue a value.
+     *
+     * <p>Expiring a cookie is also a {@code Set-Cookie} header, so a test that only checks a header was
+     * present cannot tell an issued token from a deleted one.
+     */
+    private static List<String> issuedCookies(Reply reply, String name) {
+        return reply.raw().headers().allValues("set-cookie").stream()
+                .filter(value -> value.startsWith(name + "="))
+                .filter(value -> !value.startsWith(name + "=;") && !value.contains("Max-Age=0"))
+                .toList();
     }
 
     private static String setCookieFor(Reply reply, String name) {

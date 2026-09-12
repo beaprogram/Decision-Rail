@@ -70,6 +70,13 @@ with a consistent lock order of claim row first, then results. For replay, recom
 remaining work, and completing the job also moved into that same locked transaction, so completion can
 no longer be decided against totals that an outstanding batch is about to change.
 
+Be precise about the evidence for those two halves. The unfenced write was reproduced: a test that
+takes a claim over and then lets the original worker commit failed before the fix and passes after. The
+second half, a job completing against totals an outstanding batch was about to change, was **not**
+reproduced as a failing test; it was closed by construction when completion moved inside the same
+locked transaction. It is a structural argument, not an observed corruption, and should not be
+described as one.
+
 **Do not charge a short-circuited send against the retry budget.** This was a real defect found in
 testing: because the breaker's rejection looked like any other failure, a few seconds of protection
 terminally failed a whole backlog of events that had never been offered to the broker. A rejected send

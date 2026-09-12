@@ -17,7 +17,9 @@ import {
   Notice,
   PaymentStatusBadge,
   RiskBadge,
+  UnresolvedCommand,
 } from '../components/ui';
+import type { Payment } from '../api/types';
 
 /**
  * Creates a synthetic authorization.
@@ -42,21 +44,32 @@ export function AuthorizePage() {
   const amountError = amountText.trim() === '' ? null : parsedAmount.ok ? null : parsedAmount.message;
   const countryError = /^[A-Za-z]{2}$/.test(country) ? null : 'Use a two-letter country code.';
 
-  const authorize = useIdempotentCommand('authorize', (key) =>
-    merchantApi.authorize(key, {
-      accountId,
-      amountMinor: parsedAmount.ok ? parsedAmount.minorUnits : 0,
-      currency: selectedAccount?.currency ?? 'CAD',
-      country: country.toUpperCase(),
-    }),
-  );
+  const authorize = useIdempotentCommand<Payment>('authorize');
 
   const ready = Boolean(selectedAccount) && parsedAmount.ok && !countryError;
   const wouldExceedAvailable =
     selectedAccount && parsedAmount.ok && parsedAmount.minorUnits > selectedAccount.availableMinor;
 
   const submit = async () => {
-    const created = await authorize.run(undefined);
+    if (!selectedAccount || !parsedAmount.ok) return;
+    // The request is captured here, once. A retry replays exactly this, so editing the form
+    // afterwards cannot change what the original idempotency key stands for.
+    const created = await authorize.submit({
+      method: 'POST',
+      path: '/ui/payments/authorizations',
+      body: {
+        accountId,
+        amountMinor: parsedAmount.minorUnits,
+        currency: selectedAccount.currency,
+        country: country.toUpperCase(),
+      },
+      summary: [
+        { label: 'Account', value: accountId },
+        { label: 'Amount', value: `${formatMinorUnits(parsedAmount.minorUnits)} ${selectedAccount.currency}` },
+        { label: 'Sent as', value: `${parsedAmount.minorUnits} minor units` },
+        { label: 'Country', value: country.toUpperCase() },
+      ],
+    });
     setConfirming(false);
     if (created) {
       void queries.invalidateQueries({ queryKey: ['accounts'] });
@@ -78,19 +91,14 @@ export function AuthorizePage() {
         }
       />
       <div className="page-body">
-        {authorize.state.phase === 'uncertain' && (
-          <Notice tone="warning" title="The outcome of this authorization is unknown">
-            <span>{authorize.state.error.detail}</span>
-            <span>
-              Retrying reuses the same idempotency key, so if the authorization did go through you will
-              see its original result instead of a second reservation.
-            </span>
-            <div className="row">
-              <button type="button" onClick={() => void authorize.retry()} disabled={authorize.busy}>
-                Retry safely
-              </button>
-            </div>
-          </Notice>
+        {authorize.state.phase === 'uncertain' && authorize.submitted && (
+          <UnresolvedCommand
+            title="The outcome of this authorization is unknown"
+            detail={authorize.state.error.detail}
+            submitted={authorize.submitted}
+            busy={authorize.busy}
+            onRetry={() => void authorize.retry()}
+          />
         )}
         {authorize.state.phase === 'failed' && <AuthorizationFailure error={authorize.state.error} />}
 
@@ -141,7 +149,7 @@ export function AuthorizePage() {
                 className="stack"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  if (ready) setConfirming(true);
+                  if (ready && !authorize.unresolved) setConfirming(true);
                 }}
               >
                 <div className="grid cols-2">
@@ -230,9 +238,18 @@ export function AuthorizePage() {
                 )}
 
                 <div className="row">
-                  <button type="submit" className="primary" disabled={!ready || authorize.busy}>
+                  <button
+                    type="submit"
+                    className="primary"
+                    disabled={!ready || authorize.busy || authorize.unresolved}
+                  >
                     Review and authorize
                   </button>
+                  {authorize.unresolved && (
+                    <span className="field-hint">
+                      Resolve the authorization above before starting another.
+                    </span>
+                  )}
                 </div>
               </form>
             )}

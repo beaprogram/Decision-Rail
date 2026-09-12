@@ -1,6 +1,6 @@
 # Delivery plan and progress ledger
 
-Delivery is defined as **10 equally weighted scope checkpoints**; **6 are complete**. Calling that “approximately 60%” is planning shorthand, not a measurement of elapsed time, engineering effort, production readiness, or a guarantee that the remaining checkpoints are equally difficult.
+Delivery is defined as **10 equally weighted scope checkpoints**; **7 are complete**. Calling that “approximately 70%” is planning shorthand, not a measurement of elapsed time, engineering effort, production readiness, or a guarantee that the remaining checkpoints are equally difficult.
 
 A checkpoint is complete only when its implementation and relevant verification are present. Future milestones below are a delivery plan, not current capabilities.
 

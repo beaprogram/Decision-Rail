@@ -16,7 +16,10 @@ export default defineConfig({
   workers: 1,
   fullyParallel: false,
   forbidOnly: Boolean(process.env.CI),
-  retries: process.env.CI ? 1 : 0,
+  // No retries anywhere. A browser test that only passes on a second attempt is reporting a real
+  // defect in the application or in itself, and a retry would hide exactly the first-attempt
+  // failures this suite exists to catch. CI matches local so a green CI run means green locally.
+  retries: 0,
   timeout: 60_000,
   expect: { timeout: 15_000 },
   reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : [['list']],

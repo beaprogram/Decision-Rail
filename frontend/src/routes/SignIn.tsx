@@ -9,8 +9,14 @@ import { Card, Field, Notice } from '../components/ui';
  * The password is held in component state for the moment it takes to submit and never written to
  * browser storage, a URL, or a log. Nothing about the credential survives this component.
  */
-export function SignInPage({ sessionExpired }: { sessionExpired: boolean }) {
-  const { signIn } = useSession();
+export function SignInPage({
+  sessionExpired,
+  unconfirmedSignOut,
+}: {
+  sessionExpired: boolean;
+  unconfirmedSignOut?: { detail: string };
+}) {
+  const { signIn, retrySignOut, ready, retryBootstrap, idle } = useSession();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -42,6 +48,32 @@ export function SignInPage({ sessionExpired }: { sessionExpired: boolean }) {
           {sessionExpired && (
             <Notice tone="warning" title="Your session ended">
               Sign in again to continue. Nothing from the previous session is still on screen.
+            </Notice>
+          )}
+          {unconfirmedSignOut && (
+            <Notice tone="warning" title="Your sign-out could not be confirmed">
+              <span>{unconfirmedSignOut.detail}</span>
+              <span>
+                Everything on screen has been cleared, but the server did not confirm that the session
+                was destroyed, so it may still be open. Retry to close it properly.
+              </span>
+              <div className="row">
+                <button type="button" onClick={() => void retrySignOut()} disabled={!idle}>
+                  {idle ? 'Retry sign-out' : 'Retrying…'}
+                </button>
+              </div>
+            </Notice>
+          )}
+          {!ready && (
+            <Notice tone="danger" title="Sign-in is not available">
+              <span>
+                The server could not be reached to start a session, so signing in would be refused.
+              </span>
+              <div className="row">
+                <button type="button" onClick={() => void retryBootstrap()}>
+                  Try again
+                </button>
+              </div>
             </Notice>
           )}
           <form className="stack" onSubmit={submit} noValidate>
@@ -78,7 +110,11 @@ export function SignInPage({ sessionExpired }: { sessionExpired: boolean }) {
                 {error}
               </Notice>
             )}
-            <button type="submit" className="primary" disabled={submitting || !username || !password}>
+            <button
+              type="submit"
+              className="primary"
+              disabled={submitting || !username || !password || !ready || !idle}
+            >
               {submitting ? 'Signing in…' : 'Sign in'}
             </button>
           </form>

@@ -1,7 +1,7 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
-import { policyApi, replayApi } from '../api/endpoints';
+import { replayApi, policyApi } from '../api/endpoints';
 import { useSession } from '../auth/session';
 import { useIdempotentCommand } from '../lib/command';
 import { PageHeader } from '../components/Shell';
@@ -17,6 +17,7 @@ import {
   ShortIdentifier,
   TableScroll,
   Timestamp,
+  UnresolvedCommand,
 } from '../components/ui';
 import type { ReplayJob } from '../api/types';
 
@@ -150,13 +151,7 @@ function CreateReplayJob({
   const [limit, setLimit] = useState('500');
   const [from, setFrom] = useState('');
 
-  const create = useIdempotentCommand('replay', (key) =>
-    replayApi.create(key, {
-      candidateVersion,
-      limit: Number(limit),
-      ...(from ? { from: new Date(from).toISOString() } : {}),
-    }),
-  );
+  const create = useIdempotentCommand<ReplayJob>('replay');
 
   const limitValue = Number(limit);
   const limitError =
@@ -173,8 +168,23 @@ function CreateReplayJob({
         className="stack"
         onSubmit={async (event) => {
           event.preventDefault();
-          if (!candidateVersion || limitError) return;
-          const created = await create.run(undefined);
+          if (!candidateVersion || limitError || create.unresolved) return;
+          // Captured once. A retry replays this exact request, so changing the candidate or the
+          // membership bound afterwards cannot alter what the original key stands for.
+          const created = await create.submit({
+            method: 'POST',
+            path: '/ui/replay-jobs',
+            body: {
+              candidateVersion,
+              limit: limitValue,
+              ...(from ? { from: new Date(from).toISOString() } : {}),
+            },
+            summary: [
+              { label: 'Candidate', value: candidateVersion },
+              { label: 'Maximum inputs', value: String(limitValue) },
+              { label: 'Created from', value: from ? new Date(from).toISOString() : 'the beginning' },
+            ],
+          });
           if (created) onCreated();
         }}
       >
@@ -217,22 +227,24 @@ function CreateReplayJob({
           <button
             type="submit"
             className="primary"
-            disabled={!candidateVersion || Boolean(limitError) || create.busy}
+            disabled={!candidateVersion || Boolean(limitError) || create.busy || create.unresolved}
           >
             {create.busy ? 'Creating…' : 'Create job'}
           </button>
+          {create.unresolved && (
+            <span className="field-hint">Resolve the job above before creating another.</span>
+          )}
         </div>
       </form>
 
-      {create.state.phase === 'uncertain' && (
-        <Notice tone="warning" title="The job may or may not have been created">
-          <span>{create.state.error.detail}</span>
-          <div className="row">
-            <button type="button" onClick={() => void create.retry()}>
-              Retry safely
-            </button>
-          </div>
-        </Notice>
+      {create.state.phase === 'uncertain' && create.submitted && (
+        <UnresolvedCommand
+          title="The job may or may not have been created"
+          detail={create.state.error.detail}
+          submitted={create.submitted}
+          busy={create.busy}
+          onRetry={() => void create.retry()}
+        />
       )}
       {create.state.phase === 'failed' && <ErrorNotice error={create.state.error} context="Creating the replay job" />}
       {create.state.phase === 'succeeded' && (

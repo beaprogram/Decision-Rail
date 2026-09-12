@@ -131,9 +131,8 @@ public class BrowserSessionConfig {
                         // the client, so a copied cookie cannot be replayed afterwards.
                         .invalidateHttpSession(true)
                         .clearAuthentication(true)
-                        .deleteCookies("JSESSIONID", "XSRF-TOKEN")
-                        .logoutSuccessHandler((request, response, authentication) ->
-                                response.setStatus(HttpServletResponse.SC_NO_CONTENT)))
+                        .deleteCookies("JSESSIONID")
+                        .logoutSuccessHandler(new SignedOutResponseHandler(csrfTokens)))
                 .exceptionHandling(errors -> errors
                         // JSON, never a redirect to a login page: the caller is always script.
                         .authenticationEntryPoint((request, response, exception) -> ApiProblems.write(mapper, request,
@@ -151,6 +150,13 @@ public class BrowserSessionConfig {
     /**
      * Writes the authenticated identity as the login response, so the page learns its role and
      * capabilities from the same round trip that signed it in.
+     *
+     * <p>It also forces the rotated CSRF token onto the response. Authentication deletes the old token
+     * and defers writing its replacement until something asks for it, and a successful login short
+     * circuits the filter chain, so nothing downstream ever asked. The page was therefore left holding
+     * no token at all, and its next state-changing request, including signing out again, was refused.
+     * Materialising it here is what makes the response self-sufficient rather than leaving the page to
+     * discover a token from some unrelated request it might never make.
      */
     private record IdentityResponseHandler(ObjectMapper mapper)
             implements org.springframework.security.web.authentication.AuthenticationSuccessHandler {
@@ -158,11 +164,43 @@ public class BrowserSessionConfig {
         public void onAuthenticationSuccess(HttpServletRequest request, HttpServletResponse response,
                                             org.springframework.security.core.Authentication authentication)
                 throws IOException {
+            materialiseCsrfToken(request);
             response.setStatus(HttpServletResponse.SC_OK);
             response.setContentType(MediaType.APPLICATION_JSON_VALUE);
             // Authenticated identity is never cacheable by a proxy or the browser.
             response.setHeader("Cache-Control", "no-store");
             mapper.writeValue(response.getWriter(), IdentityView.of(authentication));
+        }
+    }
+
+    /**
+     * Confirms the sign-out and hands back a fresh CSRF token for the sign-in form that follows.
+     *
+     * <p>Logging out invalidates the session and with it the old token, and the sign-in screen makes no
+     * other requests, so without this the very next sign-in would arrive with nothing to verify it and
+     * be refused. The token is not a credential: it identifies our own page, and issuing one to an
+     * anonymous caller is what lets that caller authenticate at all.
+     */
+    private record SignedOutResponseHandler(CookieCsrfTokenRepository csrfTokens)
+            implements org.springframework.security.web.authentication.logout.LogoutSuccessHandler {
+        @Override
+        public void onLogoutSuccess(HttpServletRequest request, HttpServletResponse response,
+                                    org.springframework.security.core.Authentication authentication) {
+            csrfTokens.saveToken(csrfTokens.generateToken(request), request, response);
+            response.setStatus(HttpServletResponse.SC_NO_CONTENT);
+        }
+    }
+
+    /**
+     * Resolves the deferred CSRF token so the repository actually writes it to the response.
+     *
+     * <p>Spring stores a supplier in the request attribute and only saves the token when something
+     * reads it. Reading it here is the documented way to force that write.
+     */
+    private static void materialiseCsrfToken(HttpServletRequest request) {
+        Object deferred = request.getAttribute(CsrfToken.class.getName());
+        if (deferred instanceof CsrfToken token) {
+            token.getToken();
         }
     }
 
