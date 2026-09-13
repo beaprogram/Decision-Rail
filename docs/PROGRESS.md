@@ -38,7 +38,7 @@ than through the build.
 - Pinned-wrapper build and suite: **213 backend tests passed**, with **0 failures, 0 errors, and
   0 skipped**. Every test from the earlier milestones is still present and passing; the breakdown by
   group is in [verification.md](verification.md).
-- Dashboard: **41 frontend unit tests** and **41 browser end-to-end tests**, the latter
+- Dashboard: **41 frontend unit tests** and **44 browser end-to-end tests**, the latter
   run by a real Chromium against the packaged application with real PostgreSQL and Kafka, all passing.
   The browser suite runs with **retries disabled**, locally and in CI, so a first-attempt failure cannot
   be hidden by a passing second attempt.
@@ -64,6 +64,22 @@ than through the build.
   - Payment details labelled funds as reserved whenever no failure code was present, including for a
     policy-declined payment that never held anything.
   - This ledger contradicted itself: six checkpoints and 60% alongside a delivered operator console.
+- A third pass fixed two defects the previous one left, both in what the screen shows rather than in
+  what the server does. Checkpoint 7 remains complete and the checkpoint count is unchanged.
+  - Signing out left the protected workspace on screen until the server answered. Advancing the
+    identity generation and dropping the query cache does not unmount anything: the screens stay
+    mounted and re-render, so a merchant's payment rows and workspace were still there while the
+    logout request was in flight. Sign-out now moves the session into its own `signing-out` state, so
+    the application boundary unmounts every protected screen synchronously, before the request is even
+    sent. That state says the workspace has been cleared and explicitly does not claim the session was
+    destroyed, which is still decided only by the server's answer or by reconciling with it afterwards.
+  - A retried capture or void never re-read the payment. The first attempt refreshed the payment,
+    payment list, and account queries afterwards, but the retry called the command handle directly from
+    the outcome notice and skipped that step, so a capture that succeeded on its second attempt left the
+    screen offering Capture on a payment that had just been captured. Both paths now run through one
+    post-attempt refresh. The command's own response is not used as a substitute: under a replayed key
+    the server returns the result as it stood when the command first ran, which is a historical
+    snapshot, and the success notice now says so instead of asserting the payment's current status.
 - Packaged application in the local Compose stack, rebuilt after the corrections: `scripts/demo.sh`
   passed all **12 HTTP checks** and `scripts/async-demo.sh` passed all **27 checks**.
 - The asynchronous demo observed: a payment authorized with the broker container stopped; retained

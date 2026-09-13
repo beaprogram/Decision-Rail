@@ -40,6 +40,18 @@ export interface UnconfirmedSignOut {
 
 export type SessionState =
   | { status: 'loading' }
+  /**
+   * A sign-out has begun and the server has not answered yet.
+   *
+   * Its own state rather than a flag on {@code authenticated}, because the application boundary keys
+   * off the status: while this is set, no protected screen is mounted at all. Clearing the query cache
+   * is not enough on its own, since the screens stay mounted, re-render, and can refetch; only removing
+   * them removes what they are showing.
+   *
+   * It says nothing about the session on the server, which is exactly the point: the screen is cleared
+   * immediately, and whether the session was destroyed is reported separately once the server answers.
+   */
+  | { status: 'signing-out' }
   | {
       status: 'anonymous';
       reason?: 'expired' | 'signed-out';
@@ -218,6 +230,12 @@ export function SessionProvider({ children }: { children: ReactNode }) {
 
     // Sensitive data goes immediately, whatever happens next. Clearing it is about what is on screen;
     // it says nothing about whether the server session still exists, which is reported separately.
+    //
+    // The workspace is unmounted first, and synchronously: this runs inside the click handler, so the
+    // state change is flushed before the request is even sent. Advancing the generation and dropping
+    // the cache does not by itself remove anything already rendered - the screens stay mounted and
+    // would sit there showing the previous identity's rows for as long as the server takes to answer.
+    setState({ status: 'signing-out' });
     advanceIdentityGeneration();
     clearTenantData();
 

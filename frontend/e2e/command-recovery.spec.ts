@@ -51,6 +51,36 @@ function unresolvedNotice(page: Page) {
   return page.locator('.notice', { hasText: 'Submitted command' });
 }
 
+/**
+ * Refuses the request before it reaches the server, so the command definitely never ran.
+ *
+ * The mirror image of withholding a response: there, the work exists and the operator cannot know it;
+ * here, nothing happened at all. Both leave the client with an unknown outcome, and a retry has to be
+ * correct in either case.
+ */
+async function blockBeforeDelivery(page: Page, pattern: string): Promise<void> {
+  await page.route(pattern, async (route) => {
+    if (route.request().method() !== 'POST') {
+      await route.continue();
+      return;
+    }
+    await route.abort('failed');
+  });
+}
+
+/** Authorizes on a dedicated account through the real form and opens the payment it created. */
+async function authorizedPaymentOn(page: Page, account: string, amount: string): Promise<string> {
+  await page.goto('/dashboard/payments/new');
+  await page.getByLabel('Account').selectOption(account);
+  await page.getByLabel(/^Amount/).fill(amount);
+  await page.getByRole('button', { name: 'Review and authorize' }).click();
+  await page.getByRole('button', { name: 'Authorize', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Authorization recorded' })).toBeVisible();
+  await page.getByRole('button', { name: 'Open payment' }).click();
+  await expect(page).toHaveURL(/\/dashboard\/payments\/[0-9a-f-]{36}$/);
+  return page.url().slice(page.url().lastIndexOf('/') + 1);
+}
+
 /** Lets the request reach the server, then drops the response so the outcome is unknowable. */
 async function withholdResponses(page: Page, pattern: string): Promise<void> {
   await page.route(pattern, async (route) => {
@@ -204,5 +234,108 @@ test.describe('recovering a command whose outcome is unknown', () => {
     // One capture, one sealed journal: the retry returned the original result rather than capturing twice.
     await expect(page.getByText('Capture completed')).toBeVisible();
     expect(await sql(`SELECT count(*) FROM ledger_journals WHERE payment_id = '${paymentId}'`)).toBe('1');
+  });
+  test('a capture retry re-reads the payment, so the screen stops offering capture', async ({ page }) => {
+    const account = await createIsolatedAccount('demo-merchant', 'CAD', 5_000_000);
+    await signIn(page, identities.merchant());
+    const paymentId = await authorizedPaymentOn(page, account, '31.00');
+
+    // The first attempt never reaches the server, so the payment is genuinely still AUTHORIZED and the
+    // recovery read that follows it correctly says so. That is what makes this different from the
+    // committed-but-response-lost case, where the first read can already see CAPTURED and would mask a
+    // retry that never re-read anything.
+    await blockBeforeDelivery(page, `**/payments/${paymentId}/capture`);
+    await page.getByRole('button', { name: 'Capture' }).click();
+    await page.getByRole('button', { name: 'Capture funds' }).click();
+
+    const held = unresolvedNotice(page);
+    await expect(held.getByText('Capture may or may not have been applied')).toBeVisible();
+    expect(await sql(`SELECT status FROM payments WHERE id = '${paymentId}'`)).toBe('AUTHORIZED');
+    // The post-attempt read has settled and still shows an authorized payment.
+    await expect(page.getByRole('button', { name: 'Capture' })).toBeVisible();
+    const submittedKey = await held.getByText(/^ui-capture-/).textContent();
+
+    await page.unroute(`**/payments/${paymentId}/capture`);
+    const [retryRequest, authoritativeRead] = await Promise.all([
+      page.waitForRequest(
+        (request) => request.url().includes(`/payments/${paymentId}/capture`) && request.method() === 'POST',
+      ),
+      // The retry must be followed by a fresh read of the payment itself, not only of its own response.
+      page.waitForResponse(
+        (response) =>
+          response.url().endsWith(`/ui/payments/${paymentId}`) &&
+          response.request().method() === 'GET' &&
+          response.status() === 200,
+      ),
+      page.getByRole('button', { name: 'Retry safely' }).click(),
+    ]);
+
+    // The same command under the same key, not a new one built from the current screen.
+    expect(retryRequest.headers()['idempotency-key']).toBe(submittedKey);
+    expect(retryRequest.url()).toContain(`/ui/payments/${paymentId}/capture`);
+    expect(JSON.parse(await authoritativeRead.text()).status).toBe('CAPTURED');
+
+    // The screen now reflects the completed capture rather than the state it held before it.
+    await expect(page.getByText('Capture completed')).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Capture journal' })).toBeVisible();
+    await expect(page.getByText('Funds captured').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Capture' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Void' })).toHaveCount(0);
+    expect(await sql(`SELECT status FROM payments WHERE id = '${paymentId}'`)).toBe('CAPTURED');
+    expect(await sql(`SELECT count(*) FROM ledger_journals WHERE payment_id = '${paymentId}'`)).toBe('1');
+    await capture(page, '42-recovered-capture');
+
+    // Account balances were invalidated too, so the accounts screen does not serve the pre-capture
+    // figures it had cached.
+    await page.goto('/dashboard/accounts');
+    const row = page.locator('tbody tr', { hasText: account });
+    await expect(row.locator('td').nth(2)).toHaveText(/^49,969\.00\s*CAD$/);
+    await expect(row.locator('td').nth(3)).toHaveText(/^0\.00\s*CAD$/);
+  });
+
+  test('a void retry re-reads the payment, so the released hold is what the screen shows', async ({ page }) => {
+    const account = await createIsolatedAccount('demo-merchant', 'CAD', 4_000_000);
+    await signIn(page, identities.merchant());
+    const paymentId = await authorizedPaymentOn(page, account, '23.00');
+
+    await blockBeforeDelivery(page, `**/payments/${paymentId}/void`);
+    await page.getByRole('button', { name: 'Void' }).click();
+    await page.getByRole('button', { name: 'Release hold' }).click();
+
+    const held = unresolvedNotice(page);
+    await expect(held.getByText('Void may or may not have been applied')).toBeVisible();
+    expect(await sql(`SELECT status FROM payments WHERE id = '${paymentId}'`)).toBe('AUTHORIZED');
+    await expect(page.getByRole('button', { name: 'Void' })).toBeVisible();
+    const submittedKey = await held.getByText(/^ui-void-/).textContent();
+
+    await page.unroute(`**/payments/${paymentId}/void`);
+    const [retryRequest, authoritativeRead] = await Promise.all([
+      page.waitForRequest(
+        (request) => request.url().includes(`/payments/${paymentId}/void`) && request.method() === 'POST',
+      ),
+      page.waitForResponse(
+        (response) =>
+          response.url().endsWith(`/ui/payments/${paymentId}`) &&
+          response.request().method() === 'GET' &&
+          response.status() === 200,
+      ),
+      page.getByRole('button', { name: 'Retry safely' }).click(),
+    ]);
+
+    expect(retryRequest.headers()['idempotency-key']).toBe(submittedKey);
+    expect(JSON.parse(await authoritativeRead.text()).status).toBe('VOIDED');
+
+    await expect(page.getByText('Void completed')).toBeVisible();
+    await expect(page.getByText('Hold released').first()).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Capture' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Void' })).toHaveCount(0);
+    // A void returns the hold; nothing is captured, so no journal exists for it.
+    expect(await sql(`SELECT status FROM payments WHERE id = '${paymentId}'`)).toBe('VOIDED');
+    expect(await sql(`SELECT count(*) FROM ledger_journals WHERE payment_id = '${paymentId}'`)).toBe('0');
+
+    await page.goto('/dashboard/accounts');
+    const row = page.locator('tbody tr', { hasText: account });
+    await expect(row.locator('td').nth(3)).toHaveText(/^0\.00\s*CAD$/);
+    await expect(row.locator('td').nth(4)).toHaveText(/^40,000\.00\s*CAD$/);
   });
 });

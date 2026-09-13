@@ -62,7 +62,7 @@ Tests share one database on purpose, and append-only history is retained so the 
 
 CI runs the same `compose.test.yaml` stack rather than workflow service containers, so the documented local command and the remote build exercise identical infrastructure. It then builds the Docker image, starts the container, and runs both demo scripts without publishing the image.
 
-[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) passed on revision `4754fab`: 213 backend tests, 41 frontend unit tests, and 41 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, and both demos (12 and 27 checks). The browser step ran with retries at 0, so every one of those 41 passed on its first attempt. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) passed on revision `4754fab`: 213 backend tests, 41 frontend unit tests, and the 41 browser end-to-end tests that existed at that revision, against PostgreSQL 16 and a real broker, plus the image build, container startup, and both demos (12 and 27 checks). The browser step ran with retries at 0, so every one of those 41 passed on its first attempt. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 Test reports are written under `target/surefire-reports/`; the JaCoCo report is generated under `target/site/jacoco/`. CI uploads available reports when a verification job finishes, including on failure. Coverage is a diagnostic aid, not a substitute for meaningful assertions.
 
@@ -83,7 +83,7 @@ Recorded **2026-09-12 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Ka
 
 The frontend adds **41 unit tests** covering exact money conversion, response classification at
 the transport boundary, idempotent command submission and replay, and funding presentation, and
-**41 browser end-to-end tests** run by a real Chromium against the packaged application with
+**44 browser end-to-end tests** run by a real Chromium against the packaged application with
 real PostgreSQL and Kafka, with retries disabled.
 
 ### Browser verification
@@ -111,6 +111,8 @@ produced any other way.
 | Loading, empty, unavailable, conflict states | Each has its own presentation; a null rate reads "Not available", never zero | An absent measurement rendered as a real one |
 | Narrow width, keyboard, labels, dialogs | No horizontal page scroll at 390px, every control labelled, focus visible, Escape closes without acting | A console that cannot be operated without a mouse |
 | Sign in, out, and in again on one page, with no reload | Each transition leaves a usable CSRF token, proven without navigating, because a reload obtains one as a side effect | A sign-in that only works after a reload, and a reload concealing it |
+| Sign-out while the request is still in flight | The workspace is unmounted before the request is delivered, and the screen does not claim the session is closed | Tenant data left on screen for as long as the server takes to answer, or a sign-out announced before it happened |
+| A capture or void retried after a first attempt that never reached the server | The payment is re-read after the retry: status, funding, journal, actions and account balances all reflect the completed command | A screen still offering Capture on a payment that has just been captured, because the command's own response stood in for reading it |
 | Sign out immediately after signing in, as an identity with no workspace | The sign-out is accepted although no workspace request was ever made | Authentication that depends on an unrelated data request to work |
 | A sign-out that never reaches the server | Reported as unconfirmed with a retry, not as a completed sign-out; the retry reconciles | A live session presented as destroyed |
 | A sign-out that commits but loses its response | Reconciled against the server and reported as signed out | An unresolved notice for work that actually completed |
@@ -153,6 +155,27 @@ The CSRF reproduction was run twice, the second time from a clean build, after a
 in `target/classes` produced a misleading result. Treat a surprising test outcome as suspect until the
 build it came from is known to be Maven's own.
 
+### Corrections verified in the workspace-state pass
+
+Two defects the previous pass left, both about what the screen shows after a command rather than about
+what the server does. Each was reproduced against the unfixed build before the fix.
+
+| Correction | Regression test | Reproduced before the fix |
+| --- | --- | --- |
+| The protected workspace stayed on screen while sign-out was in flight | `session-transitions.spec.ts`, holding the DELETE before delivery | The merchant navigation resolved to 1 element on 34 consecutive polls across the full 15 seconds the request was held, so the workspace was mounted for the whole time the session was still alive |
+| A retried capture or void never re-read the payment | `command-recovery.spec.ts`, capture and void | `page.waitForResponse` timed out after 15s waiting for a `GET /ui/payments/{id}` that never happened; the screen kept offering Capture on a payment that had just been captured |
+
+Both retry tests block the first request **before** it reaches the server, which is what distinguishes
+them from the existing committed-but-response-lost case. There the payment is already CAPTURED when the
+first recovery read runs, so that read alone makes the screen correct and a retry that re-reads nothing
+still looks right. Here the first attempt never ran, the recovery read legitimately sees AUTHORIZED, and
+only a fresh read after the retry can make the screen right.
+
+All of it is integration evidence against the packaged application, real PostgreSQL, and a real broker.
+The interceptions decide only whether a real request is delivered or a real response arrives; no
+response is fabricated, and every assertion about money is checked against the database as well as the
+screen.
+
 ### Test infrastructure notes
 
 Two environmental details were corrected while adding these tests, both test-only:
@@ -174,7 +197,7 @@ Two environmental details were corrected while adding these tests, both test-onl
   than an error naming the cause. Check `SELECT tgname FROM pg_trigger WHERE NOT tgisinternal` for a
   `test_` prefix, or reset the stack with `down -v`, before believing such a failure.
 
-Both demo scripts passed against the packaged application in the local Compose stack: `scripts/demo.sh` (**12 HTTP checks**) and `scripts/async-demo.sh` (**27 checks**). The browser suite passed **41 of 41** against that same packaged application, on first attempt with retries disabled. The asynchronous demo observed a payment authorized with the broker container stopped, the breaker OPEN with `/actuator/health/async` DEGRADED while readiness stayed UP, delivery resuming after restart with the original event id and the breaker closing again, a projection applied count that stayed at 1 after the same event was delivered twice more, a replay job whose membership stayed at 4 inputs when a later payment committed, a 409 when a policy version id was rebound to different content, and a shadow divergence (live APPROVE, candidate DECLINE at score 60) after which the balance was unchanged and held funds moved only by the new authorization's own hold.
+Both demo scripts passed against the packaged application in the local Compose stack: `scripts/demo.sh` (**12 HTTP checks**) and `scripts/async-demo.sh` (**27 checks**). The browser suite passed **44 of 44** against that same packaged application, on first attempt with retries disabled. The asynchronous demo observed a payment authorized with the broker container stopped, the breaker OPEN with `/actuator/health/async` DEGRADED while readiness stayed UP, delivery resuming after restart with the original event id and the breaker closing again, a projection applied count that stayed at 1 after the same event was delivered twice more, a replay job whose membership stayed at 4 inputs when a later payment committed, a 409 when a policy version id was rebound to different content, and a shadow divergence (live APPROVE, candidate DECLINE at score 60) after which the balance was unchanged and held funds moved only by the new authorization's own hold.
 
 ## Failure cases and rationale
 

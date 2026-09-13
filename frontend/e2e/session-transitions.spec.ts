@@ -86,6 +86,59 @@ test.describe('session transitions without reloading', () => {
     expect(forged.body).toContain('CSRF_TOKEN_INVALID');
   });
 
+  test('hides the protected workspace as soon as sign-out begins, before the server answers', async ({ page }) => {
+    await signIn(page, identities.merchant());
+    await page.goto('/dashboard/payments');
+    const rows = page.locator('tbody tr');
+    await expect(rows.first()).toBeVisible();
+    expect(await rows.count()).toBeGreaterThan(0);
+
+    // Held before delivery. While these assertions run the server has not seen the request, so the
+    // session is definitely still alive and anything still on screen is genuinely exposed.
+    let release!: () => void;
+    const releaseHold = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let delivered = false;
+    await page.route('**/ui/session', async (route) => {
+      if (route.request().method() !== 'DELETE') {
+        await route.continue();
+        return;
+      }
+      await releaseHold;
+      delivered = true;
+      await route.continue();
+    });
+
+    await page.getByRole('button', { name: 'Sign out' }).click();
+
+    // The workspace goes at once. Advancing the identity generation and dropping the cache is not
+    // enough on its own: the screens stay mounted and re-render, so the rows were still there.
+    // The dedicated screen, not the old "Signing out…" label on a button inside a workspace that is
+    // still mounted behind it.
+    await expect(page.getByRole('heading', { name: 'Signing out' })).toBeVisible();
+    await expect(page.getByText('Your workspace has been cleared')).toBeVisible();
+    await expect(rows).toHaveCount(0);
+    await expect(page.getByRole('link', { name: 'Payments' })).toHaveCount(0);
+    await expect(page.getByRole('button', { name: 'Sign out' })).toHaveCount(0);
+    await expect(page.getByText('demo-merchant')).toHaveCount(0);
+    // None of that claims the session is closed, because it is not: the request is still in this
+    // test's hands and the sign-in form has not been offered yet.
+    await expect(page.getByRole('button', { name: 'Sign in' })).toHaveCount(0);
+    await expect(page.getByText(/could not be confirmed/i)).toHaveCount(0);
+    expect(delivered).toBe(false);
+    await capture(page, '35-signing-out');
+
+    // Releasing it completes the sign-out normally.
+    release();
+    await expect(page.getByRole('button', { name: 'Sign in' })).toBeVisible();
+    await expect(page.getByText(/could not be confirmed/i)).toHaveCount(0);
+    expect(delivered).toBe(true);
+    await page.unroute('**/ui/session');
+    // That the destroyed session's cookie no longer authenticates is already proven above, so it is
+    // not repeated here.
+  });
+
   test('a logout the server never received is reported as unconfirmed, not as signed out', async ({ page }) => {
     await signIn(page, identities.merchant());
     await page.goto('/dashboard/payments');

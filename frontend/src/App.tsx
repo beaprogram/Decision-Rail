@@ -3,7 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { ApiError, StaleIdentityError } from './api/client';
 import { SessionProvider, useSession } from './auth/session';
 import { Shell } from './components/Shell';
-import { LoadingRows } from './components/ui';
+import { Card, LoadingRows, Notice } from './components/ui';
 import { AccountsPage } from './routes/Accounts';
 import { AuthorizePage } from './routes/Authorize';
 import { DeliveryPage } from './routes/Delivery';
@@ -50,6 +50,12 @@ function Authenticated() {
       </div>
     );
   }
+  // A sign-out in progress: the protected workspace is already gone, and the server has not yet said
+  // whether the session went with it. Rendering this rather than the sign-in form is deliberate - the
+  // form would imply the sign-out had completed, and it has not.
+  if (state.status === 'signing-out') {
+    return <SigningOut />;
+  }
   if (state.status === 'anonymous') {
     return (
       <SignInPage
@@ -75,6 +81,24 @@ function Authenticated() {
         <Route path="*" element={<Navigate to="/payments" replace />} />
       </Routes>
     </Shell>
+  );
+}
+
+/** Shown between the sign-out request leaving and the server answering it. */
+function SigningOut() {
+  return (
+    <div className="signin-page">
+      <div className="signin-card">
+        <Card title="Signing out" scope="Closing your session">
+          <Notice tone="info" title="Your workspace has been cleared">
+            <span>
+              Nothing from the session is on screen any more. The server has not confirmed yet that the
+              session itself is closed; you will be told either way as soon as it answers.
+            </span>
+          </Notice>
+        </Card>
+      </div>
+    </div>
   );
 }
 

@@ -129,7 +129,14 @@ Three screens deliberately refuse to guess, because guessing wrong about money i
   idempotency key — and offers **Retry safely**, which resends precisely those bytes under the original
   key. Editing the form afterwards does not change what a retry sends, and a new command cannot be
   started until this one resolves. If the original did commit, the retry returns its result rather than
-  creating a second payment.
+  creating a second payment. Either way the payment is then re-read from the server, so the status,
+  funding result, journal, timeline, account balances, and the actions offered are what the server now
+  holds — not what the command's own response said, which under a replayed key is the result as it stood
+  when that command first ran.
+- **A sign-out in progress.** Clicking Sign out removes the workspace immediately, before the request is
+  even sent, so nothing of the session stays on screen while the server is being asked. The screen that
+  replaces it says the workspace has been cleared and does not claim the session is closed, because that
+  is not known yet.
 - **A sign-out the server did not confirm.** Everything on screen is cleared immediately either way, but
   the console says the session may still be open and offers a retry. It never claims a session was
   destroyed on the strength of a request that failed.

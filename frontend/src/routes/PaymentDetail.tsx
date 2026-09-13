@@ -106,22 +106,43 @@ export function PaymentDetailPage() {
   const canCapture = can.createPayments && record.status === 'AUTHORIZED';
   const canVoid = can.createPayments && record.status === 'AUTHORIZED';
 
-  const runCommand = async (kind: 'capture' | 'void') => {
-    const handle = kind === 'capture' ? capture : voidCommand;
-    // Captured once, so a retry replays the same command against the same payment.
-    await handle.submit({
-      method: 'POST',
-      path: `/ui/payments/${paymentId}/${kind === 'capture' ? 'capture' : 'void'}`,
-      summary: [
-        { label: 'Payment', value: paymentId },
-        { label: 'Command', value: kind === 'capture' ? 'Capture' : 'Void' },
-      ],
-    });
-    setPending(null);
-    // Whether it succeeded, was refused, or conflicted, the authoritative state is re-read rather
-    // than inferred from the response.
-    refreshEverything();
+  /**
+   * Every attempt at a lifecycle command, first or retry, ends the same way.
+   *
+   * A retry used to call the command handle directly and skip this, so a capture that succeeded on its
+   * second attempt left the screen showing the payment as it was before: still AUTHORIZED, still
+   * offering Capture and Void. The command's own response cannot stand in for that read. Under a
+   * replayed idempotency key the server returns the result as it stood when the command first ran,
+   * which is a historical snapshot, not the payment's current state.
+   */
+  const attemptCommand = async (run: () => Promise<unknown>) => {
+    try {
+      await run();
+    } finally {
+      // Whether it succeeded, was refused, or conflicted, the authoritative state is re-read rather
+      // than inferred from the response.
+      refreshEverything();
+    }
   };
+
+  const runCommand = (kind: 'capture' | 'void') =>
+    attemptCommand(async () => {
+      const handle = kind === 'capture' ? capture : voidCommand;
+      // Captured once, so a retry replays the same command against the same payment.
+      await handle.submit({
+        method: 'POST',
+        path: `/ui/payments/${paymentId}/${kind === 'capture' ? 'capture' : 'void'}`,
+        summary: [
+          { label: 'Payment', value: paymentId },
+          { label: 'Command', value: kind === 'capture' ? 'Capture' : 'Void' },
+        ],
+      });
+      setPending(null);
+    });
+
+  /** Replays the captured submission unchanged, then re-reads the payment exactly as a first attempt does. */
+  const retryCommand = (kind: 'capture' | 'void') =>
+    attemptCommand(() => (kind === 'capture' ? capture : voidCommand).retry());
 
   return (
     <>
@@ -157,8 +178,8 @@ export function PaymentDetailPage() {
         }
       />
       <div className="page-body">
-        <CommandOutcome kind="capture" handle={capture} />
-        <CommandOutcome kind="void" handle={voidCommand} />
+        <CommandOutcome kind="capture" handle={capture} onRetry={() => void retryCommand('capture')} />
+        <CommandOutcome kind="void" handle={voidCommand} onRetry={() => void retryCommand('void')} />
 
         {fundingDecline && (
           <Notice tone="info" title="Declined for funds, not by policy">
@@ -365,9 +386,12 @@ export function PaymentDetailPage() {
 function CommandOutcome({
   kind,
   handle,
+  onRetry,
 }: {
   kind: 'capture' | 'void';
   handle: CommandHandle<Payment>;
+  /** Supplied by the page so a retry re-reads the payment, exactly as a first attempt does. */
+  onRetry: () => void;
 }) {
   const label = kind === 'capture' ? 'Capture' : 'Void';
   if (handle.state.phase === 'uncertain' && handle.submitted) {
@@ -377,7 +401,7 @@ function CommandOutcome({
         detail={handle.state.error.detail}
         submitted={handle.submitted}
         busy={handle.busy}
-        onRetry={() => void handle.retry()}
+        onRetry={onRetry}
       />
     );
   }
@@ -396,7 +420,10 @@ function CommandOutcome({
   if (handle.state.phase === 'succeeded') {
     return (
       <Notice tone="success" title={`${label} completed`}>
-        <span>The payment is now {handle.state.result.status}.</span>
+        {/* Deliberately not "the payment is now X" taken from the command's response. Under a replayed
+            key that response is the result as it stood when the command first ran. The payment shown
+            below is a fresh read, so that is what the operator is pointed at. */}
+        <span>The server recorded this command. The payment below has been re-read from the server.</span>
       </Notice>
     );
   }
