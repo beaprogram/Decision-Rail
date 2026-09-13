@@ -4,8 +4,13 @@ import com.decisionrail.decision.DecisionEngine;
 import com.decisionrail.decision.DecisionInput;
 import com.decisionrail.decision.DecisionResult;
 import com.decisionrail.telemetry.Correlation;
+import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -21,6 +26,8 @@ import org.springframework.transaction.annotation.Transactional;
 
 @Service
 public class PaymentService {
+    private static final Logger log = LoggerFactory.getLogger(PaymentService.class);
+
     private final PaymentStore store;
     private final DecisionEngine engine;
     private final Clock clock;
@@ -152,19 +159,51 @@ public class PaymentService {
     }
 
     /**
-     * What a command decided, as bounded facts.
+     * What a command decided, as bounded facts, counted only once the transaction that decided it has
+     * committed.
+     *
+     * <p>This used to increment inline, which made the counter a record of attempts wearing the name of
+     * commitments. Anything failing after this point and before commit - storing the idempotent result,
+     * the commit itself - rolled the money back and left the count standing. The catalogue promises one
+     * increment per committed command, so the increment is deferred to an after-commit callback and
+     * simply never happens on a rollback.
      *
      * <p>Every tag is a closed enumeration. No payment id, account id, merchant id or policy version
      * appears here: those grow without limit and would turn the metrics backend into its own outage.
      * A funding decline is tagged apart from a policy decline because they are different events with
      * different operator responses, and collapsing them is the mistake this project keeps correcting.
+     *
+     * <p>These remain process-local operational counters, not an accounting record. They reset when the
+     * process restarts, and a crash between commit and callback loses an increment while the payment
+     * stays committed. The ledger is the authority on what happened to money; this is for graphs.
      */
     private void recordOutcome(String operation, PaymentStatus status, DecisionResult decision, String failureCode) {
-        metrics.counter("decisionrail.payments.commands",
-                "operation", operation,
-                "status", status.name(),
-                "risk_outcome", decision == null ? "none" : decision.outcome().name(),
-                "funding", failureCode == null ? "none" : failureCode).increment();
+        Counter counter = Counter.builder("decisionrail.payments.commands")
+                .description("Commands whose transaction committed, by outcome")
+                .tag("operation", operation)
+                .tag("status", status.name())
+                .tag("risk_outcome", decision == null ? "none" : decision.outcome().name())
+                .tag("funding", failureCode == null ? "none" : failureCode)
+                .register(metrics);
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            // No transaction to wait for. Every caller here is transactional, so this is a safety net
+            // rather than a path in normal operation.
+            counter.increment();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                try {
+                    counter.increment();
+                } catch (RuntimeException telemetryFailure) {
+                    // The payment is already committed. A metrics failure must not propagate here and
+                    // turn a successful command into an apparent failure for the caller.
+                    log.warn("Could not record the committed-command metric; the payment is unaffected",
+                            telemetryFailure);
+                }
+            }
+        });
     }
 
     private Instant now() { return clock.instant().truncatedTo(ChronoUnit.MICROS); }

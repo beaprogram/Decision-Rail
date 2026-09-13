@@ -28,7 +28,7 @@ time.** The suite installs triggers that make storage fail on purpose.
 | --- | --- |
 | `spread` | Authorize, then capture or void, spread across 24 dedicated accounts |
 | `hot` | The same mix aimed at one account, so row locking is the constraint |
-| `retries` | Identical commands resent under their original key, three at a time, concurrently |
+| `retries` | Identical commands resent under their original key, three at a time, concurrently. **No warmup**: it is a correctness check under concurrency, not a latency measurement, so the whole run is the population and is tagged `measured`. |
 
 Environment knobs: `TRACING_SAMPLE_RATE` (default 1.0), `OTLP_EXPORT_ENABLED` (default false),
 `ACCOUNT_COUNT` (24), `ACCOUNT_BALANCE_MINOR` (100000000), `WARMUP` (15s), `SEED`, `BENCH_PORT` (8081),
@@ -40,6 +40,13 @@ A one-off fault demonstration:
 BROKER_OUTAGE=true OUTAGE_SECONDS=25 ./benchmark/run.sh spread 30 60s 1
 ```
 
+The outage is injected after `OUTAGE_DELAY` (default 25s), which is past the warmup, so it falls inside
+the measured phase. Two recovery clocks are reported separately because they answer different questions:
+
+- **`drainSecondsFromLoadEnd`** — how long the tail took once nothing new was arriving.
+- **`drainSecondsFromBrokerReachable`** — how long recovery itself took. **Recovery** means the broker
+  answered a topic listing again, not that the container start command returned.
+
 ## What each run does
 
 1. Starts isolated PostgreSQL and Kafka and waits for both to be healthy.
@@ -47,8 +54,11 @@ BROKER_OUTAGE=true OUTAGE_SECONDS=25 ./benchmark/run.sh spread 30 60s 1
 3. Seeds 24 accounts with 1,000,000.00 CAD each — large enough that a run cannot exhaust them and
    quietly turn into insufficient-funds declines, which would stop it measuring payment work.
 4. Runs a **warmup** scenario at half rate, whose samples are excluded, then the **measured** scenario.
-5. Waits for delivery to drain, where drained means both that no unpublished outbox row remains *and*
-   that every payment's projection matches its authoritative status.
+5. Waits for delivery to drain, where **drained** means both that no unpublished outbox row remains *and*
+   that every payment's projection matches its authoritative status. Backlog is sampled on a fixed
+   interval (default 2s) from before the load starts until it has drained, with timestamps, into a
+   `.backlog.tsv` beside the result. The reported figure is an **observed maximum at that resolution**,
+   not a true peak.
 6. Runs `benchmark/verify.sql`, scoped to that run's own accounts.
 7. Writes a sanitised result to `benchmark/results/`.
 8. Destroys the stack, including its volumes.
@@ -65,6 +75,40 @@ such a run describe less load than the headline number suggests, and the report 
 
 Percentiles are per run. They are never averaged across runs, because an average of percentiles is not
 a percentile of anything.
+
+## The measured population
+
+Warmup and measurement are separate k6 scenarios, and every reported figure comes from the measured one.
+
+k6 tags each sample with its scenario's tags, including samples of custom metrics, and writes a
+sub-metric into the summary export for every tag combination a threshold names. The scripts therefore
+declare always-true thresholds on `{phase:measured}` for each metric that is reported, and the
+summariser reads only those. A missing sub-metric is a hard failure: falling back to the aggregate is
+the defect this was corrected for, and it is invisible in a passing run — the result file looks fine,
+with percentiles computed over a population that is part warmup, beside a field saying warmup was
+excluded. A 20-second run at 10/s behind a warmup produced 200 measured samples and a 276-sample
+aggregate whose maximum came entirely from warmup.
+
+**Rates are computed here, not taken from k6.** A sub-metric's `rate` field divides by the whole run's
+duration, warmup included. A probe of 6 measured hits in a 2.07-second run with a 2-second warmup was
+reported by k6 as 2.90/s. Every rate in a result file is `count ÷ the declared measured window`, and
+that window is recorded in the file so the arithmetic can be checked.
+
+**Late completions.** An iteration that starts inside the window but finishes after it stays in the
+population and its samples are included; k6 lets in-flight iterations finish during graceful stop rather
+than discarding them. The window is therefore when work was *offered*, not when the last response
+arrived, and the result file says so.
+
+`./benchmark/collector-check.sh` runs the summariser against a crafted summary whose warmup and measured
+populations are impossible to confuse, and fails if any reported figure comes from the aggregate. It is
+part of the required checks.
+
+## Database reconciliation covers the whole run
+
+`benchmark/verify.sql` is deliberately **not** phase-filtered. It reconciles every account, payment,
+journal and event the run created, warmup included, because a warmup authorization moves real synthetic
+money and a correctness check that ignored it would be checking the wrong thing. Latency figures
+describe the measured phase; financial correctness covers everything the run did.
 
 ## Correctness after load
 

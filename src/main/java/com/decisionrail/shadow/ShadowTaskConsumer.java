@@ -5,6 +5,8 @@ import com.decisionrail.events.EventContract;
 import com.decisionrail.events.EventContractException;
 import com.decisionrail.events.EventEnvelope;
 import com.decisionrail.events.InboxStore;
+import com.decisionrail.telemetry.Correlation;
+import com.decisionrail.telemetry.DeliveryTracing;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.Set;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
@@ -44,15 +46,20 @@ public class ShadowTaskConsumer {
     private final TransactionTemplate transactions;
     private final DeliveryProperties properties;
     private final MeterRegistry metrics;
+    private final DeliveryTracing tracing;
+    private final Correlation correlation;
 
     public ShadowTaskConsumer(EventContract contract, InboxStore inbox, ShadowStore shadow,
-                              TransactionTemplate transactions, DeliveryProperties properties, MeterRegistry metrics) {
+                              TransactionTemplate transactions, DeliveryProperties properties, MeterRegistry metrics,
+                              DeliveryTracing tracing, Correlation correlation) {
         this.contract = contract;
         this.inbox = inbox;
         this.shadow = shadow;
         this.transactions = transactions;
         this.properties = properties;
         this.metrics = metrics;
+        this.tracing = tracing;
+        this.correlation = correlation;
     }
 
     @KafkaListener(
@@ -62,21 +69,30 @@ public class ShadowTaskConsumer {
             containerFactory = "paymentEventListenerFactory")
     public void consume(ConsumerRecord<String, String> record, Acknowledgment acknowledgment) {
         String group = properties.shadowGroup();
-        EventContract.Parsed parsed;
-        try {
-            parsed = contract.parse(record.value());
-        } catch (EventContractException rejected) {
-            quarantine(group, rejected, null, record);
+        // Continues the trace of the command whose event this is, so the enqueue is attributable to the
+        // payment that caused it rather than appearing as unexplained background work. The scope closes
+        // on every path, including quarantine, so nothing leaks onto the next record this thread polls.
+        try (DeliveryTracing.Scope span = tracing.consume(record.headers(), group, "shadow.enqueue")) {
+            EventContract.Parsed parsed;
+            try {
+                parsed = contract.parse(record.value());
+            } catch (EventContractException rejected) {
+                span.failed(rejected);
+                quarantine(group, rejected, null, record);
+                acknowledgment.acknowledge();
+                return;
+            }
+            try {
+                enqueue(group, parsed, record);
+            } catch (EventContractException rejected) {
+                span.failed(rejected);
+                quarantine(group, rejected, parsed.envelope().eventId(), record);
+            }
+            // Only after the database transaction committed, or the record was quarantined. Never in a
+            // finally: acknowledging work that was not recorded would turn a storage outage into lost
+            // events.
             acknowledgment.acknowledge();
-            return;
         }
-        try {
-            enqueue(group, parsed, record);
-        } catch (EventContractException rejected) {
-            quarantine(group, rejected, parsed.envelope().eventId(), record);
-        }
-        // Only after the database transaction committed, or the record was quarantined.
-        acknowledgment.acknowledge();
     }
 
     private void enqueue(String group, EventContract.Parsed parsed, ConsumerRecord<String, String> record) {
@@ -104,7 +120,9 @@ public class ShadowTaskConsumer {
                     }
                     // The candidate is pinned here. Changing the setting later does not alter what
                     // an already queued task evaluates.
-                    if (shadow.enqueue(envelope, settings.candidateVersion())) {
+                    // The trace travels with the task, in the same transaction. After this returns,
+                    // the thread that knew it is gone and the worker may be a different process.
+                    if (shadow.enqueue(envelope, settings.candidateVersion(), correlation.current())) {
                         metrics.counter("decisionrail.shadow.tasks.enqueued").increment();
                     }
                 }

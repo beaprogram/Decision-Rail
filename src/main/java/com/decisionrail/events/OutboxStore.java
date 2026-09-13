@@ -62,11 +62,12 @@ public class OutboxStore {
                 INSERT INTO outbox_events
                     (id, aggregate_id, aggregate_sequence, aggregate_type, merchant_id, event_type,
                      schema_version, payload, occurred_at, status, attempts, next_attempt_at, partition_key,
-                     origin_trace_id, origin_span_id)
-                VALUES (?, ?, ?, 'payment', ?, ?, ?, ?::jsonb, ?, 'PENDING', 0, ?, ?, ?, ?)
+                     origin_trace_id, origin_span_id, origin_trace_sampled)
+                VALUES (?, ?, ?, 'payment', ?, ?, ?, ?::jsonb, ?, 'PENDING', 0, ?, ?, ?, ?, ?)
                 """, eventId, aggregateId, sequence, merchantId, eventType, schemaVersion, payload,
                 Timestamp.from(occurredAt), Timestamp.from(occurredAt), aggregateId.toString(),
-                origin.map(OriginTrace::traceId).orElse(null), origin.map(OriginTrace::spanId).orElse(null));
+                origin.map(OriginTrace::traceId).orElse(null), origin.map(OriginTrace::spanId).orElse(null),
+                origin.map(OriginTrace::sampled).orElse(null));
     }
 
     /**
@@ -104,13 +105,14 @@ public class OutboxStore {
                 RETURNING target.id, target.aggregate_id, target.aggregate_sequence, target.merchant_id,
                           target.event_type, target.schema_version, target.payload, target.partition_key,
                           target.occurred_at, target.attempts, target.lease_token,
-                          target.origin_trace_id, target.origin_span_id
+                          target.origin_trace_id, target.origin_span_id, target.origin_trace_sampled
                 """,
                 (rs, row) -> new ClaimedEvent(
                         rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getLong(3), rs.getString(4),
                         rs.getString(5), rs.getInt(6), rs.getString(7), rs.getString(8),
                         rs.getTimestamp(9).toInstant(), rs.getInt(10), rs.getObject(11, UUID.class),
-                        OriginTrace.of(rs.getString(12), rs.getString(13))),
+                        OriginTrace.ofStored(rs.getString(12), rs.getString(13),
+                                rs.getObject(14, Boolean.class))),
                 Timestamp.from(now), limit, Timestamp.from(now), owner, leaseToken, Timestamp.from(leaseExpiry));
     }
 

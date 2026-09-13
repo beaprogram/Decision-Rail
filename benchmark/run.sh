@@ -40,6 +40,8 @@ log() { printf '\n=== %s\n' "$*"; }
 fail() { printf 'BENCHMARK FAILED: %s\n' "$*" >&2; exit 1; }
 
 cleanup() {
+  if [[ -n "${SAMPLER_PID:-}" ]]; then kill "$SAMPLER_PID" 2>/dev/null || true; fi
+  if [[ -n "${OUTAGE_PID:-}" ]]; then kill "$OUTAGE_PID" 2>/dev/null || true; fi
   if [[ -n "${APP_PID:-}" ]] && kill -0 "$APP_PID" 2>/dev/null; then
     kill "$APP_PID" 2>/dev/null || true
     wait "$APP_PID" 2>/dev/null || true
@@ -71,6 +73,11 @@ done
 
 JAR="$ROOT/target/decisionrail-0.1.0.jar"
 [[ -f "$JAR" ]] || fail "build the application first: ./mvnw package (the jar under test must be the packaged one)"
+# The artifact's own identity, recorded with the result. A revision alone does not establish what was
+# measured: a jar can be older than the checkout it sits in, and this is how that is caught rather than
+# assumed. The working tree state is recorded alongside it for the same reason.
+JAR_SHA="$(shasum -a 256 "$JAR" | cut -d' ' -f1)"
+JAR_BUILT_AT="$(date -u -r "$JAR" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || stat -c %y "$JAR")"
 
 mkdir -p "$RESULTS"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
@@ -112,20 +119,63 @@ ACCOUNT_IDS="$("${PSQL[@]}" --quiet --tuples-only --no-align --command \
     "SELECT string_agg(id::text, ',') FROM accounts WHERE merchant_id = 'demo-merchant';" | tr -d '[:space:]')"
 [[ -n "$ACCOUNT_IDS" ]] || fail "accounts were not seeded"
 
+# Backlog is sampled while the load is running, not after it.
+#
+# The previous harness initialised its peak counter after the generator had already exited, so the
+# figure it published as a peak was whatever remained once nothing new was arriving. It could not
+# observe the outage at all. This samples on a fixed interval from before the load starts until the
+# backlog has drained, writes each observation with a timestamp, and the reported figure is an
+# observed maximum at that resolution rather than a true peak.
+SAMPLE_INTERVAL="${BACKLOG_SAMPLE_INTERVAL:-2}"
+SAMPLES_FILE="$RESULTS/${SCENARIO}-${RATE}-rep${REPETITION}-${STAMP}.backlog.tsv"
+printf 'epoch_seconds\tunpublished\tunprojected\tevent\n' > "$SAMPLES_FILE"
+SAMPLER_PID=""
+start_sampler() {
+  (
+    while :; do
+      unpublished="$("${PSQL[@]}" --quiet --tuples-only --no-align --command \
+          "SELECT count(*) FROM outbox_events WHERE status <> 'PUBLISHED';" 2>/dev/null | tr -d '[:space:]')"
+      unprojected="$("${PSQL[@]}" --quiet --tuples-only --no-align --command \
+          "SELECT count(*) FROM payments p LEFT JOIN payment_activity a ON a.payment_id = p.id
+           WHERE a.payment_id IS NULL OR a.last_status <> p.status;" 2>/dev/null | tr -d '[:space:]')"
+      printf '%s\t%s\t%s\t%s\n' "$(date +%s)" "${unpublished:-}" "${unprojected:-}" "sample" >> "$SAMPLES_FILE"
+      sleep "$SAMPLE_INTERVAL"
+    done
+  ) &
+  SAMPLER_PID=$!
+}
+
+mark() { printf '%s\t\t\t%s\n' "$(date +%s)" "$1" >> "$SAMPLES_FILE"; }
+
 # A one-off fault demonstration, labelled as such in the report rather than mixed into the steady-state
 # figures. It stops this stack's own broker and nothing else; the development broker is never touched.
 OUTAGE_PID=""
+BROKER_RECOVERED_AT=""
 if [[ "${BROKER_OUTAGE:-false}" == "true" ]]; then
   OUTAGE_SECONDS="${OUTAGE_SECONDS:-20}"
-  log "A $OUTAGE_SECONDS second broker outage will be injected once the measured phase is under way"
+  # Placed inside the measured phase: the warmup runs first, so the delay clears it before stopping
+  # the broker. An outage during warmup would not appear in any reported figure.
+  OUTAGE_DELAY="${OUTAGE_DELAY:-25}"
+  log "A $OUTAGE_SECONDS second broker outage will be injected ${OUTAGE_DELAY}s in, inside the measured phase"
+  RECOVERY_MARK="$RESULTS/.recovered-${STAMP}"
   (
-    sleep "${OUTAGE_DELAY:-25}"
+    sleep "$OUTAGE_DELAY"
+    mark "broker_stop"
     docker compose --file "$COMPOSE" stop bench-broker >/dev/null 2>&1
     sleep "$OUTAGE_SECONDS"
     docker compose --file "$COMPOSE" start bench-broker >/dev/null 2>&1
+    # Recovery is when the broker answers again, not when the start command returned.
+    until docker compose --file "$COMPOSE" exec -T bench-broker \
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server bench-broker:9092 --list >/dev/null 2>&1; do
+      sleep 1
+    done
+    date +%s > "$RECOVERY_MARK"
+    mark "broker_reachable"
   ) &
   OUTAGE_PID=$!
 fi
+
+start_sampler
 
 log "Running scenario '$SCENARIO' at $RATE/s for $DURATION (warmup $WARMUP, repetition $REPETITION)"
 SCRIPT="payments.js"
@@ -171,12 +221,12 @@ docker run --rm \
   grafana/k6:0.55.0 run --summary-export "/results/summary.json" "/scripts/$SCRIPT" \
   || fail "the load generator reported a threshold breach; see $STAGE/results/summary.json"
 cp "$STAGE/results/summary.json" "$SUMMARY_FILE"
+mark "load_end"
+LOAD_END_EPOCH=$(date +%s)
 if [[ -n "$OUTAGE_PID" ]]; then wait "$OUTAGE_PID" 2>/dev/null || true; fi
 
 log "Waiting for asynchronous delivery to drain"
 drain_deadline=$((SECONDS + 300))
-DRAIN_START=$SECONDS
-PEAK_BACKLOG=0
 while :; do
   remaining="$("${PSQL[@]}" --quiet --tuples-only --no-align --command \
       "SELECT count(*) FROM outbox_events WHERE status <> 'PUBLISHED';" | tr -d '[:space:]')"
@@ -185,14 +235,27 @@ while :; do
        WHERE a.payment_id IS NULL OR a.last_status <> p.status;" | tr -d '[:space:]')"
   # Drained means two things at once: nothing is left to publish, and the read model has caught up
   # with every payment. Either alone would let this finish while work was still outstanding.
-  (( remaining > PEAK_BACKLOG )) && PEAK_BACKLOG=$remaining
   [[ "$remaining" == "0" && "$behind" == "0" ]] && break
   (( SECONDS < drain_deadline )) || fail "delivery did not drain: $remaining unpublished, $behind payments unprojected"
   sleep 2
 done
-# Measured from the end of the load, not from the start of the run: it is how long the backlog took to
-# clear once nothing new was arriving.
-DRAIN_SECONDS=$((SECONDS - DRAIN_START))
+mark "drained"
+DRAINED_EPOCH=$(date +%s)
+kill "$SAMPLER_PID" 2>/dev/null || true
+wait "$SAMPLER_PID" 2>/dev/null || true
+
+# Two different clocks, reported separately because they answer different questions.
+#   load end to drained      - how long the tail took once nothing new was arriving
+#   broker reachable to drained - how long recovery itself took, which only exists for an outage run
+DRAIN_SECONDS=$((DRAINED_EPOCH - LOAD_END_EPOCH))
+RECOVERY_DRAIN_SECONDS=-1
+if [[ -n "${RECOVERY_MARK:-}" && -f "${RECOVERY_MARK:-}" ]]; then
+  RECOVERY_DRAIN_SECONDS=$(( DRAINED_EPOCH - $(cat "$RECOVERY_MARK") ))
+  rm -f "$RECOVERY_MARK"
+fi
+# The observed maximum across the samples taken during load, outage and drain, at the interval above.
+PEAK_BACKLOG="$(awk -F'\t' 'NR>1 && $2 ~ /^[0-9]+$/ && $2+0 > max { max = $2+0 } END { print max+0 }' "$SAMPLES_FILE")"
+PEAK_SAMPLES="$(awk 'NR>1' "$SAMPLES_FILE" | wc -l | tr -d '[:space:]')"
 
 log "Checking correctness of the workload just measured"
 VERIFY_OUTPUT="$("${PSQL[@]}" --quiet --tuples-only --no-align --variable=accounts="$ACCOUNT_IDS" \
@@ -205,6 +268,7 @@ fi
 log "Collecting the environment this measurement was taken in"
 "$ROOT/benchmark/collect.sh" "$SCENARIO" "$RATE" "$DURATION" "$REPETITION" "$SUMMARY_FILE" "$RESULT_FILE" \
   "$DRAIN_SECONDS" "$TRACING_SAMPLE_RATE" "$OTLP_EXPORT_ENABLED" "$ACCOUNT_COUNT" "$SEED" "$PEAK_BACKLOG" \
-  "${BROKER_OUTAGE:-false}"
+  "${BROKER_OUTAGE:-false}" "$WARMUP" "$PEAK_SAMPLES" "$RECOVERY_DRAIN_SECONDS" "$SAMPLE_INTERVAL" \
+  "$JAR_SHA" "$JAR_BUILT_AT"
 
 printf '\nBenchmark complete. Correctness checks passed. Result: %s\n' "$RESULT_FILE"

@@ -102,8 +102,13 @@ class TelemetryCorrelationTest {
     void anEventWrittenBeforeCorrelationExistedStillDelivers() throws Exception {
         UUID payment = authorize(newAccount(1_900), 1_900);
         // Exactly what a row inserted by an older version of this application looks like.
-        jdbc.update("UPDATE outbox_events SET origin_trace_id = NULL, origin_span_id = NULL WHERE aggregate_id = ?",
-                payment);
+        // All three, because a decision without a trace to apply it to is refused by a constraint —
+        // which is the constraint doing its job, and is why this clears the whole set.
+        jdbc.update("""
+                UPDATE outbox_events
+                SET origin_trace_id = NULL, origin_span_id = NULL, origin_trace_sampled = NULL
+                WHERE aggregate_id = ?
+                """, payment);
 
         publish(payment);
         assertThat((String) outboxRow(payment).get("status"))

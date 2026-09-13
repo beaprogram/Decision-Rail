@@ -3,6 +3,13 @@
 Real numbers from the harness in [benchmarking.md](benchmarking.md), on the hardware named below.
 Nothing here is estimated, extrapolated, or carried over from a previous run.
 
+> **Superseded figures.** Every number below was re-measured with the corrected harness. The earlier
+> results, published before that correction, are kept in `benchmark/results/` with their original
+> timestamps and are **not** to be quoted: their percentiles and counts were computed over a population
+> that included warmup traffic, and their backlog figure was sampled after the load had already
+> stopped. They are retained rather than rewritten, because deleting or restating measurements to look
+> as though they came from a later harness is the thing evidence is for preventing.
+
 ## What was measured on
 
 | | |

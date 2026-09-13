@@ -75,7 +75,7 @@ payment is a correct answer; it appears in the command counters below, not as an
 
 | Metric | Type | Labels | Meaning |
 | --- | --- | --- | --- |
-| `decisionrail_payments_commands_total` | counter | `operation`, `status`, `risk_outcome`, `funding` | One per committed command. A policy decline (`risk_outcome=DECLINE`) and a funding decline (`funding=INSUFFICIENT_FUNDS`, `risk_outcome=APPROVE`) are different series on purpose. |
+| `decisionrail_payments_commands_total` | counter | `operation`, `status`, `risk_outcome`, `funding` | One per command whose **transaction committed**, incremented in an after-commit callback. A command that rolled back is never counted. A policy decline (`risk_outcome=DECLINE`) and a funding decline (`funding=INSUFFICIENT_FUNDS`, `risk_outcome=APPROVE`) are different series on purpose. |
 | `decisionrail_decision_duration_seconds` | timer | none | Policy evaluation only: no HTTP, no authentication, no database. Comparing it with HTTP latency separates an expensive policy from an expensive request. |
 | `decisionrail_idempotency_replayed_total` | counter | none | A key was reused with the same request and the stored result was returned. Expected under retries. |
 | `decisionrail_idempotency_conflicts_total` | counter | none | A key was reused with a *different* request. A client defect, not a retry. |
@@ -114,6 +114,32 @@ payment is a correct answer; it appears in the command counters below, not as an
 `decisionrail_shadow_tasks{state}`, `decisionrail_shadow_comparisons_recorded`,
 `decisionrail_shadow_comparisons_diverged`, plus the standard `jvm_*` and `hikaricp_*` families Spring
 Boot registers.
+
+### What counters are and are not
+
+These are process-local operational counters. They reset when the process restarts, and a crash between
+a commit and its after-commit callback loses an increment while the payment stands committed. Read them
+as rates on a graph, not as an accounting record: the ledger is the authority on what happened to money,
+and the two are allowed to disagree after a crash.
+
+### Sampling
+
+The decision is taken once, at the request, and carried unchanged through every later hop.
+
+- It is stored with the event (`origin_trace_sampled`) and with the shadow task, because identifiers
+  alone do not carry it — an unsampled span has perfectly valid ids.
+- It is written into the `traceparent` flags: `01` sampled, `00` not.
+- An **unsampled** context is still propagated. Dropping it would make the next hop a new root that
+  re-samples, recording work the deployment had decided not to record, under a trace leading nowhere.
+- Rows written before the decision was stored are treated as **unsampled**, for the same reason.
+
+Three different conditions are often confused, and behave differently:
+
+| Condition | Setting | What happens |
+| --- | --- | --- |
+| Nothing sampled | `TRACING_SAMPLE_RATE=0.0` | Spans are created non-recording. Nothing is recorded or exported; ids still reach logs. |
+| Sampled, not exported | `OTLP_EXPORT_ENABLED=false` (default) | Spans are recorded in-process and dropped. Correlation works with no collector running. |
+| Sampled, exporter enabled, collector unreachable | export on, endpoint dead | Every export attempt fails, bounded by queue and a 3s timeout. Payments and readiness are unaffected. |
 
 ### Label discipline
 
@@ -169,6 +195,14 @@ rather than free text, so arbitrary input cannot become an indexed field.
 
 A redelivery of the same record appears as another `consumer.project` span in the same trace with
 outcome `duplicate`, which is what "the same event arrived twice and produced one effect" looks like.
+
+### Shadow evaluation
+
+`shadow.enqueue` continues the trace from the Kafka header when the consumer enqueues durable work, and
+`shadow.evaluate` continues it again from the row when a worker claims the task — on a pooled thread,
+in a possibly different process, possibly after another worker's lease expired. The evaluation span is
+parented to the enqueue span, so the whole chain from HTTP command to candidate comparison is one trace.
+A task enqueued before the columns existed has no origin and evaluates under a trace of its own.
 
 ### A captured example
 

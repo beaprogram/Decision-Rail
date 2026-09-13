@@ -37,18 +37,31 @@ export const options = {
   // behind it is not a measurement anyone can judge.
   summaryTrendStats: ['count', 'min', 'med', 'avg', 'p(95)', 'p(99)', 'max'],
   scenarios: {
-    replays: {
+    // One phase, no warmup. This scenario is a correctness check under concurrency, not a latency
+    // measurement, so there is nothing a warmup would protect; the whole run is the population and it
+    // is tagged `measured` so the collector reads it the same way as every other scenario rather than
+    // through a special case.
+    measured: {
       executor: 'constant-arrival-rate',
       rate: RATE,
       timeUnit: '1s',
       duration: DURATION,
       preAllocatedVUs: Math.max(10, RATE),
       maxVUs: Math.max(50, RATE * 4),
+      tags: { phase: 'measured' },
       exec: 'replay',
     },
   },
   thresholds: {
     divergent_replays: ['count<1'],
+    'divergent_replays{phase:measured}': ['count<1'],
+    'originals_sent{phase:measured}': ['count>=0'],
+    'replays_sent{phase:measured}': ['count>=0'],
+    'http_req_duration{phase:measured}': ['max>=0'],
+    'http_reqs{phase:measured}': ['count>=0'],
+    'iterations{phase:measured}': ['count>=0'],
+    'dropped_iterations{phase:measured}': ['count>=0'],
+    'http_req_failed{phase:measured}': ['rate<0.01'],
   },
 };
 

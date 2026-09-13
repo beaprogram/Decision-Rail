@@ -27,7 +27,10 @@ public class Correlation {
             Span span = tracer.currentSpan();
             if (span == null) return Optional.empty();
             TraceContext context = span.context();
-            return OriginTrace.of(context.traceId(), context.spanId());
+            // The decision is read, never inferred. A span that was not sampled still has valid
+            // identifiers, so their presence says nothing about whether anything was recorded. A null
+            // from the bridge means "no decision expressed", which is not a decision to record.
+            return OriginTrace.of(context.traceId(), context.spanId(), Boolean.TRUE.equals(context.sampled()));
         } catch (RuntimeException unavailable) {
             // A tracing failure is not a payment failure. Correlation is best effort by design.
             return Optional.empty();

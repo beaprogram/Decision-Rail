@@ -66,6 +66,7 @@ public class DeliveryTracing {
                     .tag("decisionrail.event_type", eventType)
                     .tag("decisionrail.attempt", Integer.toString(attempt))
                     .tag("decisionrail.origin_known", Boolean.toString(origin.isPresent()))
+                    .tag("decisionrail.origin_sampled", origin.map(o -> Boolean.toString(o.sampled())).orElse("unknown"))
                     .start();
             return new Scope(span, tracer.withSpan(span));
         } catch (RuntimeException unavailable) {
@@ -80,7 +81,10 @@ public class DeliveryTracing {
         try {
             Span span = tracer.currentSpan();
             if (span == null) return;
-            OriginTrace.of(span.context().traceId(), span.context().spanId())
+            // The flags written here are this span's real decision, so a consumer inherits it rather
+            // than deciding again.
+            OriginTrace.of(span.context().traceId(), span.context().spanId(),
+                            Boolean.TRUE.equals(span.context().sampled()))
                     .ifPresent(current -> headers.add(TRACE_PARENT,
                             current.traceParent().getBytes(StandardCharsets.UTF_8)));
         } catch (RuntimeException unavailable) {
@@ -117,15 +121,19 @@ public class DeliveryTracing {
     /**
      * A builder parented to a remote trace when one is known, and a new root otherwise.
      *
-     * <p>Sampled is set explicitly: a stored origin only exists because its producing span was
-     * recorded, and re-deciding sampling per hop is what produces traces with holes in them.
+     * <p>The parent's own sampling decision is propagated, not overridden. Forcing {@code true} here
+     * meant an unsampled request produced a sampled publication: work recorded after the deployment had
+     * decided not to record it, in a trace whose first span does not exist. An unsampled parent is
+     * still set rather than discarded, because discarding it would make this a new root that takes a
+     * fresh sampling decision — the same outcome by a longer route, and with a trace id that leads
+     * nowhere.
      */
     private Span.Builder spanBuilder(Optional<OriginTrace> parent) {
         if (parent.isEmpty()) return tracer.spanBuilder();
         TraceContext context = tracer.traceContextBuilder()
                 .traceId(parent.get().traceId())
                 .spanId(parent.get().spanId())
-                .sampled(true)
+                .sampled(parent.get().sampled())
                 .build();
         return tracer.spanBuilder().setParent(context);
     }
@@ -136,6 +144,30 @@ public class DeliveryTracing {
             Span span = tracer.spanBuilder().name(operation).tag("decisionrail.trigger", "scheduled").start();
             return new Scope(span, tracer.withSpan(span));
         } catch (RuntimeException unavailable) {
+            return Scope.NONE;
+        }
+    }
+
+    /**
+     * Starts a span for durable work, continuing the trace stored with it.
+     *
+     * <p>For work claimed from a table rather than received from a broker: a shadow task evaluated on a
+     * worker thread, possibly in a later process, possibly after another worker's lease expired. There
+     * is no thread context to inherit and no header to read, only the row, which is exactly why the
+     * trace was written into the row in the first place.
+     *
+     * @param attempt the attempt number, so a retry after a takeover reads as a distinct attempt
+     */
+    public Scope resumeDurableWork(Optional<OriginTrace> origin, String operation, int attempt) {
+        try {
+            Span span = spanBuilder(origin).name(operation)
+                    .tag("decisionrail.trigger", "durable_task")
+                    .tag("decisionrail.attempt", Integer.toString(attempt))
+                    .tag("decisionrail.origin_known", Boolean.toString(origin.isPresent()))
+                    .start();
+            return new Scope(span, tracer.withSpan(span));
+        } catch (RuntimeException unavailable) {
+            log.debug("Could not start a span for durable work; it continues untraced", unavailable);
             return Scope.NONE;
         }
     }

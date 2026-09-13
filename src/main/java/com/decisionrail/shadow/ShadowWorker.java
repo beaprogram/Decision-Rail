@@ -7,6 +7,7 @@ import com.decisionrail.decision.ReasonContribution;
 import com.decisionrail.events.DeliveryFaults;
 import com.decisionrail.policy.PolicyService;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.decisionrail.telemetry.DeliveryTracing;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
 import java.time.Duration;
@@ -58,6 +59,7 @@ public class ShadowWorker {
     private final ObjectMapper json;
     private final Clock clock;
     private final MeterRegistry metrics;
+    private final DeliveryTracing tracing;
     private final int batchSize;
     private final int maxAttempts;
     private final Duration leaseDuration;
@@ -67,6 +69,7 @@ public class ShadowWorker {
 
     public ShadowWorker(ShadowStore store, PolicyService policies, DecisionEngine engine, DeliveryFaults faults,
                         TransactionTemplate transactions, ObjectMapper json, Clock clock, MeterRegistry metrics,
+                        DeliveryTracing tracing,
                         @Value("${app.shadow.batch-size:50}") int batchSize,
                         @Value("${app.shadow.concurrency:2}") int concurrency,
                         @Value("${app.shadow.max-attempts:3}") int maxAttempts,
@@ -89,6 +92,7 @@ public class ShadowWorker {
         this.json = json;
         this.clock = clock;
         this.metrics = metrics;
+        this.tracing = tracing;
         this.batchSize = batchSize;
         this.maxAttempts = maxAttempts;
         this.leaseDuration = leaseDuration;
@@ -163,6 +167,18 @@ public class ShadowWorker {
     private enum Completion { RECORDED, DUPLICATE, LOST_OWNERSHIP }
 
     private Outcome evaluate(ShadowTask task) {
+        // Continues the trace stored with the task when it was enqueued. Nothing on this thread knows
+        // anything about the request that caused the work: the enqueueing thread is long gone, this may
+        // be a different process after a restart, and after a lease takeover it is a different worker
+        // entirely. The row is the only thing that survived all three, which is why the trace lives
+        // there. The scope closes on every path so a pooled thread does not carry it into the next task.
+        try (DeliveryTracing.Scope span = tracing.resumeDurableWork(
+                task.origin(), "shadow.evaluate", task.attempts())) {
+            return evaluateTraced(task, span);
+        }
+    }
+
+    private Outcome evaluateTraced(ShadowTask task, DeliveryTracing.Scope span) {
         try {
             var snapshot = policies.snapshot(task.candidateVersion());
             // Injected delay and failure live here so slow and throwing candidates can be

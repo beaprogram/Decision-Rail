@@ -15,4 +15,9 @@ public record ShadowTask(
         int baselineScore,
         String baselineReasons,
         int attempts,
-        UUID leaseToken) {}
+        UUID leaseToken,
+        /**
+         * The trace of the command whose event caused this task, read back from the row. Empty for
+         * tasks enqueued before correlation existed, which evaluate normally under a trace of their own.
+         */
+        java.util.Optional<com.decisionrail.telemetry.OriginTrace> origin) {}

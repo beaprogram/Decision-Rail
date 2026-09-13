@@ -16,6 +16,12 @@ import encoding from 'k6/encoding';
  * funds is a 201 with DECLINED in it: a run that silently turns into declines halfway through has
  * stopped measuring the thing it claims to measure, so declines are counted separately and the report
  * states them.
+ *
+ * Warmup and measurement are separate scenarios, and the scenario tag reaches every sample including
+ * the custom metrics below. The collector reads only `{phase:measured}`. This matters more than it
+ * looks: a 60-second run at 30/s behind a 15-second warmup at 15/s produces 2027 authorizations in the
+ * aggregate and 1800 in the measured phase, so an aggregate percentile is computed over a population
+ * that is an eighth warmup traffic while claiming warmup was excluded.
  */
 
 const BASE = __ENV.BASE_URL || 'http://127.0.0.1:8081';
@@ -72,10 +78,32 @@ export const options = {
       exec: 'lifecycle',
     },
   },
-  // Thresholds are reporting aids, not pass criteria for the measurement itself.
+  // Thresholds do two jobs here. The first two are pass criteria. The rest exist because k6 only
+  // writes a sub-metric into the summary export when a threshold names it, and the measured phase is
+  // the population this benchmark reports. Without them the export contains only aggregates that mix
+  // warmup samples into every percentile and count.
+  //
+  // A threshold that is always true is the documented way to materialise a sub-metric; these are
+  // written as `>=0` so they can never fail and never mask a real breach.
   thresholds: {
     unexpected_errors: ['count<1'],
     'http_req_failed{phase:measured}': ['rate<0.01'],
+
+    'op_authorize{phase:measured}': ['max>=0'],
+    'op_capture{phase:measured}': ['max>=0'],
+    'op_void{phase:measured}': ['max>=0'],
+    'http_req_duration{phase:measured}': ['max>=0'],
+    'http_reqs{phase:measured}': ['count>=0'],
+    'iterations{phase:measured}': ['count>=0'],
+    'dropped_iterations{phase:measured}': ['count>=0'],
+    'business_authorized{phase:measured}': ['count>=0'],
+    'business_declined{phase:measured}': ['count>=0'],
+    'business_captured{phase:measured}': ['count>=0'],
+    'business_voided{phase:measured}': ['count>=0'],
+    'unexpected_errors{phase:measured}': ['count>=0'],
+    // Kept so the warmup can be reported as a separate, visible population rather than implied.
+    'op_authorize{phase:warmup}': ['max>=0'],
+    'iterations{phase:warmup}': ['count>=0'],
   },
   discardResponseBodies: false,
 };

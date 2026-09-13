@@ -60,6 +60,7 @@ class ShadowStaleWorkerTest {
     }
 
     @Autowired ShadowWorker workerA;
+    @Autowired com.decisionrail.telemetry.DeliveryTracing tracing;
     @Autowired ShadowStore store;
     @Autowired ShadowService shadowService;
     @Autowired PolicyService policies;
@@ -257,7 +258,7 @@ class ShadowStaleWorkerTest {
     }
 
     private ShadowWorker newWorker() {
-        return new ShadowWorker(store, policies, engine, faults, transactions, json, clock, metrics,
+        return new ShadowWorker(store, policies, engine, faults, transactions, json, clock, metrics, tracing,
                 5, 2, 2, Duration.ofSeconds(30), Duration.ofMillis(10));
     }
 
@@ -268,7 +269,7 @@ class ShadowStaleWorkerTest {
     private UUID enqueueTask(String candidate) {
         UUID payment = UUID.randomUUID();
         EventEnvelope envelope = envelopeFor(payment);
-        Boolean enqueued = transactions.execute(status -> store.enqueue(envelope, candidate));
+        Boolean enqueued = transactions.execute(status -> store.enqueue(envelope, candidate, java.util.Optional.empty()));
         assertThat(enqueued).isTrue();
         // The insert takes its due time from the database clock while the worker compares it against
         // the JVM clock, and the two differ by a few milliseconds in a container. Backdating the due

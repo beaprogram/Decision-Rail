@@ -1,6 +1,7 @@
 package com.decisionrail.shadow;
 
 import com.decisionrail.events.EventEnvelope;
+import com.decisionrail.telemetry.OriginTrace;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
@@ -8,6 +9,7 @@ import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -50,18 +52,29 @@ public class ShadowStore {
      * <p>Keyed on the event id, so a redelivered event produces no second task. Returns false when
      * the task already existed.
      */
-    public boolean enqueue(EventEnvelope envelope, String candidateVersion) {
+    /**
+     * Enqueues durable shadow work, with the trace of whatever is consuming the event.
+     *
+     * <p>Written in the same statement as the task, so correlation is as durable as the work and cannot
+     * be half-present. {@code ON CONFLICT DO NOTHING} means a redelivery of the same event leaves the
+     * first task's provenance alone: the task is already enqueued, and the request that first caused it
+     * keeps the claim rather than being overwritten by whichever delivery arrived last.
+     */
+    public boolean enqueue(EventEnvelope envelope, String candidateVersion, Optional<OriginTrace> origin) {
         EventEnvelope.Payment payment = envelope.payment();
         EventEnvelope.Decision decision = payment.decision();
         return jdbc.update("""
                 INSERT INTO shadow_tasks (event_id, payment_id, merchant_id, aggregate_sequence, candidate_version,
                         amount_minor, currency, country, baseline_outcome, baseline_score,
-                        baseline_policy_version, baseline_reasons)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb)
+                        baseline_policy_version, baseline_reasons,
+                        origin_trace_id, origin_span_id, origin_trace_sampled)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?::jsonb, ?, ?, ?)
                 ON CONFLICT (event_id) DO NOTHING
                 """, envelope.eventId(), payment.id(), envelope.merchantId(), envelope.aggregateSequence(),
                 candidateVersion, payment.amountMinor(), payment.currency(), payment.country(),
-                decision.outcome(), decision.score(), decision.ruleSetVersion(), encode(decision.reasons())) == 1;
+                decision.outcome(), decision.score(), decision.ruleSetVersion(), encode(decision.reasons()),
+                origin.map(OriginTrace::traceId).orElse(null), origin.map(OriginTrace::spanId).orElse(null),
+                origin.map(OriginTrace::sampled).orElse(null)) == 1;
     }
 
     /** Claims a bounded batch of due tasks with a fencing lease. */
@@ -82,10 +95,12 @@ public class ShadowStore {
                 WHERE target.event_id = claimable.event_id
                 RETURNING target.event_id, target.payment_id, target.merchant_id, target.candidate_version,
                           target.amount_minor, target.currency, target.country, target.baseline_outcome,
-                          target.baseline_score, target.baseline_reasons::text, target.attempts, target.lease_token
+                          target.baseline_score, target.baseline_reasons::text, target.attempts, target.lease_token,
+                          target.origin_trace_id, target.origin_span_id, target.origin_trace_sampled
                 """, (rs, row) -> new ShadowTask(rs.getObject(1, UUID.class), rs.getObject(2, UUID.class),
                         rs.getString(3), rs.getString(4), rs.getLong(5), rs.getString(6).trim(), rs.getString(7).trim(),
-                        rs.getString(8), rs.getInt(9), rs.getString(10), rs.getInt(11), rs.getObject(12, UUID.class)),
+                        rs.getString(8), rs.getInt(9), rs.getString(10), rs.getInt(11), rs.getObject(12, UUID.class),
+                        OriginTrace.ofStored(rs.getString(13), rs.getString(14), rs.getObject(15, Boolean.class))),
                 Timestamp.from(now), limit, owner, token, Timestamp.from(leaseExpiry));
     }
 
