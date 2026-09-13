@@ -150,7 +150,12 @@ cp "$ROOT/benchmark/k6/"*.js "$STAGE/scripts/"
 # one command line covers both. Using --network host instead would work on Linux and silently point at
 # the container's own loopback on macOS, which is how the first attempt at this produced a clean-looking
 # run in which every request failed.
+# Runs as the invoking user so the summary it writes into the staged results directory is owned by
+# whoever started the run. The k6 image runs as its own non-root user by default, which on Linux cannot
+# write into a bind mount owned by someone else; on macOS Docker Desktop the ownership is mapped for
+# you, so the failure only appears in CI.
 docker run --rm \
+  --user "$(id -u):$(id -g)" \
   --add-host=host.docker.internal:host-gateway \
   --env BASE_URL="$CONTAINER_BASE_URL" \
   --env MERCHANT_PASSWORD="$MERCHANT_PASSWORD" \

@@ -3,7 +3,7 @@
   "measuredRevision": "5f3f178ceaea486cbea82ba3cdb52d57859429e3",
   "workingTreeDirty": true,
   "scenario": "spread",
-  "repetition": 92,
+  "repetition": "92",
   "workload": {
     "model": "open (constant arrival rate); the generator keeps offering the rate whether or not the application keeps up",
     "offeredRatePerSecond": 30.0,

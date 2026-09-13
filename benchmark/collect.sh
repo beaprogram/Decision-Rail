@@ -65,7 +65,8 @@ result = {
     "measuredRevision": revision(),
     "workingTreeDirty": dirty(),
     "scenario": "$SCENARIO",
-    "repetition": int("$REPETITION"),
+    # A label, not a number: CI passes "ci", and a run identified by a word is still a run.
+    "repetition": "$REPETITION",
     "workload": {
         "model": "open (constant arrival rate); the generator keeps offering the rate whether or not the application keeps up",
         "offeredRatePerSecond": float("$RATE"),
