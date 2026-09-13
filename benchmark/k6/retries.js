@@ -31,6 +31,12 @@ const AUTHORIZATION = `Basic ${encoding.b64encode(`${MERCHANT}:${PASSWORD}`)}`;
 const divergentReplay = new Counter('divergent_replays');
 const replayCount = new Counter('replays_sent');
 const originals = new Counter('originals_sent');
+// An original that never produced a payment is counted here, not left to be inferred from the gap
+// between originals sent and idempotency records in the database. Only successful originals are
+// replayed, so without this the replay total silently describes a smaller population than the
+// original total, and a report can end up claiming every original was replayed.
+const originalsSucceeded = new Counter('originals_succeeded');
+const originalsFailed = new Counter('originals_failed');
 
 export const options = {
   // p99 and sample counts are not in k6's default export. A percentile without the number of samples
@@ -56,10 +62,16 @@ export const options = {
   // Selected on the built-in scenario tag for the same reason as payments.js: a custom tag never
   // reaches an executor-dropped iteration. This scenario has no warmup, so its one scenario is the
   // whole run and its drops are all measured drops.
+  // Note what is and is not a pass criterion. Divergence must be zero: a replay returning a different
+  // result is the failure this scenario exists to catch. Failed originals are tolerated to a small
+  // rate because a connection that never reached the application says nothing about idempotency - but
+  // they are counted and reported, and a run with any of them is not a zero-failure demonstration.
   thresholds: {
     divergent_replays: ['count<1'],
     'divergent_replays{scenario:measured}': ['count<1'],
     'originals_sent{scenario:measured}': ['count>=0'],
+    'originals_succeeded{scenario:measured}': ['count>=0'],
+    'originals_failed{scenario:measured}': ['count>=0'],
     'replays_sent{scenario:measured}': ['count>=0'],
     'http_req_duration{scenario:measured}': ['max>=0'],
     'http_reqs{scenario:measured}': ['count>=0'],
@@ -85,7 +97,16 @@ export function replay() {
 
   const first = http.post(`${BASE}/v1/payments/authorizations`, body, params);
   originals.add(1);
-  if (first.status !== 201) return;
+  if (first.status !== 201) {
+    // Status 0 is a request that never got a response at all - a connection that was not established,
+    // or one lost before any reply. The tag is the status code, which is bounded, never the error text.
+    originalsFailed.add(1, { status: String(first.status) });
+    // Deliberately not replayed. A client whose original failed would retry it, but this scenario
+    // exists to show that a *successful* command replayed concurrently produces one effect, and mixing
+    // in recovery of unknown-outcome originals would measure two different things at once.
+    return;
+  }
+  originalsSucceeded.add(1);
   const original = first.json();
 
   // The same bytes under the same key, sent together rather than one after another: a client that

@@ -243,8 +243,16 @@ result = {
         "offeredRatePerSecond": float(env("RATE")),
         "duration": env("DURATION"),
         # Excluded by reading only measured-phase sub-metrics, not by assuming the aggregate is clean.
-        "warmupExcluded": True,
-        "warmupSeparateScenario": env("WARMUP_SETTING"),
+        # The harness passes its warmup setting to every scenario, but a scenario that declares no
+        # warmup does not have one. Reported as what the run actually contained rather than as the
+        # value that happened to be offered: the retry scenario was published as excluding a 15s warmup
+        # it never ran.
+        "warmupExcluded": ("iterations" + WARMUP) in metrics,
+        "warmupSeparateScenario": (env("WARMUP_SETTING") if ("iterations" + WARMUP) in metrics else None),
+        "warmupNote": (
+            "Warmup samples are excluded by reading the measured scenario only. A run with no warmup "
+            "scenario has nothing to exclude."
+        ),
         "accounts": int(env("ACCOUNT_COUNT")),
         "seed": int(env("SEED")),
         "authentication": "HTTP Basic, enabled; password verification is included in every measured request",

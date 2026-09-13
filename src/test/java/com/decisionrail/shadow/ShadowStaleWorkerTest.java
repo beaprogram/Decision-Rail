@@ -91,7 +91,36 @@ class ShadowStaleWorkerTest {
 
     @AfterEach
     void disarm() {
+        // Disarms every injected failure before opening the gates, so a worker released here cannot
+        // wake into a fault that is about to be cleared. The order is part of DeliveryFaults.clear's
+        // contract and is what this suite depends on.
         faults.clear();
+        // Then waits for whatever was parked to actually finish. A failed assertion returns from the
+        // test immediately and leaves these running on the common pool, still holding claims, so the
+        // next test would race a worker it knows nothing about. The wait is bounded: a worker that
+        // never finishes fails here, loudly, rather than in whichever test runs next.
+        awaitQuietly(staleRun);
+        awaitQuietly(ownerRun);
+        staleRun = null;
+        ownerRun = null;
+    }
+
+    /**
+     * Waits for a worker to finish without judging how it finished.
+     *
+     * <p>The test's own assertions decide whether the outcome was correct. This exists only so the
+     * worker is done before the next test begins, including on the path where an assertion already
+     * failed and the interesting information has been reported.
+     */
+    private void awaitQuietly(CompletableFuture<ShadowWorker.Cycle> run) {
+        if (run == null) return;
+        try {
+            run.get(BUDGET.toSeconds(), java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException stuck) {
+            throw new AssertionError("a test worker was still running after cleanup released its gates", stuck);
+        } catch (Exception finishedUnhappily) {
+            if (finishedUnhappily instanceof InterruptedException) Thread.currentThread().interrupt();
+        }
     }
 
     @Test

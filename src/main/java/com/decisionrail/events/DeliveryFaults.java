@@ -164,13 +164,42 @@ public class DeliveryFaults {
      */
     public static String replayHandoverGate(String workerId) { return "replay-handover:" + workerId; }
 
+    /**
+     * Disarms everything, in the one order that is safe.
+     *
+     * <h2>Why the order is part of the contract</h2>
+     * Releasing a gate wakes a worker that is parked inside a failpoint, and that worker's next act is
+     * to read the injected failure state. Releasing first therefore hands it a fault set that has not
+     * been cleared yet: a test that disarms everything so a worker can finally succeed can instead
+     * watch it fail on the way out. That is not a theoretical window. Against the real class, a worker
+     * parked at a gate and released by {@code clear()} observed an armed failure on attempt 21 of 50,
+     * which is what made the shadow takeover test fail in CI while passing on a rerun.
+     *
+     * <p>Disarming first closes it completely rather than narrowing it. {@link CountDownLatch#countDown()}
+     * happens-before the return from {@link CountDownLatch#await()}, so every write below is guaranteed
+     * visible to the released worker. The fix is an ordering guarantee, not a smaller race.
+     *
+     * <p>{@link #release} deliberately does not disarm anything. Releasing one worker while a fault
+     * stays armed is exactly how the stale-worker path is exercised, and folding the two together would
+     * remove the ability to express it.
+     */
     public void clear() {
-        gates.keySet().forEach(this::release);
-        gates.clear();
+        disarmInjectedFailures();
+        releaseAllGates();
+    }
+
+    /** Turns off every injected failure and delay. Must run before {@link #releaseAllGates}. */
+    void disarmInjectedFailures() {
         crashAfterAcknowledgement.clear();
         rejectSends.clear();
         failShadowEvaluation.clear();
         shadowEvaluationDelayMillis = 0;
+    }
+
+    /** Opens every armed gate. Must run after {@link #disarmInjectedFailures}. */
+    void releaseAllGates() {
+        gates.keySet().forEach(this::release);
+        gates.clear();
     }
 
     private void requireEnabled() {
