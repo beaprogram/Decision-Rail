@@ -103,8 +103,10 @@ def dirty():
 
 result = {
     "recordedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-    "measuredRevision": revision(),
-    "workingTreeDirty": dirty(),
+    "measuredRevision": env("SOURCE_REVISION") or revision(),
+    # As it was before the run started. Read afterwards it is always dirty, because the run's own
+    # result files are untracked by then.
+    "workingTreeDirtyAtStart": env("SOURCE_DIRTY") or str(dirty()).lower(),
     "artifact": {
         "jarSha256": env("JAR_SHA"),
         "jarBuiltAt": env("JAR_BUILT_AT"),
@@ -133,11 +135,14 @@ result = {
         ),
         "iterationsStartedInWindow": counter("iterations"),
         "lateCompletionsNote": (
-            "An iteration started inside the window but finishing after it still belongs to this "
-            "population and its samples are included; k6 lets in-flight iterations finish during "
-            "graceful stop rather than discarding them. The window is therefore when work was offered, "
-            "not when the last response arrived."
+            "The window is when work was offered, not when the last response arrived. An iteration "
+            "starting inside it and finishing after it keeps its measured tag, because k6 lets "
+            "in-flight iterations finish during graceful stop. An iteration still unfinished when "
+            "graceful stop ends contributes no sample at all, which is why the sample count can sit "
+            "slightly below rate x window even with no dropped iterations. Both counts are reported "
+            "so the gap is visible rather than assumed away."
         ),
+        "offeredIterations": float(env("RATE")) * MEASURED_SECONDS,
     },
     "achieved": {
         "httpRequests": counter("http_reqs"),

@@ -77,6 +77,10 @@ JAR="$ROOT/target/decisionrail-0.1.0.jar"
 # measured: a jar can be older than the checkout it sits in, and this is how that is caught rather than
 # assumed. The working tree state is recorded alongside it for the same reason.
 JAR_SHA="$(shasum -a 256 "$JAR" | cut -d' ' -f1)"
+# Captured before the run writes anything. Collecting it afterwards always reports a dirty tree,
+# because the result files the run is about to produce are themselves untracked.
+SOURCE_REVISION="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+SOURCE_DIRTY="$(test -z "$(git -C "$ROOT" status --porcelain 2>/dev/null)" && echo false || echo true)"
 JAR_BUILT_AT="$(date -u -r "$JAR" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || stat -c %y "$JAR")"
 
 mkdir -p "$RESULTS"
@@ -269,6 +273,6 @@ log "Collecting the environment this measurement was taken in"
 "$ROOT/benchmark/collect.sh" "$SCENARIO" "$RATE" "$DURATION" "$REPETITION" "$SUMMARY_FILE" "$RESULT_FILE" \
   "$DRAIN_SECONDS" "$TRACING_SAMPLE_RATE" "$OTLP_EXPORT_ENABLED" "$ACCOUNT_COUNT" "$SEED" "$PEAK_BACKLOG" \
   "${BROKER_OUTAGE:-false}" "$WARMUP" "$PEAK_SAMPLES" "$RECOVERY_DRAIN_SECONDS" "$SAMPLE_INTERVAL" \
-  "$JAR_SHA" "$JAR_BUILT_AT"
+  "$JAR_SHA" "$JAR_BUILT_AT" "$SOURCE_REVISION" "$SOURCE_DIRTY"
 
 printf '\nBenchmark complete. Correctness checks passed. Result: %s\n' "$RESULT_FILE"
