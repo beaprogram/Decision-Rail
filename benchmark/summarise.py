@@ -312,10 +312,19 @@ result = {
     },
     # Present only for the retry scenario, which is a correctness check rather than a latency
     # measurement: every replay must return the original result.
+    # Five distinct populations. Conflating the first two is how a report came to describe every
+    # original as replayed when only the successful ones were, and how seven failed requests became
+    # "zero HTTP failures".
     "idempotentReplays": ({
         "originalsSent": counter("originals_sent", required=False),
+        "originalsSucceeded": counter("originals_succeeded", required=False),
+        "originalsFailed": counter("originals_failed", required=False),
         "replaysSent": counter("replays_sent", required=False),
         "divergentReplays": counter("divergent_replays", required=False),
+        "divergenceCovers": (
+            "the replays actually sent, which follow successful originals only. It says nothing about "
+            "an original that failed or whose outcome was unknown: those are never replayed here."
+        ),
     } if "replays_sent" + MEASURED in metrics else None),
     "wholeRunIncludingWarmup": {
         "note": "Reported only so the contaminated aggregate is visible rather than hidden; not a measurement.",
