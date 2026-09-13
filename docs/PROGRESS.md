@@ -71,6 +71,15 @@ than through the build.
   - Payment details labelled funds as reserved whenever no failure code was present, including for a
     policy-declined payment that never held anything.
   - This ledger contradicted itself: six checkpoints and 60% alongside a delivered operator console.
+- A final correction pass fixed a failpoint ordering race and an inaccurate retry report.
+  - `DeliveryFaults.clear()` released gates before disarming injected failures, so a worker parked in a
+    failpoint could wake into a fault the caller was in the middle of clearing. Reproduced against the
+    real class at attempt 21 of 50; corrected by disarming first, which the `countDown`/`await`
+    happens-before edge makes a guarantee rather than a smaller window.
+  - The retry report said zero HTTP failures and described all 576 originals as replayed. The artifact
+    shows 7 failed originals, 569 successful, and 1707 replays — 569 x 3. All seven failed at TCP
+    connection establishment with no idempotency record, so they never reached the application; why the
+    connection failed is not established by the retained evidence and is left unattributed.
 - A further correction pass fixed two remaining benchmark defects. Checkpoint 8 remains complete and the
   checkpoint count is unchanged.
   - Dropped iterations were selected on a custom scenario tag, which k6 does not attach to
@@ -141,9 +150,9 @@ Record actual commands, test counts, failures, and meaningful limitations here a
 
 ### Open items
 
-- `ShadowStaleWorkerTest.aStaleWorkerCannotRecordATerminalFailureOverTheNewOwnersClaim` is flaky in CI:
-  one failure and one pass on the same revision, with no code change between them. The probable cause is
-  an assertion on a global cycle count in a suite that shares a database. See
+- None outstanding from the checkpoint 8 correction passes. The `ShadowStaleWorkerTest` flake is
+  resolved: the cause was an ordering race in `DeliveryFaults.clear()`, which released gates before
+  disarming injected failures, and the earlier shared-database hypothesis is withdrawn. See
   [verification.md](verification.md).
 
 ## Remaining checkpoints

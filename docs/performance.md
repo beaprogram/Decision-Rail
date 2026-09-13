@@ -60,8 +60,18 @@ against 75 preallocated, so the generator was not the constraint.
 
 Two repetitions of three would have passed. The third degraded across every dimension at once — latency
 roughly tripled at p50 and quadrupled at p95, the backlog reached 2231 against 294–448, and the
-concurrency the workload demanded rose to 103 virtual users against 75 preallocated, at which point the
-executor dropped 21 iterations while the pool grew.
+concurrency the workload demanded rose to 103 virtual users against the **90** preallocated for this
+rate, at which point the executor dropped 21 iterations.
+
+The preallocation figure matters and was previously stated as 75, which is the 25/s value: virtual users
+are preallocated at three times the offered rate, so 30/s preallocates 90 per scenario and 25/s
+preallocates 75. The k6 banner for those runs records `maxVUs: 90-180` and `maxVUs: 75-150`
+respectively.
+
+That the pool had to grow past its preallocation is an observation; that pool growth *caused* the drops
+is not established. The demanded concurrency exceeding the preallocated pool and the drops are both
+consequences of the latency spike, and nothing here separates a drop caused by allocation latency from
+one caused by the application simply being too slow to free a user in time.
 
 The criteria require every repetition to pass, so 30/s is not sustained. That the same rate passed twice
 is the reason the criteria were written down in advance.
@@ -156,20 +166,64 @@ account. At 25/s the effect is visible in the tail rather than the median.
 
 ## Identical commands under one key
 
-576 original authorizations, each followed by **three concurrent replays of the same bytes under the
-same key** — 1707 replays.
+Two runs are reported. The first was published with figures that did not survive checking; the second
+was taken after the harness was changed to measure the populations directly rather than leave them to
+be inferred.
+
+### The corrected current run — revision `83c6032`, jar `4c81d0788dab8957…`
 
 | | |
 | --- | --- |
+| Originals sent | 600 |
+| Originals that produced a payment | **600** |
+| Originals that failed | **0** |
+| Replays sent (three per successful original) | 1800 |
 | Replays returning a different payment id or status | **0** |
-| Payments created per idempotency key | exactly 1 |
+| Payments and idempotency records created | 600, one per key |
 | HTTP failures | 0 |
-| Measured dropped iterations | 23 |
+| Measured dropped iterations | 0 |
 
-The 23 drops are reported rather than hidden: this scenario offers four requests per iteration, so 20
-iterations/s is 80 requests/s, above the sustained rate established above. It is a correctness check
-under concurrency, not a latency measurement, and its correctness result does not depend on every
-iteration starting.
+### The earlier run, corrected — `retries-20-rep1-20260913T161211Z`
+
+It was described here as 576 originals each receiving three replays with zero HTTP failures. The
+artifact says otherwise, and the artifact is right:
+
+| | Published | Actual |
+| --- | --- | --- |
+| Originals sent | 576 | 576 |
+| Originals that produced a payment | 576 implied | **569** |
+| Originals that failed | 0 | **7** |
+| Replays sent | 1707 | 1707 — which is 569 × 3, not 576 × 3 |
+| HTTP failures | "zero" | **7** of 2283 requests (`failedRequestRate` 0.00307 × 2283 = 7.0) |
+| Measured dropped iterations | 23 | 23 |
+
+The database agrees: 569 idempotency records and 569 durable events for 576 attempts.
+
+**What the zero-divergence result does and does not cover.** It covers the 1707 replays that were
+actually sent, all of which returned the original payment id and status. It says nothing about the
+seven originals that failed: the scenario replays a command only after the original succeeded, so those
+seven were never retried and their recovery was never exercised here.
+
+### The seven failures
+
+All seven were `dial: i/o timeout` — the TCP connection was never established, so no HTTP request was
+sent. The application logged no error of any kind for that run, and **no idempotency record exists for
+those seven keys**, which is direct evidence that they never reached the application rather than an
+inference from the error text.
+
+Why the connection failed is **not established by the retained evidence**. A dial timeout is consistent
+with saturation of the Docker network between the generator container and the host, and equally with
+the server's accept backlog being full — neither leaves a trace in an application log, and nothing was
+collected that would separate them. It is left unattributed rather than assigned to the more
+comfortable of the two.
+
+The scenario's threshold tolerates a failure rate below 1%, which is why that run passed at 0.3%. The
+tolerance stays, because a connection that never reached the application says nothing about
+idempotency, but failed originals are now counted and reported, and a run with any of them is not
+described as a zero-failure demonstration.
+
+This scenario runs no warmup. Its metadata previously reported excluding a 15-second warmup it never
+ran; it now reports having none.
 
 ## Does telemetry cost anything here
 
@@ -209,9 +263,12 @@ synthetic money as a measured one. Only the latency figures are scenario-filtere
 - **Percentiles are per run**, never averaged; where runs disagree, every value is shown.
 - **Run-to-run variance is large and uncontrolled**, and at 25–30/s it spans the size of any effect this
   harness is being used to look for. The tracing comparison is the casualty.
-- **The generator has its own limits, and both were hit.** Too few preallocated virtual users and it
-  drops work during a latency spike while the pool grows; too many and connection establishment through
-  the Docker network fails with `dial: i/o timeout`. Two runs were lost to the latter and re-run. Users
-  are sized at three times the offered rate, which covers a three-second iteration by Little's law.
+- **The generator has its own limits, and runs were lost to them.** Preallocating six times the rate
+  produced `dial: i/o timeout` failures on connection establishment; preallocating close to the
+  steady-state need coincided with drops during latency spikes. Users are now sized at three times the
+  offered rate, which covers a three-second iteration by Little's law. Whether either failure mode is
+  *caused* by the generator rather than merely correlated with its configuration is not established:
+  a dial timeout has at least two explanations that the retained evidence cannot separate, and drops
+  during a spike are consistent with both pool growth and the application being slow.
 - **No causal claim is made about what degrades API latency at 30/s.**
 - **No throughput claim is made for any hardware other than the one named above.**

@@ -234,23 +234,38 @@ Observed against the pinned 0.55.0 image: aggregate 284 drops, `{scenario:measur
 `{scenario:warmup}` 122, `{phase:measured}` **0**, `{phase:warmup}` **0**. Restoring the old selector
 makes the summariser refuse the run rather than report a zero.
 
-### A flaky concurrency test, recorded rather than hidden
+### A failpoint ordering race, found and fixed
 
 `ShadowStaleWorkerTest.aStaleWorkerCannotRecordATerminalFailureOverTheNewOwnersClaim` failed once in CI
-on revision `3337b00` and passed on a re-run of **that same revision**, with no application or test code
-changed in the commit at all — that pass touched only the benchmark harness, documentation and workflow.
-It also passed locally in every run of the suite. Two outcomes from one commit is the definition of
-flaky, and it is written down here rather than absorbed by a retry.
+on revision `3337b00` and passed on a re-run of that same revision. The cause is now confirmed, and it
+is **not** the shared-database cycle-count hypothesis recorded earlier — that explanation is withdrawn.
 
-The likely mechanism, not yet confirmed: the test asserts on `Cycle.evaluated()`, a count of everything
-a worker cycle evaluated, while the suite shares one database. Its `@BeforeEach` defends against
-interference by parking every `PENDING` shadow task into the far future, but a task another test left
-`CLAIMED` becomes claimable again when its lease expires, and nothing parks those. That is the same
-unscoped-assertion hazard AGENTS.md warns about, in a test old enough to predate the warning.
+`DeliveryFaults.clear()` released every gate and *then* cleared the injected failure state. A worker
+parked inside a failpoint wakes on that release and immediately reads the failure state, so the test's
+"disarm everything so the rightful owner can finally succeed" handed the rightful owner a fault set that
+had not been cleared yet. It failed terminally, and the cycle evaluated nothing.
 
-Left unfixed deliberately: the pass that found it was scoped to two benchmark defects, and changing an
-unrelated concurrency test to make a build green is how a real defect gets buried. It is listed as an
-open item instead.
+**Reproduced against the real class**, no replica involved: a worker parked at a gate and released by
+`clear()` observed `Simulated candidate policy evaluation failure` on attempt 21 of 50.
+
+The correction is an ordering guarantee rather than a narrower window. `clear()` disarms first and
+releases second, and `CountDownLatch.countDown()` happens-before the return from `await()`, so every
+disarming write is guaranteed visible to the released worker.
+
+| Evidence | Old ordering | Corrected |
+| --- | --- | --- |
+| Real class, 50 parked-worker rendezvous, uncontrolled | failed at attempt 21 | 50/50 pass |
+| Real methods composed in the wrong order, interleaving forced | fails every time | n/a |
+| `ShadowStaleWorkerTest`, 10 consecutive local runs | 10/10 pass | 10/10 pass |
+
+The integration test passes ten times in a row under **both** orderings on this machine: the window is
+too narrow to hit here, which is exactly why it read as flakiness and why the unit-level rendezvous is
+what pins it. The one CI failure remains the only observation of it at integration level.
+
+`release()` deliberately still leaves faults armed — releasing one worker into an armed failure is how
+the stale-worker path is expressed, and folding disarm into release would make that interleaving
+unwritable. Cleanup now also joins outstanding test workers rather than only releasing them, so a failed
+assertion cannot leave one running into the next test.
 
 ### Test infrastructure notes
 
