@@ -52,16 +52,19 @@ export const options = {
       exec: 'replay',
     },
   },
+  // Selected on the built-in scenario tag for the same reason as payments.js: a custom tag never
+  // reaches an executor-dropped iteration. This scenario has no warmup, so its one scenario is the
+  // whole run and its drops are all measured drops.
   thresholds: {
     divergent_replays: ['count<1'],
-    'divergent_replays{phase:measured}': ['count<1'],
-    'originals_sent{phase:measured}': ['count>=0'],
-    'replays_sent{phase:measured}': ['count>=0'],
-    'http_req_duration{phase:measured}': ['max>=0'],
-    'http_reqs{phase:measured}': ['count>=0'],
-    'iterations{phase:measured}': ['count>=0'],
-    'dropped_iterations{phase:measured}': ['count>=0'],
-    'http_req_failed{phase:measured}': ['rate<0.01'],
+    'divergent_replays{scenario:measured}': ['count<1'],
+    'originals_sent{scenario:measured}': ['count>=0'],
+    'replays_sent{scenario:measured}': ['count>=0'],
+    'http_req_duration{scenario:measured}': ['max>=0'],
+    'http_reqs{scenario:measured}': ['count>=0'],
+    'iterations{scenario:measured}': ['count>=0'],
+    'dropped_iterations{scenario:measured}': ['count>=0'],
+    'http_req_failed{scenario:measured}': ['rate<0.01'],
   },
 };
 

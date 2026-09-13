@@ -98,6 +98,15 @@ jobs:
       # shared runner with unknown neighbours cannot produce a latency figure worth quoting, and none
       # is published from here. It runs after the browser suite so it never shares infrastructure with
       # the fault-injection tests.
+      # The exporter/collector contract, checked without the application. The first runs the summariser
+      # against crafted summaries and timelines; the second runs the pinned k6 image against a workload
+      # that really drops iterations, because a fixture can only prove what the summariser does with
+      # JSON it is handed, not what k6 puts in it. That gap is where the dropped-iteration defect lived.
+      - name: Check the benchmark collector and k6 attribution
+        run: |
+          ./benchmark/collector-check.sh
+          ./benchmark/k6-attribution-check.sh
+
       - name: Smoke-run the performance harness
         env:
           BENCH_PORT: "8082"

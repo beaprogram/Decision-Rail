@@ -261,9 +261,9 @@ if [[ -n "${RECOVERY_MARK:-}" && -f "${RECOVERY_MARK:-}" ]]; then
   RECOVERY_DRAIN_SECONDS=$(( DRAINED_EPOCH - $(cat "$RECOVERY_MARK") ))
   rm -f "$RECOVERY_MARK"
 fi
-# The observed maximum across the samples taken during load, outage and drain, at the interval above.
-PEAK_BACKLOG="$(awk -F'\t' 'NR>1 && $2 ~ /^[0-9]+$/ && $2+0 > max { max = $2+0 } END { print max+0 }' "$SAMPLES_FILE")"
-PEAK_SAMPLES="$(awk 'NR>1' "$SAMPLES_FILE" | wc -l | tr -d '[:space:]')"
+# The timeline itself is the evidence; the summariser derives the observed maximum, the observation
+# count, the marker count and the actual spacing from it. It used to be reduced to two awk one-liners
+# here, one of which counted event markers as samples.
 
 log "Checking correctness of the workload just measured"
 VERIFY_OUTPUT="$("${PSQL[@]}" --quiet --tuples-only --no-align --variable=accounts="$ACCOUNT_IDS" \
@@ -275,8 +275,8 @@ fi
 
 log "Collecting the environment this measurement was taken in"
 "$ROOT/benchmark/collect.sh" "$SCENARIO" "$RATE" "$DURATION" "$REPETITION" "$SUMMARY_FILE" "$RESULT_FILE" \
-  "$DRAIN_SECONDS" "$TRACING_SAMPLE_RATE" "$OTLP_EXPORT_ENABLED" "$ACCOUNT_COUNT" "$SEED" "$PEAK_BACKLOG" \
-  "${BROKER_OUTAGE:-false}" "$WARMUP" "$PEAK_SAMPLES" "$RECOVERY_DRAIN_SECONDS" "$SAMPLE_INTERVAL" \
-  "$JAR_SHA" "$JAR_BUILT_AT" "$SOURCE_REVISION" "$SOURCE_DIRTY"
+  "$DRAIN_SECONDS" "$TRACING_SAMPLE_RATE" "$OTLP_EXPORT_ENABLED" "$ACCOUNT_COUNT" "$SEED" "0" \
+  "${BROKER_OUTAGE:-false}" "$WARMUP" "0" "$RECOVERY_DRAIN_SECONDS" "$SAMPLE_INTERVAL" \
+  "$JAR_SHA" "$JAR_BUILT_AT" "$SOURCE_REVISION" "$SOURCE_DIRTY" "$SAMPLES_FILE"
 
 printf '\nBenchmark complete. Correctness checks passed. Result: %s\n' "$RESULT_FILE"

@@ -20,19 +20,21 @@ trap 'rm -rf "$WORK"' EXIT
 cat > "$WORK/summary.json" <<'JSON'
 {
   "metrics": {
-    "op_authorize":                  {"count": 20, "med": 5000, "p(95)": 5000, "p(99)": 5000, "max": 9000},
-    "op_authorize{phase:measured}":  {"count": 10, "med": 100,  "p(95)": 120,  "p(99)": 130,  "max": 140},
-    "op_authorize{phase:warmup}":    {"count": 10, "med": 9000, "p(95)": 9000, "p(99)": 9000, "max": 9000},
-    "op_capture{phase:measured}":    {"count": 6,  "med": 110,  "p(95)": 130,  "p(99)": 140,  "max": 150},
-    "op_void{phase:measured}":       {"count": 4,  "med": 90,   "p(95)": 100,  "p(99)": 110,  "max": 120},
-    "http_req_duration{phase:measured}": {"count": 20, "med": 105, "p(95)": 125, "p(99)": 135, "max": 145},
+    "op_authorize":                    {"count": 20, "med": 5000, "p(95)": 5000, "p(99)": 5000, "max": 9000},
+    "op_authorize{scenario:measured}":  {"count": 10, "med": 100,  "p(95)": 120,  "p(99)": 130,  "max": 140},
+    "op_authorize{scenario:warmup}":    {"count": 10, "med": 9000, "p(95)": 9000, "p(99)": 9000, "max": 9000},
+    "op_capture{scenario:measured}":    {"count": 6,  "med": 110,  "p(95)": 130,  "p(99)": 140,  "max": 150},
+    "op_void{scenario:measured}":       {"count": 4,  "med": 90,   "p(95)": 100,  "p(99)": 110,  "max": 120},
+    "http_req_duration{scenario:measured}": {"count": 20, "med": 105, "p(95)": 125, "p(99)": 135, "max": 145},
     "http_reqs":                     {"count": 40, "rate": 4.0},
-    "http_reqs{phase:measured}":     {"count": 20, "rate": 2.0},
-    "iterations{phase:measured}":    {"count": 10, "rate": 1.0},
-    "dropped_iterations{phase:measured}": {"count": 3},
+    "http_reqs{scenario:measured}":     {"count": 20, "rate": 2.0},
+    "iterations{scenario:measured}":    {"count": 10, "rate": 1.0},
+    "dropped_iterations": {"count": 5},
+    "dropped_iterations{scenario:measured}": {"count": 3},
+    "dropped_iterations{scenario:warmup}": {"count": 2},
     "http_req_failed":               {"value": 0.5},
-    "http_req_failed{phase:measured}": {"value": 0.0},
-    "unexpected_errors{phase:measured}": {"count": 0}
+    "http_req_failed{scenario:measured}": {"value": 0.0},
+    "unexpected_errors{scenario:measured}": {"count": 0}
   }
 }
 JSON
@@ -81,6 +83,65 @@ if failures:
         print("  -", failure)
     raise SystemExit(1)
 print("collector check passed: every reported figure came from the measured phase")
+PY
+
+# The backlog timeline: markers are not measurements, gaps are not the configured delay, and a failed
+# query is not a backlog of zero. Every one of those was previously wrong or unreported.
+printf 'epoch_seconds\tunpublished\tunprojected\tevent\n'  > "$WORK/timeline.tsv"
+{
+  printf '1000\t10\t4\tsample\n'      # observation
+  printf '1002\t40\t9\tsample\n'      # +2s, the configured delay
+  printf '1003\t\t\tbroker_stop\n'    # marker, not a measurement
+  printf '1006\t120\t30\tsample\n'    # +4s: queries took longer than the delay
+  printf '1008\t\t\tsample\n'         # the query returned nothing: unknown, not zero
+  printf '1013\t95\t12\tsample\n'     # +7s after the last real observation
+  printf '1014\t\t\tload_end\n'       # marker
+  printf '1015\t0\t0\tsample\n'       # drained
+  printf '1016\t\t\tdrained\n'        # marker
+} >> "$WORK/timeline.tsv"
+
+SCENARIO=check REPETITION=timeline RATE=10 DURATION=10s WARMUP_SETTING=5s ACCOUNT_COUNT=4 SEED=1 \
+AUTHORIZED=0 CAPTURED=6 VOIDED=4 DECLINED=0 KEYS=20 JOURNALS=6 EVENTS=20 \
+DRAIN_SECONDS=1 PEAK_BACKLOG=0 PEAK_SAMPLES=0 SAMPLE_INTERVAL=2 RECOVERY_DRAIN=-1 \
+SAMPLE_RATE=1.0 OTLP_ENABLED=false OUTAGE=true SAMPLES_FILE="$WORK/timeline.tsv" \
+  python3 "$ROOT/benchmark/summarise.py" "$WORK/summary.json" "$WORK/timeline-result.json" > /dev/null
+
+python3 - "$WORK/timeline-result.json" <<'PY'
+import json, sys
+asynchronous = json.load(open(sys.argv[1]))["asynchronous"]
+failures = []
+
+def check(condition, message):
+    if not condition:
+        failures.append(f"{message} (got {asynchronous.get('backlogObservations')} observations, "
+                        f"{asynchronous.get('backlogTimelineMarkers')} markers, "
+                        f"{asynchronous.get('backlogFailedObservations')} failed, "
+                        f"max {asynchronous.get('observedMaxUndeliveredBacklog')}, "
+                        f"gaps {asynchronous.get('backlogObservedGapSeconds')})")
+
+# Five rows carry a usable measurement; three are markers and one is a failed query.
+check(asynchronous["backlogObservations"] == 5, "observation rows were miscounted")
+check(asynchronous["backlogTimelineMarkers"] == 3, "event markers were miscounted")
+check(asynchronous["backlogFailedObservations"] == 1, "a failed query was not reported as such")
+
+# The failed row must not become a zero, which would drag a minimum down and look like a drained
+# backlog at a moment when nothing was known.
+check(asynchronous["observedMaxUndeliveredBacklog"] == 120, "the observed maximum is wrong")
+
+# Spacing is what was observed, not what was configured. Both are reported.
+gaps = asynchronous["backlogObservedGapSeconds"]
+check(gaps is not None and gaps["min"] == 2 and gaps["max"] == 7,
+      "observed gaps do not describe the timeline")
+check(asynchronous["backlogConfiguredDelaySeconds"] == 2.0, "the configured delay is not reported")
+check(gaps["max"] != asynchronous["backlogConfiguredDelaySeconds"],
+      "this fixture is meant to have irregular spacing; it no longer does")
+
+if failures:
+    print("TIMELINE CHECK FAILED:")
+    for failure in failures:
+        print("  -", failure)
+    raise SystemExit(1)
+print("timeline check passed: markers, failed queries and irregular spacing are all reported honestly")
 PY
 
 # And the other half of the contract: a missing sub-metric must stop the run rather than fall back.

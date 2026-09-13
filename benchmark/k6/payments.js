@@ -17,11 +17,10 @@ import encoding from 'k6/encoding';
  * stopped measuring the thing it claims to measure, so declines are counted separately and the report
  * states them.
  *
- * Warmup and measurement are separate scenarios, and the scenario tag reaches every sample including
- * the custom metrics below. The collector reads only `{phase:measured}`. This matters more than it
- * looks: a 60-second run at 30/s behind a 15-second warmup at 15/s produces 2027 authorizations in the
- * aggregate and 1800 in the measured phase, so an aggregate percentile is computed over a population
- * that is an eighth warmup traffic while claiming warmup was excluded.
+ * Warmup and measurement are separate scenarios and the collector reads only the measured one. This
+ * matters more than it looks: a 60-second run at 30/s behind a 15-second warmup at 15/s produces 2027
+ * authorizations in the aggregate and 1800 in the measured scenario, so an aggregate percentile is
+ * computed over a population that is an eighth warmup traffic while claiming warmup was excluded.
  */
 
 const BASE = __ENV.BASE_URL || 'http://127.0.0.1:8081';
@@ -78,32 +77,37 @@ export const options = {
       exec: 'lifecycle',
     },
   },
-  // Thresholds do two jobs here. The first two are pass criteria. The rest exist because k6 only
-  // writes a sub-metric into the summary export when a threshold names it, and the measured phase is
-  // the population this benchmark reports. Without them the export contains only aggregates that mix
-  // warmup samples into every percentile and count.
+  // Thresholds do two jobs. The first two are pass criteria. The rest exist because k6 only writes a
+  // sub-metric into the summary export when a threshold names it, and the measured scenario is the
+  // population this benchmark reports. Without them the export holds only aggregates that mix warmup
+  // samples into every percentile and count. An always-true `>=0` is the documented way to materialise
+  // a sub-metric; it can never fail and never masks a real breach.
   //
-  // A threshold that is always true is the documented way to materialise a sub-metric; these are
-  // written as `>=0` so they can never fail and never mask a real breach.
+  // Everything selects on the **built-in `scenario` tag**, not on a custom one. Custom scenario tags
+  // reach ordinary samples but not the iterations an executor drops: those carry only global run tags
+  // and the built-in scenario tag. Verified against this pinned k6 version by
+  // benchmark/k6-attribution-check.sh, which exists because the failure is silent - the sub-metric is
+  // created, matches nothing, and reports a confident zero while the aggregate holds hundreds.
   thresholds: {
     unexpected_errors: ['count<1'],
-    'http_req_failed{phase:measured}': ['rate<0.01'],
+    'http_req_failed{scenario:measured}': ['rate<0.01'],
 
-    'op_authorize{phase:measured}': ['max>=0'],
-    'op_capture{phase:measured}': ['max>=0'],
-    'op_void{phase:measured}': ['max>=0'],
-    'http_req_duration{phase:measured}': ['max>=0'],
-    'http_reqs{phase:measured}': ['count>=0'],
-    'iterations{phase:measured}': ['count>=0'],
-    'dropped_iterations{phase:measured}': ['count>=0'],
-    'business_authorized{phase:measured}': ['count>=0'],
-    'business_declined{phase:measured}': ['count>=0'],
-    'business_captured{phase:measured}': ['count>=0'],
-    'business_voided{phase:measured}': ['count>=0'],
-    'unexpected_errors{phase:measured}': ['count>=0'],
-    // Kept so the warmup can be reported as a separate, visible population rather than implied.
-    'op_authorize{phase:warmup}': ['max>=0'],
-    'iterations{phase:warmup}': ['count>=0'],
+    'op_authorize{scenario:measured}': ['max>=0'],
+    'op_capture{scenario:measured}': ['max>=0'],
+    'op_void{scenario:measured}': ['max>=0'],
+    'http_req_duration{scenario:measured}': ['max>=0'],
+    'http_reqs{scenario:measured}': ['count>=0'],
+    'iterations{scenario:measured}': ['count>=0'],
+    'dropped_iterations{scenario:measured}': ['count>=0'],
+    'business_authorized{scenario:measured}': ['count>=0'],
+    'business_declined{scenario:measured}': ['count>=0'],
+    'business_captured{scenario:measured}': ['count>=0'],
+    'business_voided{scenario:measured}': ['count>=0'],
+    'unexpected_errors{scenario:measured}': ['count>=0'],
+    // The warmup is materialised too, so its drops are reported rather than implied to be absent.
+    'op_authorize{scenario:warmup}': ['max>=0'],
+    'iterations{scenario:warmup}': ['count>=0'],
+    'dropped_iterations{scenario:warmup}': ['count>=0'],
   },
   discardResponseBodies: false,
 };

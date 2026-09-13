@@ -55,10 +55,16 @@ the measured phase. Two recovery clocks are reported separately because they ans
    quietly turn into insufficient-funds declines, which would stop it measuring payment work.
 4. Runs a **warmup** scenario at half rate, whose samples are excluded, then the **measured** scenario.
 5. Waits for delivery to drain, where **drained** means both that no unpublished outbox row remains *and*
-   that every payment's projection matches its authoritative status. Backlog is sampled on a fixed
-   interval (default 2s) from before the load starts until it has drained, with timestamps, into a
-   `.backlog.tsv` beside the result. The reported figure is an **observed maximum at that resolution**,
-   not a true peak.
+   that every payment's projection matches its authoritative status. Backlog is sampled from before the
+   load starts until it has drained, with timestamps, into a `.backlog.tsv` beside the result.
+
+   The sampler queries the database and then sleeps for a configured delay, so that delay is a floor on
+   the spacing, not the spacing itself: each cycle costs the delay plus however long the queries took.
+   The result therefore reports the **configured delay** and the **observed gaps** (min, median, max)
+   separately, and the backlog figure is an **observed maximum across those observations**, not a peak.
+   Event markers — `broker_stop`, `broker_reachable`, `load_end`, `drained` — are counted apart from
+   observations, and a query that returned nothing is reported as a failed observation rather than as a
+   backlog of zero.
 6. Runs `benchmark/verify.sql`, scoped to that run's own accounts.
 7. Writes a sanitised result to `benchmark/results/`.
 8. Destroys the stack, including its volumes.
@@ -75,6 +81,24 @@ such a run describe less load than the headline number suggests, and the report 
 
 Percentiles are per run. They are never averaged across runs, because an average of percentiles is not
 a percentile of anything.
+
+## What counts as a sustained rate
+
+Fixed before the measurements were taken, so the rate is found rather than chosen. A rate is sustained
+only if **every repetition** satisfies all of:
+
+1. **Zero dropped iterations in the measured scenario.** The executor always had a virtual user free to
+   start the work it offered.
+2. **Zero failed HTTP requests and zero unexpected errors.**
+3. **Zero business declines.** A run that drifts into insufficient-funds declines has stopped measuring
+   payment work.
+4. **Achieved request rate within 2% of offered**, computed over the declared window.
+5. **The backlog drains within the run's own duration** after the load stops.
+6. **At least three repetitions**, all of them passing.
+
+Warmup drops are reported separately and do not disqualify a rate: the warmup exists to absorb cold
+starts, and dropping work while the pools fill says nothing about the steady state. They are published
+because hiding them would make the measured zero look more impressive than it is.
 
 ## The measured population
 
@@ -99,9 +123,29 @@ population and its samples are included; k6 lets in-flight iterations finish dur
 than discarding them. The window is therefore when work was *offered*, not when the last response
 arrived, and the result file says so.
 
-`./benchmark/collector-check.sh` runs the summariser against a crafted summary whose warmup and measured
-populations are impossible to confuse, and fails if any reported figure comes from the aggregate. It is
-part of the required checks.
+### Dropped iterations are attributed by the built-in scenario tag
+
+k6 attaches a scenario's **custom** tags to ordinary samples but **not** to the iterations its executor
+drops: those carry global run tags and the built-in `scenario` tag only. Verified against the pinned
+0.55.0 image — a saturating probe produced 284 dropped iterations, of which
+`dropped_iterations{scenario:measured}` held 162 and `{scenario:warmup}` 122, while
+`dropped_iterations{phase:measured}` and `{phase:warmup}` held **zero**.
+
+Every selector in this harness therefore uses the built-in tag. The failure it replaces was silent: the
+sub-metric existed, matched nothing, and reported a confident zero beside an aggregate holding hundreds.
+
+The summariser **reconciles** the partitions against the aggregate and refuses a run where drops are
+unaccounted for. A declared sub-metric's existence is not evidence its selector matched anything, and
+that is the only thing separating "no work was dropped" from "no work was counted".
+
+### The checks
+
+| Check | What it establishes |
+| --- | --- |
+| `./benchmark/collector-check.sh` | The summariser reports the measured population, computes rates over the declared window, and reads a backlog timeline correctly: markers are not measurements, a failed query is not a zero, and observed spacing is reported separately from the configured delay. Fails if any figure comes from an aggregate. |
+| `./benchmark/k6-attribution-check.sh` | Runs the pinned k6 image against a workload that really drops iterations, with no application, database or broker. Establishes that drops occur, that the built-in tag separates the populations, that they reconcile with the aggregate, that the summariser reports the measured count, that a zero-drop workload reports a true zero, and that the old selector is refused. |
+
+Both run in CI.
 
 ## Database reconciliation covers the whole run
 
