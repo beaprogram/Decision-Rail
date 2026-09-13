@@ -69,7 +69,7 @@ check(result["achieved"]["failedRequestRate"] == 0.0, "failure rate came from th
 check(result["achieved"]["httpRequestRatePerSecond"] == 2.0,
       f"request rate was not computed over the measured window: {result['achieved']['httpRequestRatePerSecond']}")
 check(result["population"]["windowSeconds"] == 10.0, "the declared window is wrong")
-check(result["population"]["iterationsStartedInWindow"] == 10, "iteration count came from the wrong population")
+check(result["population"]["iterationsCompletedInWindow"] == 10, "iteration count came from the wrong population")
 
 # The contaminated aggregate is still reported, clearly labelled, so it is visible rather than hidden.
 check(result["wholeRunIncludingWarmup"]["authorizeAggregate"]["samples"] == 20,

@@ -54,19 +54,31 @@ MEASURED_SECONDS = seconds(env("DURATION"))
 MEASURED = "{phase:measured}"
 
 
-def measured(name):
+def measured(name, required=True):
+    """
+    The measured-phase sub-metric, with the two absences kept apart.
+
+    A scenario that never records a metric simply has neither entry, and reporting null for it is
+    correct: the retries scenario measures replay divergence, not capture latency. A scenario whose
+    aggregate is present while its sub-metric is missing is the regression this guards against, and
+    that is refused rather than quietly answered from the aggregate.
+    """
     key = name + MEASURED
-    if key not in metrics:
+    if key in metrics:
+        return metrics[key]
+    if name in metrics:
         raise SystemExit(
-            f"{key} is missing from the k6 summary. The scenario must tag its phase and declare a "
-            f"threshold on that sub-metric; falling back to the aggregate '{name}' would mix warmup "
-            f"samples into a result labelled as excluding them."
+            f"{key} is missing from the k6 summary while the aggregate '{name}' is present. The "
+            f"scenario must tag its phase and declare a threshold on that sub-metric; answering from "
+            f"the aggregate would mix warmup samples into a result labelled as excluding them."
         )
-    return metrics[key]
+    if required:
+        raise SystemExit(f"neither {key} nor {name} is in the k6 summary; the scenario recorded nothing")
+    return {}
 
 
 def trend(name):
-    values = measured(name)
+    values = measured(name, required=False)
     if not values or values.get("count") in (None, 0):
         return None
     return {
@@ -78,8 +90,8 @@ def trend(name):
     }
 
 
-def counter(name):
-    return measured(name).get("count", 0)
+def counter(name, required=True):
+    return measured(name, required=required).get("count", 0)
 
 
 def aggregate_trend(name):
@@ -133,7 +145,11 @@ result = {
             "Samples tagged with the measured scenario. Warmup runs as a separate scenario at half "
             "rate and none of its samples appear in any figure below."
         ),
-        "iterationsStartedInWindow": counter("iterations"),
+        # k6 increments its iteration counter when an iteration ends, so this is completions
+        # tagged with the measured scenario, not starts. Reported beside offeredIterations so the
+        # difference - work that began in the window and had not finished when graceful stop ended -
+        # is visible rather than mistaken for dropped work.
+        "iterationsCompletedInWindow": counter("iterations"),
         "lateCompletionsNote": (
             "The window is when work was offered, not when the last response arrived. An iteration "
             "starting inside it and finishing after it keeps its measured tag, because k6 lets "
@@ -156,8 +172,16 @@ result = {
         # and the latency figures describe less load than the headline number suggests.
         "droppedIterations": counter("dropped_iterations"),
         "failedRequestRate": measured("http_req_failed").get("value"),
-        "unexpectedErrors": counter("unexpected_errors") if "unexpected_errors" + MEASURED in metrics else None,
+        "unexpectedErrors": counter("unexpected_errors", required=False)
+                            if "unexpected_errors" + MEASURED in metrics else None,
     },
+    # Present only for the retry scenario, which is a correctness check rather than a latency
+    # measurement: every replay must return the original result.
+    "idempotentReplays": ({
+        "originalsSent": counter("originals_sent", required=False),
+        "replaysSent": counter("replays_sent", required=False),
+        "divergentReplays": counter("divergent_replays", required=False),
+    } if "replays_sent" + MEASURED in metrics else None),
     "wholeRunIncludingWarmup": {
         "note": "Reported only so the contaminated aggregate is visible rather than hidden; not a measurement.",
         "authorizeAggregate": aggregate_trend("op_authorize"),
