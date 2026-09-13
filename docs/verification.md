@@ -197,6 +197,24 @@ non-throwing path only, with a comment saying why it must never be moved, and th
 `finally` where it belongs. This is the value of keeping infrastructure tests that assert on offsets
 rather than on happy paths.
 
+### Corrections verified in the checkpoint 8 correction pass
+
+| Finding | Confirmed how | Regression check |
+| --- | --- | --- |
+| The collector read aggregate metrics under a field saying warmup was excluded | A probe with warmup samples at 1000 and measured at 10 produced an aggregate average of 406; a live 20s run at 10/s gave 200 measured samples against a 276-sample aggregate whose maximum came from warmup | `benchmark/collector-check.sh`, which fails on every reported figure if the summariser reads aggregates, and refuses a summary whose aggregate is present without its measured sub-metric |
+| A sub-metric's rate divides by the whole run | The same probe reported 6 measured hits in a 2.07s run as 2.90/s | Rates are computed as count over the declared window; the check asserts the arithmetic |
+| Sampling was assumed, not carried | Inspection: identifiers were stored without the decision, flags were hard-coded to `01`, and delivery rebuilt its parent with `sampled(true)` | `TraceSamplingTest` at probabilities 1 and 0 and with an explicitly unsampled upstream parent, reading real spans from an in-memory exporter |
+| The committed-command counter counted attempts | Reproduced: with the inline increment, a rolled-back command left the counter at 1.0 with no payment row | `CommittedCommandMetricTest` |
+| Shadow evaluation had no correlation | Inspection: `ShadowTaskConsumer` and `ShadowWorker` had no tracing at all | `ShadowCorrelationTest`, which asserts the evaluation span on a detached thread is parented to the enqueue span in the command's trace |
+| The backlog peak was sampled after the load stopped | Inspection: the counter was initialised after the generator exited. The corrected harness observes 513–879 at the sustained rate where the old one reported 0–3 | Backlog is sampled on a fixed interval with timestamps; the per-sample timeline is committed beside each result |
+
+**A regression this pass introduced and its own tests caught.** Three of the new telemetry tests failed
+first time because they were scoped to the wrong population against the shared test database: a worker
+claimed another test's leftover task, three nested contexts shared one mutable topic field, and a
+"legacy row" was cleared without its sampling column and was refused by the new constraint. The last of
+those was the constraint working correctly. All three are the same class of mistake as the finding they
+were written for.
+
 ### Test infrastructure notes
 
 Two environmental details were corrected while adding these tests, both test-only:

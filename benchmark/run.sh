@@ -80,7 +80,11 @@ JAR_SHA="$(shasum -a 256 "$JAR" | cut -d' ' -f1)"
 # Captured before the run writes anything. Collecting it afterwards always reports a dirty tree,
 # because the result files the run is about to produce are themselves untracked.
 SOURCE_REVISION="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
-SOURCE_DIRTY="$(test -z "$(git -C "$ROOT" status --porcelain 2>/dev/null)" && echo false || echo true)"
+# Sources only. A run writes result files into benchmark/results, so from the second run of a batch
+# onwards an unfiltered check reports dirty for the previous run's output and says nothing about
+# whether the measured code differs from the revision.
+SOURCE_DIRTY="$(test -z "$(git -C "$ROOT" status --porcelain -- . ':!benchmark/results' 2>/dev/null)" \
+  && echo false || echo true)"
 JAR_BUILT_AT="$(date -u -r "$JAR" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || stat -c %y "$JAR")"
 
 mkdir -p "$RESULTS"

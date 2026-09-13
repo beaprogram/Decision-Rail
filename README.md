@@ -223,10 +223,12 @@ fresh it is. An optional local Prometheus, Tempo and Grafana stack is provisione
 
 Performance is measured, not asserted. On one laptop with everything colocated, the system sustained
 **30 business operations per second (60 HTTP requests/s)** across three repetitions with no dropped
-work and authorize p99 between 174 and 250 ms; **40/s is the first failing level**. Through a
-25-second broker outage under load, **zero requests failed**, 800 events backlogged, and the backlog
-drained in 7 seconds. The method, the environment, the ceiling and the limitations are in
-[performance.md](docs/performance.md); the harness is in [benchmarking.md](docs/benchmarking.md).
+work and authorize p99 between 550 and 726 ms; **40/s is the first failing level**, where only 2031 of
+2400 offered iterations completed. Through a 25-second broker outage under load, **zero of 3590
+requests failed**, the backlog reached 2923 events, and it cleared 25 seconds after the broker was
+reachable again. Delivery falls behind before the API does. The method, the environment, the ceiling
+and the limitations are in [performance.md](docs/performance.md); the harness is in
+[benchmarking.md](docs/benchmarking.md).
 
 ## What comes next
 

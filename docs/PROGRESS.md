@@ -71,6 +71,22 @@ than through the build.
   - Payment details labelled funds as reserved whenever no failure code was present, including for a
     policy-declined payment that never held anything.
   - This ledger contradicted itself: six checkpoints and 60% alongside a delivered operator console.
+- A correction pass on checkpoint 8 fixed five findings, each confirmed against the implementation
+  before it was changed. Checkpoint 8 remains complete and the checkpoint count is unchanged.
+  - The benchmark reported aggregate metrics under a field saying warmup was excluded. Scenario tags do
+    reach custom metrics, so the scripts now declare the measured sub-metrics and the summariser reads
+    nothing else, refusing to fall back to an aggregate. Rates are computed over the declared window,
+    because k6's own rate on a sub-metric divides by the whole run.
+  - Sampling was assumed rather than carried: valid identifiers exist whether or not a span was
+    recorded, so storing only identifiers turned every unsampled request into a sampled publication.
+    The decision is now stored, propagated in the traceparent flags, and honoured even when false.
+  - The committed-command counter incremented before its transaction committed, counting attempts under
+    the name of commitments. It is now an after-commit callback.
+  - Shadow evaluation had no correlation. The trace travels with the durable task and is read back when
+    it is claimed, so an evaluation on a worker thread after a restart is still in the command's trace.
+  - The backlog peak was sampled after the load generator had exited, so it could not have observed the
+    outage it was published against. Backlog is now sampled throughout and reported as an observed
+    maximum, with recovery and load-end drain reported as separate clocks.
 - A third pass fixed two defects the previous one left, both in what the screen shows rather than in
   what the server does. Checkpoint 7 remains complete and the checkpoint count is unchanged.
   - Signing out left the protected workspace on screen until the server answered. Advancing the
@@ -151,10 +167,12 @@ These are known and deliberate, not oversights:
 - **Measured performance is one laptop, not a capacity figure.** The sustained rate in
   [performance.md](performance.md) was measured with the load generator, application, database and
   broker sharing ten CPUs, and with PostgreSQL on tmpfs with `fsync` off. It describes this machine's
-  behaviour, not a deployment's.
-- **The delivery path saturates before the API does.** Above roughly 60 events per second on that
-  hardware, publication stops keeping pace with commitment and the backlog competes with the API for
-  CPU. Correctness is unaffected; throughput is not improved, only located.
+  behaviour, not a deployment's. Host drift between batches is real and uncontrolled: the same offered
+  rate measured markedly slower in a later batch than an earlier one.
+- **Delivery falls behind before the API does.** Publication is already behind commitment at the
+  sustained rate and catches up within seconds; at the failing level the backlog grows several times
+  larger and takes four times as long to clear. That delivery is what *causes* API latency to degrade
+  is a hypothesis, not a measurement: no per-component CPU accounting was collected.
 - **Tracing keeps one trace open for the life of an event.** Under a broker outage that is minutes, and
   a backend that closes traces on a fixed window will show such a trace in pieces.
 - **Traces are exported only when a collector is configured.** With none, spans are still created and
@@ -183,7 +201,7 @@ financial mutation. Preserve the dashboard's own: the `/ui` session chain separa
 idempotency key, and an unknown outcome reported as unknown rather than as success or failure. The
 architecture tests enforce the isolation rules; do not relax them to make a new dependency convenient.
 
-Schema changes go in new Flyway migrations after V7. Do not edit an applied migration, and extend the
+Schema changes go in new Flyway migrations after V9. Do not edit an applied migration, and extend the
 migration upgrade check when a new one backfills anything.
 
 Keep generated credentials, `.env`, local database and runtime files under `.local/`, and build output
