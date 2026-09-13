@@ -139,6 +139,13 @@ than through the build.
 
 Record actual commands, test counts, failures, and meaningful limitations here after verification.
 
+### Open items
+
+- `ShadowStaleWorkerTest.aStaleWorkerCannotRecordATerminalFailureOverTheNewOwnersClaim` is flaky in CI:
+  one failure and one pass on the same revision, with no code change between them. The probable cause is
+  an assertion on a global cycle count in a suite that shares a database. See
+  [verification.md](verification.md).
+
 ## Remaining checkpoints
 
 - [ ] 9. Refunds/reversals, reconciliation, financial corrections, and recovery procedures.

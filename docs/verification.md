@@ -234,6 +234,24 @@ Observed against the pinned 0.55.0 image: aggregate 284 drops, `{scenario:measur
 `{scenario:warmup}` 122, `{phase:measured}` **0**, `{phase:warmup}` **0**. Restoring the old selector
 makes the summariser refuse the run rather than report a zero.
 
+### A flaky concurrency test, recorded rather than hidden
+
+`ShadowStaleWorkerTest.aStaleWorkerCannotRecordATerminalFailureOverTheNewOwnersClaim` failed once in CI
+on revision `3337b00` and passed on a re-run of **that same revision**, with no application or test code
+changed in the commit at all — that pass touched only the benchmark harness, documentation and workflow.
+It also passed locally in every run of the suite. Two outcomes from one commit is the definition of
+flaky, and it is written down here rather than absorbed by a retry.
+
+The likely mechanism, not yet confirmed: the test asserts on `Cycle.evaluated()`, a count of everything
+a worker cycle evaluated, while the suite shares one database. Its `@BeforeEach` defends against
+interference by parking every `PENDING` shadow task into the far future, but a task another test left
+`CLAIMED` becomes claimable again when its lease expires, and nothing parks those. That is the same
+unscoped-assertion hazard AGENTS.md warns about, in a test old enough to predate the warning.
+
+Left unfixed deliberately: the pass that found it was scoped to two benchmark defects, and changing an
+unrelated concurrency test to make a build green is how a real defect gets buried. It is listed as an
+open item instead.
+
 ### Test infrastructure notes
 
 Two environmental details were corrected while adding these tests, both test-only:
