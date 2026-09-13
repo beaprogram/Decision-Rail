@@ -1,0 +1,116 @@
+{
+  "recordedAt": "2026-09-13T16:12:59.851996+00:00",
+  "measuredRevision": "ac7f4873f550bcfb467c5e049024aa0eede651cb",
+  "workingTreeDirtyAtStart": "true",
+  "artifact": {
+    "jarSha256": "86d2414c69c5126cd91f428237b6a476b00ce4b0c6672b8b8969d7b15e90a2fc",
+    "jarBuiltAt": "2026-09-09T00:00:00Z",
+    "note": "the packaged jar actually executed; a revision alone does not establish what ran"
+  },
+  "scenario": "retries",
+  "repetition": "1",
+  "workload": {
+    "model": "open (constant arrival rate); the generator keeps offering the rate whether or not the application keeps up",
+    "offeredRatePerSecond": 20.0,
+    "duration": "30s",
+    "warmupExcluded": true,
+    "warmupSeparateScenario": "15s",
+    "accounts": 24,
+    "seed": 20260913,
+    "authentication": "HTTP Basic, enabled; password verification is included in every measured request"
+  },
+  "dropAttribution": {
+    "measured": 23,
+    "warmup": null,
+    "aggregateAllScenarios": 23,
+    "reconciles": true,
+    "attributedBy": "the built-in scenario tag; custom scenario tags do not reach executor-dropped iterations"
+  },
+  "population": {
+    "phase": "measured",
+    "windowSeconds": 30.0,
+    "definition": "Samples tagged with the measured scenario. Warmup runs as a separate scenario at half rate and none of its samples appear in any figure below.",
+    "iterationsCompletedInWindow": 576,
+    "offeredIterations": 600.0,
+    "unaccountedIterations": 1.0,
+    "unaccountedNote": "Derived, not measured: offered minus completed minus dropped. It is not evidence of interrupted iterations. No interrupted-iteration count is collected, so any explanation of this remainder would be an assumption."
+  },
+  "achieved": {
+    "httpRequests": 2283,
+    "httpRequestRatePerSecond": 76.1,
+    "iterationRatePerSecond": 19.2,
+    "droppedIterations": 23,
+    "failedRequestRate": 0.0030661410424879547,
+    "unexpectedErrors": null
+  },
+  "idempotentReplays": {
+    "originalsSent": 576,
+    "replaysSent": 1707,
+    "divergentReplays": 0
+  },
+  "wholeRunIncludingWarmup": {
+    "note": "Reported only so the contaminated aggregate is visible rather than hidden; not a measurement.",
+    "authorizeAggregate": null,
+    "httpRequests": 2283
+  },
+  "businessOperations": {
+    "authorizedRemaining": 569,
+    "captured": 0,
+    "voided": 0,
+    "declined": 0,
+    "idempotencyKeysUsed": 569,
+    "captureJournals": 0,
+    "durableEventsWritten": 569
+  },
+  "latencyMilliseconds": {
+    "authorize": null,
+    "capture": null,
+    "void": null,
+    "allHttp": {
+      "samples": 2283,
+      "p50_ms": 1429.825983,
+      "p95_ms": 1876.9059802,
+      "p99_ms": 2071.70670376,
+      "max_ms": 3156.137732
+    }
+  },
+  "asynchronous": {
+    "brokerOutageInjected": false,
+    "observedMaxUndeliveredBacklog": 421,
+    "backlogObservations": 10,
+    "backlogTimelineMarkers": 2,
+    "backlogFailedObservations": 0,
+    "backlogConfiguredDelaySeconds": 2.0,
+    "backlogObservedGapSeconds": {
+      "min": 2,
+      "median": 4,
+      "max": 5
+    },
+    "drainSecondsFromLoadEnd": 5,
+    "drainSecondsFromBrokerReachable": null,
+    "recoveryMeans": "the broker answered a topic listing again, not merely that the container start command returned",
+    "drainedMeans": "no unpublished outbox row remains and every payment's projection matches its authoritative status",
+    "timeline": "per-sample observations with timestamps are in the .backlog.tsv beside this file"
+  },
+  "telemetry": {
+    "tracingSampleRate": 1.0,
+    "otlpExportEnabled": false,
+    "prometheusScrapedDuringRun": false,
+    "note": "Spans are created at the sampled rate regardless of export. Export off means they are dropped rather than sent."
+  },
+  "environment": {
+    "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "arch": "arm64",
+    "cpuCount": 10,
+    "java": "openjdk version \"21.0.11\" 2026-04-21",
+    "database": "PostgreSQL 16 in Docker, tmpfs storage, fsync=off, max_connections=200, shared_buffers=256MB",
+    "broker": "Apache Kafka 3.9.1, single node, replication factor 1",
+    "applicationHost": "same machine as the load generator and the infrastructure containers"
+  },
+  "limitations": [
+    "Load generator, application, database and broker share one machine, so they compete for the same CPU.",
+    "PostgreSQL runs on tmpfs with fsync off, which flatters write latency and is not a production storage profile.",
+    "A single JVM and a single broker node. No replication, no horizontal scaling, no network between tiers.",
+    "One run of one workload shape. Percentiles are reported per run and never averaged across runs."
+  ]
+}

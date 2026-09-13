@@ -215,6 +215,25 @@ claimed another test's leftover task, three nested contexts shared one mutable t
 those was the constraint working correctly. All three are the same class of mistake as the finding they
 were written for.
 
+### The benchmark collector contract
+
+Two checks, both in CI, covering a gap that a single one cannot.
+
+| Check | Establishes |
+| --- | --- |
+| `benchmark/collector-check.sh` | What the summariser does with a summary it is given: reports the measured population, computes rates over the declared window, and reads a backlog timeline correctly — markers apart from observations, a failed query as unknown rather than zero, observed spacing apart from the configured delay. |
+| `benchmark/k6-attribution-check.sh` | What k6 actually puts in that summary. Runs the pinned image against a workload that really drops iterations, with no application behind it. |
+
+The second exists because the first cannot see the defect it was written for. A fixture asserting on
+`dropped_iterations{phase:measured}` was asserting on a population k6 never produces: executor-dropped
+iterations carry global run tags and the built-in scenario tag, not a scenario's custom tags. The
+fixture passed, the harness reported zero drops, and runs that dropped hundreds were published as
+dropping none.
+
+Observed against the pinned 0.55.0 image: aggregate 284 drops, `{scenario:measured}` 162,
+`{scenario:warmup}` 122, `{phase:measured}` **0**, `{phase:warmup}` **0**. Restoring the old selector
+makes the summariser refuse the run rather than report a zero.
+
 ### Test infrastructure notes
 
 Two environmental details were corrected while adding these tests, both test-only:

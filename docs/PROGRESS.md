@@ -71,6 +71,19 @@ than through the build.
   - Payment details labelled funds as reserved whenever no failure code was present, including for a
     policy-declined payment that never held anything.
   - This ledger contradicted itself: six checkpoints and 60% alongside a delivered operator console.
+- A further correction pass fixed two remaining benchmark defects. Checkpoint 8 remains complete and the
+  checkpoint count is unchanged.
+  - Dropped iterations were selected on a custom scenario tag, which k6 does not attach to
+    executor-dropped iterations. The submetric existed, matched nothing, and reported zero while the
+    aggregate held hundreds; the published claim of a sustained 30/s with zero dropped work was never
+    established. Selectors now use the built-in scenario tag, warmup drops are reported separately, and
+    the summariser reconciles the partitions against the aggregate. Re-measurement against criteria
+    fixed in advance puts the sustained rate at **25 iterations/s**, with 30/s failing one repetition in
+    three.
+  - The backlog sample counter counted event markers as observations, and the configured sampler delay
+    was reported as though it were the observation interval. Observations, markers and failed queries
+    are now counted apart, and the observed spacing is derived from the timeline: 2–5 seconds against a
+    configured 2.
 - A correction pass on checkpoint 8 fixed five findings, each confirmed against the implementation
   before it was changed. Checkpoint 8 remains complete and the checkpoint count is unchanged.
   - The benchmark reported aggregate metrics under a field saying warmup was excluded. Scenario tags do

@@ -221,14 +221,14 @@ in a thread. Structured JSON logs carry the same identifiers, and the
 [metric catalogue](docs/observability.md) documents every series, its units, its bounded labels and how
 fresh it is. An optional local Prometheus, Tempo and Grafana stack is provisioned in source control.
 
-Performance is measured, not asserted. On one laptop with everything colocated, the system sustained
-**30 business operations per second (60 HTTP requests/s)** across three repetitions with no dropped
-work and authorize p99 between 550 and 726 ms; **40/s is the first failing level**, where only 2031 of
-2400 offered iterations completed. Through a 25-second broker outage under load, **zero of 3590
-requests failed**, the backlog reached 2923 events, and it cleared 25 seconds after the broker was
-reachable again. Delivery falls behind before the API does. The method, the environment, the ceiling
-and the limitations are in [performance.md](docs/performance.md); the harness is in
-[benchmarking.md](docs/benchmarking.md).
+Performance is measured, not asserted, against criteria written down before the runs. On one laptop
+with everything colocated, the system sustains **25 business operations per second (50 HTTP requests/s)**
+across three repetitions with **zero dropped iterations**, zero failures and a backlog that clears in
+3–10 seconds. **30/s is the nearby failing level**, and it fails intermittently: two repetitions passed
+and the third dropped 21 iterations with p95 quadrupling. Through a 25-second broker outage under load,
+**zero of 3000 requests failed** and the backlog cleared 22 seconds after the broker was reachable
+again. The method, the environment, the ceiling and the limitations are in
+[performance.md](docs/performance.md); the harness is in [benchmarking.md](docs/benchmarking.md).
 
 ## What comes next
 

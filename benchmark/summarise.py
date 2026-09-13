@@ -262,15 +262,29 @@ result = {
         # difference - work that began in the window and had not finished when graceful stop ended -
         # is visible rather than mistaken for dropped work.
         "iterationsCompletedInWindow": counter("iterations"),
-        "lateCompletionsNote": (
-            "The window is when work was offered, not when the last response arrived. An iteration "
-            "starting inside it and finishing after it keeps its measured tag, because k6 lets "
-            "in-flight iterations finish during graceful stop. An iteration still unfinished when "
-            "graceful stop ends contributes no sample at all, which is why the sample count can sit "
-            "slightly below rate x window even with no dropped iterations. Both counts are reported "
-            "so the gap is visible rather than assumed away."
-        ),
+        # Four different quantities, kept apart because they are not interchangeable.
+        #
+        #   offeredIterations           configured: rate x window. Not a measurement.
+        #   droppedIterations           measured: the executor had no free virtual user when the
+        #                               iteration was due, so it never started.
+        #   iterationsCompletedInWindow measured: iterations that finished and carried the scenario tag,
+        #                               including any that finished during the graceful stop period.
+        #   unaccountedIterations       derived: offered - dropped - completed. Whatever this is, it is
+        #                               not established by these counters alone.
+        #
+        # The report used to call the unaccounted remainder "iterations still running when graceful stop
+        # ended". Nothing here shows that. An arrival-rate executor schedules on a tick and the boundary
+        # arithmetic need not land on an exact multiple, so a small remainder is ordinary scheduling
+        # behaviour rather than evidence of interrupted work. Claiming otherwise needs k6's own
+        # interrupted-iteration reporting, which is not collected here.
         "offeredIterations": float(env("RATE")) * MEASURED_SECONDS,
+        "unaccountedIterations": round(
+            float(env("RATE")) * MEASURED_SECONDS - counter("iterations") - drops["measured"], 3),
+        "unaccountedNote": (
+            "Derived, not measured: offered minus completed minus dropped. It is not evidence of "
+            "interrupted iterations. No interrupted-iteration count is collected, so any explanation "
+            "of this remainder would be an assumption."
+        ),
     },
     "achieved": {
         "httpRequests": counter("http_reqs"),

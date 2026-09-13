@@ -3,19 +3,18 @@
 Real numbers from the harness in [benchmarking.md](benchmarking.md), on the hardware named below.
 Nothing here is estimated, extrapolated, or carried over from a previous run.
 
-> **Earlier figures are superseded and must not be quoted.** Everything below was re-measured after the
-> harness was corrected. The results published before that correction computed their percentiles and
-> counts over a population that included warmup traffic, and sampled backlog only after the load had
-> already stopped. Those files are kept in `benchmark/results/` with their original timestamps rather
-> than rewritten, because restating old measurements to look as though they came from a later harness
-> is exactly what evidence exists to prevent.
+> **Two rounds of figures are superseded and must not be quoted.** The first computed percentiles over a
+> population that included warmup traffic. The second fixed that but reported dropped iterations through
+> a selector k6 never populates, so runs that dropped work were published as having dropped none — which
+> is why the sustained rate in this document is now lower than the one it replaces. Both sets are kept
+> in `benchmark/results/` with their original timestamps rather than rewritten.
 
 ## What was measured on
 
 | | |
 | --- | --- |
-| Measured revision | `df18d83`, sources clean |
-| Artifact | `decisionrail-0.1.0.jar`, sha256 `86d2414c69c5126c…`, identical across all twelve runs |
+| Measured revision | `ac7f487`, sources clean at the start of each run |
+| Artifact | `decisionrail-0.1.0.jar`, sha256 `86d2414c69c5126c…`, identical across every run |
 | Machine | macOS 26.6.2, arm64, 10 CPUs |
 | Runtime | OpenJDK 21.0.11, packaged Spring Boot jar |
 | Database | PostgreSQL 16 in Docker, **tmpfs storage, `fsync=off`**, `max_connections=200`, `shared_buffers=256MB` |
@@ -23,157 +22,196 @@ Nothing here is estimated, extrapolated, or carried over from a previous run.
 | Topology | Load generator, application, database and broker on **one machine**, competing for the same CPUs |
 | Authentication | HTTP Basic, enabled, password verification included in every measured request |
 | Dataset | 24 accounts, 1,000,000.00 CAD each, fresh database per run |
-| Workload | Open model, seed 20260913, 15s warmup **excluded by phase tag**, 60s measured |
+| Workload | Open model, seed 20260913, 15s warmup excluded by scenario, 60s measured |
 | Tracing | 100% sampling unless stated; OTLP export off; Prometheus not scraped during runs |
 
 One *iteration* is a full business operation: an authorization, then a capture or a void. Each is two
-HTTP requests, so 30 iterations/s is 60 requests/s.
+HTTP requests, so 25 iterations/s is 50 requests/s.
 
-Every figure comes from the `{phase:measured}` population. Rates are `count ÷ 60s`, the declared window,
-not k6's own rate field, which divides by the whole run including warmup.
-
-The recorded `workingTreeDirtyAtStart` reads true from the second run of the batch onward. That is the
-batch's own result files being untracked, not a source change: the jar sha256 is identical across all
-twelve runs, and the check has since been narrowed to ignore `benchmark/results/`.
+Every figure comes from the measured scenario. Rates are `count ÷ 60s`, the declared window. Dropped
+iterations are attributed by the built-in `scenario` tag and reconciled against the aggregate.
 
 ## Sustained rate
 
-**30 iterations/s (60 HTTP requests/s), three repetitions, no dropped work, no failed requests.**
+The criteria were fixed in [benchmarking.md](benchmarking.md) before these runs: zero measured drops,
+zero failures, zero declines, achieved rate within 2% of offered, backlog drained within the run's own
+duration, and every repetition passing.
 
-| Rep | Samples (of 1800 offered) | p50 | p95 | p99 | Achieved req/s | Observed max backlog | Drain after load |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| 1 | 1792 | 297.4 ms | 583.2 ms | 725.7 ms | 59.73 | 879 | 15 s |
-| 2 | 1798 | 264.7 ms | 454.4 ms | 549.5 ms | 59.93 | 547 | 7 s |
-| 3 | 1797 | 247.6 ms | 446.9 ms | 559.9 ms | 59.90 | 513 | 7 s |
+**25 iterations/s (50 HTTP requests/s) meets them across three repetitions.**
 
-Business outcomes were as designed: roughly two thirds captured, one third voided, **zero declines** in
-every run. The sample count sits a few below the 1800 offered because iterations still in flight when
-graceful stop ended contribute no sample; `droppedIterations` was zero throughout, so no work was
-refused a start.
+| Rep | Samples (of 1500 offered) | Measured drops | Warmup drops | p50 | p95 | p99 | Achieved req/s | Drain after load |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | 1501 | **0** | 0 | 119.5 ms | 792.1 ms | 1118.1 ms | 50.03 | 3 s |
+| 2 | 1501 | **0** | 0 | 266.4 ms | 1025.7 ms | 1449.0 ms | 50.03 | 10 s |
+| 3 | 1501 | **0** | 0 | 275.0 ms | 795.7 ms | 978.2 ms | 50.03 | 9 s |
+
+Zero declines and zero failed requests in every run. Virtual users in use peaked at 44, 51 and 68
+against 75 preallocated, so the generator was not the constraint.
 
 ## Where it stops
 
-| Offered | Iterations completed (of offered) | Achieved req/s (of 80) | p50 | p95 | p99 | Dropped | Drain after load |
+**30 iterations/s is the nearby failing level**, and it fails intermittently rather than cleanly.
+
+| Rep | Samples (of 1800) | Measured drops | p50 | p95 | p99 | Observed max backlog | Drain after load |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| 30/s | 1792–1798 of 1800 | 59.7–59.9 of 60 | 247.6–297.4 ms | 446.9–583.2 ms | 549.5–725.7 ms | 0 | 7–15 s |
-| 40/s | 2031–2097 of 2400 | 67.7–69.9 of 80 | 2037.4–2133.0 ms | 2464.0–2697.9 ms | 2641.9–3254.8 ms | 0 | 24–28 s |
+| 1 | 1801 | 0 | 204.5 ms | 428.7 ms | 561.9 ms | 448 | 7 s |
+| 2 | 1801 | 0 | 186.8 ms | 569.3 ms | 788.5 ms | 294 | 4 s |
+| 3 | 1780 | **21** | 495.3 ms | 1781.2 ms | 2207.1 ms | 2231 | 14 s |
 
-**Highest tested rate meeting the criteria: 30 iterations/s (60 requests/s)** — the offered rate was
-achieved, latency stayed under 750 ms at p99, and the backlog cleared within 15 s of the load stopping.
+Two repetitions of three would have passed. The third degraded across every dimension at once — latency
+roughly tripled at p50 and quadrupled at p95, the backlog reached 2231 against 294–448, and the
+concurrency the workload demanded rose to 103 virtual users against 75 preallocated, at which point the
+executor dropped 21 iterations while the pool grew.
 
-**First observed failing level: 40 iterations/s.** Latency rose roughly eightfold and the offered rate
-was not achieved: only 2031–2097 of 2400 iterations completed, and 67.7–69.9 of the offered 80
-requests/s were served.
+The criteria require every repetition to pass, so 30/s is not sustained. That the same rate passed twice
+is the reason the criteria were written down in advance.
 
-A nuance worth stating, because it contradicts a natural reading of the harness: `droppedIterations`
-stayed **zero** at 40/s. k6 drops an iteration when no virtual user is free to start it, and there
-always was one; the shortfall appears instead as iterations that started and had not finished when the
-run ended. Both counts are published for that reason — reading only the dropped counter at 40/s would
-suggest the rate was sustained when it was not.
+**The previously published headline of "30 iterations/s with zero dropped work" was never established.**
+The runs behind it dropped 9, 3 and 4 iterations; the selector reading those counts matched nothing and
+reported zero.
 
-## Asynchronous delivery falls behind before the API does
+## Dropped iterations, and why they were invisible
 
-Backlog is sampled every 2 seconds from before the load starts until it has drained, and the figure
-below is the **observed maximum at that resolution**, not a true peak. The per-sample timeline is in the
-`.backlog.tsv` beside each result.
+k6 attaches a scenario's custom tags to ordinary samples but not to the iterations its executor drops:
+those carry global run tags and the built-in `scenario` tag only. Verified against the pinned 0.55.0
+image by `benchmark/k6-attribution-check.sh`, which drives a workload that really drops work:
 
-At 30/s the backlog rises to 513–879 undelivered events during the run and clears in 7–15 s. At 40/s it
-reaches 3807–3924 and takes 24–28 s. So publication is already behind commitment at the sustained rate;
-it simply catches up quickly.
+| Selector | Count |
+| --- | --- |
+| `dropped_iterations` (aggregate, all scenarios) | 284 |
+| `dropped_iterations{scenario:measured}` | 162 |
+| `dropped_iterations{scenario:warmup}` | 122 |
+| `dropped_iterations{phase:measured}` — the selector previously used | **0** |
+| `dropped_iterations{phase:warmup}` | **0** |
 
-What the evidence supports: **delivery falls behind first, and further behind as load rises.** What it
-does not establish on its own is *why* API latency degrades at 40/s. That the backlog competes with the
-API for the same CPUs is a plausible explanation and no more — no per-process CPU accounting was
-collected, and the earlier report's causal claim went beyond its evidence. Testing it would need CPU
-attribution per component, or a run with the dispatcher disabled, neither of which was done.
+The partitions reconcile with the aggregate; the custom-tag selectors match nothing. Every other
+filtered figure in the harness was correct, which is why this went unnoticed: ordinary samples do carry
+the custom tag.
 
-## A broker outage under load
+The summariser now reconciles the partitions against the aggregate and refuses a run whose drops are
+unattributed, because a declared sub-metric matching zero events is indistinguishable from a genuine
+zero unless something checks.
 
-One-off fault demonstration, reported separately from the steady-state figures: 30 iterations/s with
-the broker stopped for 25 s from 25 s into the run, which is inside the measured window.
+## What the iteration counts do and do not say
+
+Four quantities, kept apart:
+
+| Quantity | Kind | At 25/s rep 1 |
+| --- | --- | --- |
+| Offered | configured — rate × window | 1500 |
+| Dropped | measured — no free virtual user when due | 0 |
+| Completed in window | measured — finished and carried the scenario tag | 1501 |
+| Unaccounted | derived — offered − dropped − completed | −1 |
+
+The earlier report described the unaccounted remainder as "iterations still running when graceful stop
+ended". Nothing measured here establishes that. An arrival-rate executor schedules on a tick and the
+boundary arithmetic need not land on an exact multiple, which is why the remainder here is *negative* by
+one. No interrupted-iteration count is collected, so any explanation of the remainder would be an
+assumption, and it is reported as derived and unexplained.
+
+## Asynchronous delivery
+
+Backlog is sampled from before the load starts until it has drained. The sampler queries the database
+and then sleeps for a configured delay, so that delay is a floor on the spacing rather than the spacing
+itself.
 
 | | |
 | --- | --- |
-| HTTP failures | **0 of 3590** |
-| Authorize p50 / p95 / p99 | 164.6 / 434.6 / 570.8 ms — no worse than the runs without an outage |
-| Observed max undelivered backlog | **2923 events**, across 42 samples at 2 s resolution |
-| Drain from load end | 18 s |
-| **Drain from broker reachable** | **25 s** |
+| Configured sampler delay | 2 s |
+| **Observed gaps across these runs** | min 2 s, median 2–4 s, max 3–5 s |
+| Observations per run | 29–35 |
+| Event markers (not measurements) | 2, or 4 for the outage run |
+| Failed observations | 0 |
+
+At 25/s the backlog reaches 258–743 undelivered events and clears in 3–10 s. At 30/s it reaches 294–448
+in the two clean runs and 2231 in the degraded one.
+
+Delivery is therefore already behind commitment at the sustained rate and catches up quickly. That this
+is what *causes* API latency to degrade at 30/s is a hypothesis, not a measurement: no per-component CPU
+accounting was collected.
+
+## A broker outage under load
+
+One-off fault demonstration at the sustained rate, with the broker stopped for 25 s from 25 s into the
+run, inside the measured window.
+
+| | |
+| --- | --- |
+| HTTP failures | **0 of 3000** |
+| Measured dropped iterations | **0** |
+| Authorize p50 / p95 / p99 | 130.1 / 216.8 / 355.7 ms — better than the runs without an outage |
+| Observed max undelivered backlog | **1692 events**, across 35 observations and 4 markers |
+| Drain from load end | 7 s |
+| **Drain from broker reachable** | **22 s** |
 | Correctness checks | all passed |
 
-The two drain figures answer different questions and are not interchangeable. *Recovery* means the
-broker answered a topic listing again, not that the container start command returned; the broker came
-back before the load ended, which is why the recovery clock is the longer of the two.
-
-Payments kept committing at full rate throughout with their event intent retained, and the entire
-backlog cleared once the broker returned.
+*Recovery* means the broker answered a topic listing again, not that the container start command
+returned. The broker came back before the load ended, which is why the recovery clock is the longer one.
 
 ## Contention on one account
 
-Same mix and rate, every payment against a single account: p50 **484.6 ms**, p95 1020.6 ms, p99
-1492.2 ms, against 247.6–297.4 ms p50 spread across 24 accounts. No dropped work, no failures.
-
-That is row locking doing its job — authorization takes `FOR UPDATE` on the account row, which
-serialises everything aimed at one account. It is reported separately because quoting the spread figure
-as the system's capacity would describe a workload shape nobody guaranteed.
+Same mix and rate against a single account: p50 **149.1 ms**, p95 854.6 ms, p99 1320.4 ms, zero dropped,
+against 119.5–275.0 ms p50 spread across 24 accounts. Row locking serialises everything aimed at one
+account. At 25/s the effect is visible in the tail rather than the median.
 
 ## Identical commands under one key
 
-534 original authorizations, each followed immediately by **three concurrent replays of the same bytes
-under the same key** — 1602 replays.
+576 original authorizations, each followed by **three concurrent replays of the same bytes under the
+same key** — 1707 replays.
 
 | | |
 | --- | --- |
 | Replays returning a different payment id or status | **0** |
 | Payments created per idempotency key | exactly 1 |
 | HTTP failures | 0 |
+| Measured dropped iterations | 23 |
 
-This scenario runs no warmup and measures no latency; it is a correctness check under concurrency, and
-its whole run is the reported population.
+The 23 drops are reported rather than hidden: this scenario offers four requests per iteration, so 20
+iterations/s is 80 requests/s, above the sustained rate established above. It is a correctness check
+under concurrency, not a latency measurement, and its correctness result does not depend on every
+iteration starting.
 
 ## Does telemetry cost anything here
 
-Matched load at the sustained rate, three repetitions each, taken in the same batch minutes apart.
+Matched load at the sustained rate, three repetitions each.
 
-| Tracing | Authorize p50 across repetitions | p95 across repetitions |
-| --- | --- | --- |
-| Sampled 100% | 297.4 / 264.7 / 247.6 ms | 583.2 / 454.4 / 446.9 ms |
-| Disabled (probability 0) | 286.7 / 267.4 / 262.3 ms | 492.4 / 478.2 / 446.0 ms |
+| Tracing | p50 | p95 | Measured drops |
+| --- | --- | --- | --- |
+| Sampled 100% | 119.5 / 266.4 / 275.0 ms | 792.1 / 1025.7 / 795.7 ms | 0 / 0 / 0 |
+| Disabled (probability 0) | 862.2 / 148.9 / 166.5 ms | 1632.5 / 391.3 / 302.2 ms | **9** / 0 / 0 |
 
-The ranges overlap almost entirely: two of the three sampled runs sit inside the unsampled range on both
-percentiles. **Three repetitions cannot distinguish tracing enabled from tracing disabled at this load
-on this hardware.** That is the measurement, not a claim that the cost is zero.
+**This comparison is inconclusive and, on this evidence, cannot be made.** One of the three
+tracing-disabled runs did not meet the sustained criteria at all: it dropped 9 iterations, reached a
+backlog of 2402, and ran slower than every sampled run. Excluding it would leave two runs against three
+and would be choosing the arm that flatters the conclusion.
 
-"Disabled" here means sampling probability 0, so spans are created non-recording. That is a different
-condition from export being off — the default, where spans are recorded in-process and dropped — and
-different again from an enabled exporter whose collector is unreachable. All three are described in
-[observability.md](observability.md), and the third is covered by `UnreachableCollectorTest` rather than
-by a benchmark.
+Taken at face value the two clean unsampled runs are faster than the sampled ones, which is the opposite
+of the previous report's "no measurable difference" and is not supported either: run-to-run variance at
+this rate spans the entire gap, as the degraded run demonstrates.
 
 ## Correctness during and after load
 
-Every run, including the ones at the failing level, passed the post-run checks scoped to its own
-accounts: available funds never exceeded; balances and holds reconciling to the operations performed;
-exactly one balanced journal per captured payment; no journal for a void; one payment per idempotency
-key; durable event intent for every committed payment; dense per-payment event sequences from 1; the
-projection caught up in order with one effect per event; no duplicate consumer effect; nothing
-quarantined; nothing left undelivered.
+Every run, including the ones that failed the rate criteria, passed the post-run checks scoped to its
+own accounts: available funds never exceeded; balances and holds reconciling; exactly one balanced
+journal per captured payment; no journal for a void; one payment per idempotency key; durable event
+intent for every committed payment; dense per-payment event sequences from 1; the projection caught up
+in order with one effect per event; no duplicate consumer effect; nothing quarantined; nothing left
+undelivered.
 
-Those checks deliberately cover the **whole run**, warmup included, because a warmup authorization moves
-the same synthetic money as a measured one. Only the latency figures are phase-filtered.
+Those checks cover the **whole run**, warmup included, because a warmup authorization moves the same
+synthetic money as a measured one. Only the latency figures are scenario-filtered.
 
 ## Limitations
 
-- **Everything shares one machine.** The load generator competes with the application, the database and
-  the broker for ten CPUs.
-- **The database is not durable.** tmpfs with `fsync=off` flatters write latency. This measures
-  application behaviour, not storage.
+- **Everything shares one machine**, ten CPUs between generator, application, database and broker.
+- **The database is not durable.** tmpfs with `fsync=off` flatters write latency.
 - **One JVM, one broker node, no replication, no network between tiers.**
-- **Percentiles are per run**, never averaged across runs; where runs disagree, every value is shown.
-- **Host drift is real and uncontrolled.** These runs are markedly slower than the pre-correction ones
-  at the same offered rate (p50 248–297 ms against 100–124 ms). The corrected harness is not the cause:
-  the measured and aggregate percentiles within these runs differ by only a few percent. The machine was
-  busier, and no attempt was made to control for it.
-- **No causal claim is made about what degrades API latency at 40/s**, only that delivery falls behind
-  first. See above.
+- **Percentiles are per run**, never averaged; where runs disagree, every value is shown.
+- **Run-to-run variance is large and uncontrolled**, and at 25–30/s it spans the size of any effect this
+  harness is being used to look for. The tracing comparison is the casualty.
+- **The generator has its own limits, and both were hit.** Too few preallocated virtual users and it
+  drops work during a latency spike while the pool grows; too many and connection establishment through
+  the Docker network fails with `dial: i/o timeout`. Two runs were lost to the latter and re-run. Users
+  are sized at three times the offered rate, which covers a three-second iteration by Little's law.
+- **No causal claim is made about what degrades API latency at 30/s.**
 - **No throughput claim is made for any hardware other than the one named above.**
