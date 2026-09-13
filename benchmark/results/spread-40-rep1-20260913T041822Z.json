@@ -1,0 +1,86 @@
+{
+  "recordedAt": "2026-09-13T04:20:08.231553+00:00",
+  "measuredRevision": "5f3f178ceaea486cbea82ba3cdb52d57859429e3",
+  "workingTreeDirty": true,
+  "scenario": "spread",
+  "repetition": 1,
+  "workload": {
+    "model": "open (constant arrival rate); the generator keeps offering the rate whether or not the application keeps up",
+    "offeredRatePerSecond": 40.0,
+    "duration": "60s",
+    "warmupExcluded": true,
+    "accounts": 24,
+    "seed": 20260913,
+    "authentication": "HTTP Basic, enabled; password verification is included in every measured request"
+  },
+  "achieved": {
+    "httpRequests": 5346,
+    "httpRequestRatePerSecond": 70.61602459771615,
+    "droppedIterations": 28,
+    "failedRequestRate": 0
+  },
+  "businessOperations": {
+    "authorizedRemaining": 0,
+    "captured": 1807,
+    "voided": 866,
+    "declined": 0,
+    "idempotencyKeysUsed": 5346,
+    "captureJournals": 1807,
+    "durableEventsWritten": 5346
+  },
+  "latencyMilliseconds": {
+    "authorize": {
+      "samples": 2673,
+      "p50_ms": 385.630146,
+      "p95_ms": 748.2887608,
+      "p99_ms": 927.56111448,
+      "max_ms": 1261.095099
+    },
+    "capture": {
+      "samples": 1807,
+      "p50_ms": 415.723994,
+      "p95_ms": 780.7925505,
+      "p99_ms": 955.9947814399998,
+      "max_ms": 1243.960637
+    },
+    "void": {
+      "samples": 866,
+      "p50_ms": 391.4053005,
+      "p95_ms": 738.7023074999997,
+      "p99_ms": 885.4617428499998,
+      "max_ms": 993.610056
+    },
+    "allHttp": {
+      "samples": 5346,
+      "p50_ms": 395.38712999999996,
+      "p95_ms": 757.940062,
+      "p99_ms": 928.4406077999998,
+      "max_ms": 1261.095099
+    }
+  },
+  "asynchronous": {
+    "drainSeconds": 105,
+    "drainedMeans": "no unpublished outbox row remains and every payment's projection matches its authoritative status"
+  },
+  "telemetry": {
+    "tracingSampleRate": 1.0,
+    "otlpExportEnabled": false,
+    "prometheusScrapedDuringRun": false,
+    "note": "Spans are created at the sampled rate regardless of export. Export off means they are dropped rather than sent."
+  },
+  "environment": {
+    "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "arch": "arm64",
+    "cpuCount": 10,
+    "java": "openjdk version \"21.0.11\" 2026-04-21",
+    "database": "PostgreSQL 16 in Docker, tmpfs storage, fsync=off, max_connections=200, shared_buffers=256MB",
+    "broker": "Apache Kafka 3.9.1, single node, replication factor 1",
+    "applicationHost": "same machine as the load generator and the infrastructure containers"
+  },
+  "limitations": [
+    "Load generator, application, database and broker share one machine, so they compete for the same CPU.",
+    "PostgreSQL runs on tmpfs with fsync off, which flatters write latency and is not a production storage profile.",
+    "A single JVM and a single broker node. No replication, no horizontal scaling, no network between tiers.",
+    "One run of one workload shape. Percentiles are reported per run and never averaged across runs."
+  ]
+}

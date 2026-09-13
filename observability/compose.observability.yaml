@@ -1,0 +1,72 @@
+# Optional local observability stack.
+#
+# Not part of running DecisionRail. The application exports nothing unless OTLP_EXPORT_ENABLED is set,
+# and its /actuator/prometheus endpoint is there whether or not anything scrapes it. This file exists
+# so the metrics and traces the application already produces can be looked at without anyone building
+# a dashboard by hand.
+#
+# Everything binds to loopback, stores a bounded amount, and is free to run locally. There is no cloud
+# account, no paid tier and nothing exposed beyond this machine.
+#
+#   docker compose -f observability/compose.observability.yaml up -d
+#   docker compose -f observability/compose.observability.yaml down -v     # also drops stored data
+#
+# Grafana's admin password comes from the environment, never from this file:
+#   GRAFANA_PASSWORD=... docker compose -f observability/compose.observability.yaml up -d
+
+name: decisionrail-observability
+
+services:
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      # Bounded retention: this is a local investigation tool, not an archive.
+      - --storage.tsdb.retention.time=6h
+      - --storage.tsdb.retention.size=512MB
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/scrape-credentials.yml:/etc/prometheus/scrape-credentials.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    extra_hosts:
+      # The application runs on the host, not in this stack.
+      - "host.docker.internal:host-gateway"
+
+  tempo:
+    image: grafana/tempo:2.7.1
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    ports:
+      # OTLP/HTTP, which is what the application's exporter speaks.
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:3200:3200"
+
+  grafana:
+    image: grafana/grafana:11.5.1
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      # No default. Compose fails loudly rather than starting something with a guessable password.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD before starting this stack}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+      - tempo
+
+volumes:
+  prometheus-data:
+  tempo-data:
+  grafana-data:

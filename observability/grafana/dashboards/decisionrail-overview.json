@@ -1,0 +1,1063 @@
+{
+  "uid": "decisionrail-overview",
+  "title": "DecisionRail overview",
+  "description": "Is it slow, is it failing, where is the time going, and is the backlog draining.",
+  "tags": [
+    "decisionrail"
+  ],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Broker circuit breaker",
+      "description": "0 closed, 1 half-open, 2 open. Open means the dispatcher is not attempting sends at all; payments are unaffected by design.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "CLOSED",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "HALF-OPEN",
+                  "color": "orange",
+                  "index": 1
+                },
+                "2": {
+                  "text": "OPEN",
+                  "color": "red",
+                  "index": 2
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "decisionrail_broker_breaker_state",
+          "legendFormat": "state",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Oldest undelivered event",
+      "description": "Age of the oldest event still waiting, measured from the occurred_at written in the payment transaction. No data means the backlog gauge could not be refreshed, which is not the same as zero.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "decisionrail_outbox_backlog_age_seconds",
+          "legendFormat": "age",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Payments with a blocked stream",
+      "description": "Payments whose event stream is held by a terminally failed event. Other payments keep draining; these need an operator redrive.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "decisionrail_outbox_blocked_payments",
+          "legendFormat": "blocked",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Quarantined records",
+      "description": "Records the projection consumer refused. A rising count means bad input, not a transient outage.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "decisionrail_consumer_quarantine_size",
+          "legendFormat": "quarantined",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "Database connections in use",
+      "description": "Waiting above zero means requests are queuing for a connection, which shows up as latency that is not the database being slow.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "hikaricp_connections_active{pool=\"HikariPool-1\"}",
+          "legendFormat": "active",
+          "refId": "A",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "hikaricp_connections_pending{pool=\"HikariPool-1\"}",
+          "legendFormat": "waiting",
+          "refId": "B",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "stat",
+      "title": "JVM heap used",
+      "description": "Read next to GC pauses before concluding that latency is application work.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum(jvm_memory_used_bytes{area=\"heap\"})",
+          "legendFormat": "heap",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP latency by route (p95)",
+      "description": "Percentiles are computed here from exported buckets, not averaged from per-instance summaries. The route is the template, never the raw URL, so the label set stays bounded.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, uri, method) (rate(http_server_requests_seconds_bucket[5m])))",
+          "legendFormat": "{{method}} {{uri}}",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "HTTP rate by outcome",
+      "description": "Answers 'is it failing' separately from 'is it slow'. A business decline is a 2xx here: it is a correct answer, and it appears in the command outcome panel below instead.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 4,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum by (outcome) (rate(http_server_requests_seconds_count[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Policy evaluation (p50/p95/p99)",
+      "description": "Rule evaluation only: no HTTP, no authentication, no database. Comparing this with HTTP latency is how you tell an expensive policy from an expensive request.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 12,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(decisionrail_decision_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(decisionrail_decision_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(decisionrail_decision_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Publication attempt duration by outcome",
+      "description": "Time from offering a record to the broker until it acknowledged, split by how the attempt ended. Successes and failures are kept apart; a percentile over both describes neither.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 12,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(decisionrail_outbox_publish_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{outcome}}",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Consumer processing duration by outcome",
+      "description": "Receipt to committed effect, or to quarantine. A duplicate is cheap and an applied effect is not, so they are separate series.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 12,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, outcome) (rate(decisionrail_consumer_processing_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95 {{outcome}}",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Outbox backlog by status",
+      "description": "Accumulating or draining. Values are at most 5s old by design: they come from one cached aggregate rather than a count per status per scrape, because that cost grew with retained history.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "decisionrail_outbox_backlog",
+          "legendFormat": "{{status}}",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Delivery attempts, failures and short circuits",
+      "description": "Acknowledged is not completed: a send whose lease was lost before it was recorded is shown separately, because another worker will send it again and a duplicate is expected.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 20,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum(rate(decisionrail_outbox_publish_attempts_total[5m]))",
+          "legendFormat": "attempted",
+          "refId": "A",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum(rate(decisionrail_outbox_published_total[5m]))",
+          "legendFormat": "completed",
+          "refId": "B",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum by (retryable) (rate(decisionrail_outbox_publish_failures_total[5m]))",
+          "legendFormat": "failed retryable={{retryable}}",
+          "refId": "C",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum(rate(decisionrail_outbox_publish_short_circuited_total[5m]))",
+          "legendFormat": "short-circuited",
+          "refId": "D",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum(rate(decisionrail_outbox_lease_lost_total[5m]))",
+          "legendFormat": "lease lost",
+          "refId": "E",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Command outcomes",
+      "description": "What commands decided. A policy decline and a funding decline are different series; collapsing them is the mistake this project keeps correcting.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum by (operation, status) (rate(decisionrail_payments_commands_total[5m]))",
+          "legendFormat": "{{operation}} {{status}}",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Retries and duplicates",
+      "description": "Replays and duplicate deliveries are expected under at-least-once delivery; what matters is that applied effects do not rise with them. A key conflict is a client defect, not a retry.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 28,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum(rate(decisionrail_idempotency_replayed_total[5m]))",
+          "legendFormat": "idempotent replays",
+          "refId": "A",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum(rate(decisionrail_idempotency_conflicts_total[5m]))",
+          "legendFormat": "key conflicts",
+          "refId": "B",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum by (group) (rate(decisionrail_consumer_duplicates_total[5m]))",
+          "legendFormat": "duplicate deliveries {{group}}",
+          "refId": "C",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum by (group) (rate(decisionrail_consumer_applied_total[5m]))",
+          "legendFormat": "applied effects {{group}}",
+          "refId": "D",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Replay and shadow progress",
+      "description": "Remaining work rather than completed work, which is what someone watching a run actually needs.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 36,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "decisionrail_replay_items_remaining",
+          "legendFormat": "replay inputs remaining",
+          "refId": "A",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "decisionrail_replay_jobs{status=\"RUNNING\"}",
+          "legendFormat": "replay jobs running",
+          "refId": "B",
+          "range": true
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "decisionrail_shadow_tasks{state=\"PENDING\"}",
+          "legendFormat": "shadow tasks pending",
+          "refId": "C",
+          "range": true
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "GC pause time",
+      "description": "Seconds of pause per second. Rule out before attributing a latency percentile to application work.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "decisionrail-prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 36,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "lineWidth": 1,
+            "fillOpacity": 8,
+            "showPoints": "never"
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "decisionrail-prometheus"
+          },
+          "expr": "sum by (cause) (rate(jvm_gc_pause_seconds_sum[5m]))",
+          "legendFormat": "{{cause}}",
+          "refId": "A",
+          "range": true
+        }
+      ]
+    }
+  ]
+}

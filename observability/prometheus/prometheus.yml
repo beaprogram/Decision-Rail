@@ -1,0 +1,26 @@
+# Scrapes the application's own Prometheus endpoint.
+#
+# That endpoint is restricted to the OPERATIONS identity, which is metrics-only: it has no DecisionRail
+# workspace and no financial authority, and this configuration does not change that. The credentials
+# live in scrape-credentials.yml, which is generated from .env and is not committed.
+global:
+  # Wide enough that scraping is not itself a load, narrow enough to see a backlog build. Backlog
+  # gauges are cached for 5s in the application, so a shorter interval would return repeated values.
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    stack: decisionrail-local
+
+scrape_configs:
+  - job_name: decisionrail
+    metrics_path: /actuator/prometheus
+    scheme: http
+    basic_auth_file: /etc/prometheus/scrape-credentials.yml
+    static_configs:
+      - targets: ["host.docker.internal:8080"]
+        labels:
+          instance: decisionrail-local
+
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

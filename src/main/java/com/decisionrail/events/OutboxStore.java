@@ -1,11 +1,13 @@
 package com.decisionrail.events;
 
+import com.decisionrail.telemetry.OriginTrace;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Repository;
@@ -45,16 +47,26 @@ public class OutboxStore {
         return next == null ? 1L : next;
     }
 
-    /** Appends committed intent. Runs inside the caller's payment transaction. */
+    /**
+     * Appends committed intent. Runs inside the caller's payment transaction.
+     *
+     * <p>The origin trace is written here, in that same transaction, which is the only place it can be
+     * captured usefully: after this returns, the thread that knew the trace is gone, and delivery may
+     * not happen until after a restart. The payload is untouched, so event identity and the
+     * fingerprint consumers deduplicate on are exactly what they were.
+     */
     public void append(UUID eventId, UUID aggregateId, long sequence, String merchantId,
-                       String eventType, int schemaVersion, String payload, Instant occurredAt) {
+                       String eventType, int schemaVersion, String payload, Instant occurredAt,
+                       Optional<OriginTrace> origin) {
         jdbc.update("""
                 INSERT INTO outbox_events
                     (id, aggregate_id, aggregate_sequence, aggregate_type, merchant_id, event_type,
-                     schema_version, payload, occurred_at, status, attempts, next_attempt_at, partition_key)
-                VALUES (?, ?, ?, 'payment', ?, ?, ?, ?::jsonb, ?, 'PENDING', 0, ?, ?)
+                     schema_version, payload, occurred_at, status, attempts, next_attempt_at, partition_key,
+                     origin_trace_id, origin_span_id)
+                VALUES (?, ?, ?, 'payment', ?, ?, ?, ?::jsonb, ?, 'PENDING', 0, ?, ?, ?, ?)
                 """, eventId, aggregateId, sequence, merchantId, eventType, schemaVersion, payload,
-                Timestamp.from(occurredAt), Timestamp.from(occurredAt), aggregateId.toString());
+                Timestamp.from(occurredAt), Timestamp.from(occurredAt), aggregateId.toString(),
+                origin.map(OriginTrace::traceId).orElse(null), origin.map(OriginTrace::spanId).orElse(null));
     }
 
     /**
@@ -91,12 +103,14 @@ public class OutboxStore {
                 WHERE target.id = claimable.id
                 RETURNING target.id, target.aggregate_id, target.aggregate_sequence, target.merchant_id,
                           target.event_type, target.schema_version, target.payload, target.partition_key,
-                          target.occurred_at, target.attempts, target.lease_token
+                          target.occurred_at, target.attempts, target.lease_token,
+                          target.origin_trace_id, target.origin_span_id
                 """,
                 (rs, row) -> new ClaimedEvent(
                         rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getLong(3), rs.getString(4),
                         rs.getString(5), rs.getInt(6), rs.getString(7), rs.getString(8),
-                        rs.getTimestamp(9).toInstant(), rs.getInt(10), rs.getObject(11, UUID.class)),
+                        rs.getTimestamp(9).toInstant(), rs.getInt(10), rs.getObject(11, UUID.class),
+                        OriginTrace.of(rs.getString(12), rs.getString(13))),
                 Timestamp.from(now), limit, Timestamp.from(now), owner, leaseToken, Timestamp.from(leaseExpiry));
     }
 

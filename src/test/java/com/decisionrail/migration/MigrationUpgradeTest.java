@@ -62,6 +62,7 @@ class MigrationUpgradeTest {
                 assertOutboxBackfill(connection, seeded);
                 assertNewTablesExist(connection);
                 assertSealedJournalStillRejectsLateEntries(connection, seeded);
+                assertCorrelationColumnsAreOptionalForOlderRows(connection, seeded);
             }
         } finally {
             dropDatabase(target, database);
@@ -81,6 +82,43 @@ class MigrationUpgradeTest {
             if (matcher.matches() && Integer.parseInt(matcher.group(1)) > 2) count++;
         }
         return count;
+    }
+
+    /**
+     * V7 adds correlation columns and backfills nothing, which is the point: every row written before
+     * it has no trace, and an upgraded deployment must still deliver those events rather than treating
+     * missing telemetry as a defect. The constraints are checked here too, because they are what stops
+     * unvalidated text reaching an outbound header later.
+     */
+    private void assertCorrelationColumnsAreOptionalForOlderRows(Connection connection, Seeded seeded)
+            throws Exception {
+        try (var statement = connection.prepareStatement(
+                "SELECT origin_trace_id, origin_span_id, status FROM outbox_events WHERE id = ?")) {
+            statement.setObject(1, seeded.authorizedEvent());
+            try (var rows = statement.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).as("a pre-upgrade row carries no trace").isNull();
+                assertThat(rows.getString(2)).isNull();
+                assertThat(rows.getString(3)).as("and is still claimable for delivery").isEqualTo("PENDING");
+            }
+        }
+        // A span without its trace identifies nothing, and malformed hex must not reach a header.
+        assertThat(rejected(connection, "UPDATE outbox_events SET origin_span_id = '00f067aa0ba902b7' WHERE id = '"
+                + seeded.authorizedEvent() + "'"))
+                .as("a span id without a trace id is refused").isTrue();
+        assertThat(rejected(connection, "UPDATE outbox_events SET origin_trace_id = 'not-hex' WHERE id = '"
+                + seeded.authorizedEvent() + "'"))
+                .as("a non-hex trace id is refused").isTrue();
+    }
+
+    /** Runs a statement expected to violate a constraint, and reports whether the database refused it. */
+    private boolean rejected(Connection connection, String sql) {
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate(sql);
+            return false;
+        } catch (java.sql.SQLException refused) {
+            return true;
+        }
     }
 
     private record Seeded(UUID accountId, UUID capturedPayment, UUID authorizedPayment,

@@ -1,0 +1,155 @@
+{
+    "metrics": {
+        "replays_sent": {
+            "count": 1752,
+            "rate": 57.27672793555159
+        },
+        "http_reqs": {
+            "count": 2336,
+            "rate": 76.36897058073545
+        },
+        "dropped_iterations": {
+            "count": 17,
+            "rate": 0.5557673372741878
+        },
+        "http_req_failed": {
+            "passes": 0,
+            "fails": 2336,
+            "value": 0
+        },
+        "iterations": {
+            "count": 584,
+            "rate": 19.092242645183862
+        },
+        "vus": {
+            "value": 29,
+            "min": 13,
+            "max": 33
+        },
+        "data_received": {
+            "rate": 69055.85703491859,
+            "count": 2112304
+        },
+        "divergent_replays": {
+            "count": 0,
+            "rate": 0,
+            "thresholds": {
+                "count<1": false
+            }
+        },
+        "data_sent": {
+            "count": 1004784,
+            "rate": 32848.59577739456
+        },
+        "http_req_tls_handshaking": {
+            "avg": 0,
+            "p(95)": 0,
+            "p(99)": 0,
+            "max": 0,
+            "count": 2336,
+            "min": 0,
+            "med": 0
+        },
+        "http_req_waiting": {
+            "count": 2336,
+            "min": 121.243444,
+            "med": 560.9463155,
+            "avg": 567.8132925235448,
+            "p(95)": 816.7664104999998,
+            "p(99)": 968.2188017,
+            "max": 1333.621216
+        },
+        "http_req_receiving": {
+            "avg": 0.8050415800513712,
+            "p(95)": 1.0937434999999993,
+            "p(99)": 22.12934169999999,
+            "max": 113.924943,
+            "count": 2336,
+            "min": 0.008092,
+            "med": 0.061945
+        },
+        "originals_sent": {
+            "count": 584,
+            "rate": 19.092242645183862
+        },
+        "vus_max": {
+            "value": 34,
+            "min": 20,
+            "max": 34
+        },
+        "http_req_blocked": {
+            "count": 2336,
+            "min": 0,
+            "med": 0.00339,
+            "avg": 0.4243010282534247,
+            "p(95)": 0.1997297499999898,
+            "p(99)": 11.034389149999994,
+            "max": 116.191165
+        },
+        "http_req_sending": {
+            "med": 0.013964,
+            "avg": 0.2511723279109587,
+            "p(95)": 0.09870799999999988,
+            "p(99)": 0.8282959999999969,
+            "max": 178.342716,
+            "count": 2336,
+            "min": 0.002824
+        },
+        "iteration_duration": {
+            "count": 584,
+            "min": 539.467783,
+            "med": 1276.9987845,
+            "avg": 1274.668188767124,
+            "p(95)": 1638.8933324,
+            "p(99)": 1914.8828672,
+            "max": 2014.128593
+        },
+        "http_req_duration": {
+            "p(99)": 968.28008175,
+            "max": 1333.70886,
+            "count": 2336,
+            "min": 121.352134,
+            "med": 561.6036425,
+            "avg": 568.8695064315077,
+            "p(95)": 820.3578417499999
+        },
+        "http_req_connecting": {
+            "med": 0,
+            "avg": 0.3727925826198631,
+            "p(95)": 0,
+            "p(99)": 10.978638899999995,
+            "max": 116.145195,
+            "count": 2336,
+            "min": -74.132603
+        },
+        "http_req_duration{expected_response:true}": {
+            "count": 2336,
+            "min": 121.352134,
+            "med": 561.6036425,
+            "avg": 568.8695064315077,
+            "p(95)": 820.3578417499999,
+            "p(99)": 968.28008175,
+            "max": 1333.70886
+        },
+        "checks": {
+            "passes": 1752,
+            "fails": 0,
+            "value": 1
+        }
+    },
+    "root_group": {
+        "name": "",
+        "path": "",
+        "id": "d41d8cd98f00b204e9800998ecf8427e",
+        "groups": {},
+        "checks": {
+                "replay returns the original result": {
+                    "fails": 0,
+                    "name": "replay returns the original result",
+                    "path": "::replay returns the original result",
+                    "id": "efb4f01a5ce93df88e1d49e21e4ca8e2",
+                    "passes": 1752
+                }
+            }
+    }
+}

@@ -176,6 +176,27 @@ The interceptions decide only whether a real request is delivered or a real resp
 response is fabricated, and every assertion about money is checked against the database as well as the
 screen.
 
+### Telemetry verified in the checkpoint 8 pass
+
+| Property | Check | What it would catch |
+| --- | --- | --- |
+| Trace context survives the request | `TelemetryCorrelationTest` | Correlation held only in a thread, which cannot exist when delivery happens later |
+| It reaches the broker as a header, not in the payload | `TelemetryCorrelationTest` | Event identity changing between attempts and invalidating every recorded fingerprint |
+| A publication is a distinct span under the originating trace | `TelemetryCorrelationTest` | A retry that looks like a longer first attempt, or a trace that leads nowhere |
+| An event written before correlation existed still delivers | `TelemetryCorrelationTest` | An upgrade treating missing telemetry as a defect and stalling a committed event |
+| An idempotent replay points at the original without overwriting it | `TelemetryCorrelationTest` | A retry claiming to be the request that first performed the command |
+| A collector that is not there changes no payment outcome | `TelemetryCorrelationTest` | Telemetry becoming a dependency of taking payments |
+| Only well-formed hex becomes a traceparent | `OriginTraceTest` | Unvalidated text assembled into an outbound header |
+| The correlation columns are optional and constrained | `MigrationUpgradeTest` | A backfill that was never written, and malformed values reaching a header later |
+
+**A regression this pass introduced and the existing suite caught.** Moving the consumer's
+acknowledgement into a `finally` block, while adding a timer around it, made the consumer acknowledge a
+record whose quarantine row had failed to persist — turning a recoverable storage outage into lost
+events. `MalformedEventPartitionTest` failed on it immediately. The acknowledgement is back on the
+non-throwing path only, with a comment saying why it must never be moved, and the timer stayed in the
+`finally` where it belongs. This is the value of keeping infrastructure tests that assert on offsets
+rather than on happy paths.
+
 ### Test infrastructure notes
 
 Two environmental details were corrected while adding these tests, both test-only:
@@ -245,6 +266,8 @@ Both demo scripts passed against the packaged application in the local Compose s
 | Quarantine write failure | The offset is not advanced, and the record is quarantined once storage recovers. | Acknowledging work that was never recorded. |
 | Invalid policy definition | `400` with the offending JSON path, and no version row persisted. | An input error reported to the caller as a server fault. |
 | Cross-tenant replay and shadow access | Another merchant's job, results, and comparisons read as absent. | Cross-tenant disclosure through new endpoints. |
+| Telemetry exporter unavailable | Commands commit and readiness is unchanged with no collector configured. | Observation becoming a dependency of taking payments. |
+| Gauge source unavailable | Backlog gauges report no data rather than zero. | A false zero backlog reading identically to a healthy one. |
 | Privileged route matching | Merchants and the metrics account are refused admin routes; admin is refused merchant routes. | A privileged path falling through to the broad merchant rule. |
 | CSRF token across an authentication transition | Login and logout responses each carry a usable token; the next mutation is accepted with nothing in between. | A transition that leaves the page unable to make its next request, or a reload hiding it. |
 | A sign-out the server never confirmed | Data is cleared immediately; the outcome is reported as unconfirmed and reconciled when the server answers. | A session that still exists being presented as destroyed. |

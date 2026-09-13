@@ -4,6 +4,7 @@ import com.decisionrail.decision.DecisionResult;
 import com.decisionrail.events.EventEnvelope;
 import com.decisionrail.events.OutboxStore;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.decisionrail.telemetry.Correlation;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -20,19 +21,31 @@ public class PaymentStore {
     private final JdbcTemplate jdbc;
     private final ObjectMapper json;
     private final OutboxStore outbox;
+    private final Correlation correlation;
 
-    public PaymentStore(JdbcTemplate jdbc, ObjectMapper json, OutboxStore outbox) {
+    public PaymentStore(JdbcTemplate jdbc, ObjectMapper json, OutboxStore outbox, Correlation correlation) {
         this.jdbc = jdbc;
         this.json = json;
         this.outbox = outbox;
+        this.correlation = correlation;
     }
 
     public IdempotencyRecord claimKey(String merchant, String key, String hash) {
-        // PostgreSQL waits for a competing insert to commit before resolving ON CONFLICT.
-        jdbc.update("INSERT INTO idempotency_records(merchant_id,idempotency_key,request_hash) VALUES (?,?,?) ON CONFLICT DO NOTHING",
-                merchant, key, hash);
-        return jdbc.queryForObject("SELECT request_hash,response_body,http_status FROM idempotency_records WHERE merchant_id=? AND idempotency_key=? FOR UPDATE",
-                (rs, n) -> new IdempotencyRecord(rs.getString(1), rs.getString(2), rs.getObject(3, Integer.class)), merchant, key);
+        // PostgreSQL waits for a competing insert to commit before resolving ON CONFLICT. The trace is
+        // written only by the insert that wins, so it records the request that first performed this
+        // command; ON CONFLICT DO NOTHING leaves an existing row's provenance alone, which is what lets
+        // a later replay point at the original instead of overwriting it.
+        jdbc.update("""
+                INSERT INTO idempotency_records(merchant_id,idempotency_key,request_hash,origin_trace_id)
+                VALUES (?,?,?,?) ON CONFLICT DO NOTHING
+                """, merchant, key, hash, correlation.currentTraceId().orElse(null));
+        return jdbc.queryForObject("""
+                SELECT request_hash,response_body,http_status,origin_trace_id
+                FROM idempotency_records WHERE merchant_id=? AND idempotency_key=? FOR UPDATE
+                """,
+                (rs, n) -> new IdempotencyRecord(rs.getString(1), rs.getString(2), rs.getObject(3, Integer.class),
+                        rs.getString(4)),
+                merchant, key);
     }
 
     public void completeKey(String merchant, String key, CommandResult result) {
@@ -229,8 +242,10 @@ public class PaymentStore {
         EventEnvelope envelope = new EventEnvelope(eventId, eventType, EventEnvelope.SUPPORTED_SCHEMA_VERSION,
                 payment.id(), EventEnvelope.PAYMENT_AGGREGATE, sequence, merchant,
                 payment.updatedAt(), payment.updatedAt(), snapshot(payment));
+        // The trace of the command being committed, captured while the thread that ran it still exists.
         outbox.append(eventId, payment.id(), sequence, merchant, eventType,
-                EventEnvelope.SUPPORTED_SCHEMA_VERSION, encode(envelope), payment.updatedAt());
+                EventEnvelope.SUPPORTED_SCHEMA_VERSION, encode(envelope), payment.updatedAt(),
+                correlation.current());
         jdbc.update("INSERT INTO audit_events(id,merchant_id,payment_id,action) VALUES (?,?,?,?)", UUID.randomUUID(), merchant, payment.id(), eventType);
     }
 
@@ -265,5 +280,10 @@ public class PaymentStore {
         catch (JsonProcessingException e) { throw new IllegalStateException("Cannot decode persisted payment data", e); }
     }
 
-    public record IdempotencyRecord(String requestHash, String responseBody, Integer httpStatus) {}
+    /**
+     * @param originTraceId the trace of the request that first performed this command, or null when it
+     *                      ran untraced. A replay points at it rather than claiming to be it.
+     */
+    public record IdempotencyRecord(String requestHash, String responseBody, Integer httpStatus,
+                                    String originTraceId) {}
 }

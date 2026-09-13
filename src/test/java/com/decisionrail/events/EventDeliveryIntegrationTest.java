@@ -78,6 +78,7 @@ class EventDeliveryIntegrationTest {
     @Autowired OutboxStore outbox;
     @Autowired InboxStore inbox;
     @Autowired EventPublisher publisher;
+    @Autowired com.decisionrail.telemetry.DeliveryTracing tracing;
     @Autowired DeliveryFaults faults;
     @Autowired DeliveryProperties properties;
     @Autowired CircuitBreaker brokerBreaker;
@@ -394,7 +395,7 @@ class EventDeliveryIntegrationTest {
     }
 
     private OutboxDispatcher newDispatcher() {
-        return new OutboxDispatcher(outbox, publisher, properties, faults, brokerBreaker, transactions, clock, metrics);
+        return new OutboxDispatcher(outbox, publisher, properties, faults, brokerBreaker, transactions, clock, metrics, tracing);
     }
 
     /**

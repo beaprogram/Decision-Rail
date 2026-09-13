@@ -166,11 +166,33 @@ A rolled-back transaction must not leave a successful payment without its journa
 - The operator console is a locally-scoped interface over synthetic data. Sessions are in memory, so a restart signs everyone out and more than one instance would need shared session storage. Credentials are the four environment-configured accounts; there is no user management and no rate limiting on sign-in.
 - There is no refund lifecycle, reconciliation, distributed tracing, measured performance limit, failover system, or public hosted environment yet.
 
+## What telemetry is allowed to do
+
+Three rules, all of them about not letting observation change what is observed.
+
+**Correlation is durable or it is nothing.** A trace lives in a thread; delivery happens later, on
+another thread, often in another process. The trace of the command that committed an event is written
+into `outbox_events` inside the payment transaction, and travels to the broker as a record header. It
+is never part of the payload, because the payload bytes are what a consumer fingerprints for
+deduplication and changing them would invalidate every fingerprint already recorded. ADR-0006 has the
+parent-versus-link reasoning and the costs.
+
+**Telemetry cannot fail a payment.** Export is off unless a collector is configured. Every tracing call
+degrades to "untraced" rather than to an error, nothing exports while a financial lock is held, and the
+exporter has a bounded queue and timeout. An unreachable collector changes no payment outcome and no
+readiness signal.
+
+**Observation must not scale with history.** Backlog and queue-depth gauges read one cached aggregate,
+at most five seconds old, rather than a `count(*)` per label per scrape over tables that only grow.
+When the database cannot answer they report no data, never zero: a zero backlog and an unreachable
+database look identical on a graph and mean opposite things. Metric labels are bounded enumerations
+only; identifiers belong on spans and in the operator APIs.
+
 ## Growth path
 
 The event stream is now the seam for further asynchronous work. A new consumer joins with its own group and its own deduplication records, without touching the producer or the payment core.
 
-The operator interface is built on that same data, and every change it offers is an existing operation behind a session-authenticated route rather than a new one. Remaining milestones build on what exists rather than revisiting it: correlated tracing and measured performance limits, refunds and reconciliation as new operations against the append-only ledger, and a hosting assessment.
+The operator interface is built on that same data, and every change it offers is an existing operation behind a session-authenticated route rather than a new one. Correlation now follows that stream too: the trace of the command that committed an event is written beside the event, so delivery and consumption remain attributable to the request that caused them after a restart. Remaining milestones build on what exists rather than revisiting it: refunds and reconciliation as new operations against the append-only ledger, and a hosting assessment.
 
 Two things would justify revisiting this design. Consumers needing ordering *across* payments would require a different sequencing strategy than a per-aggregate counter. Measured backlog drain time exceeding what a single dispatcher can sustain would justify partitioned workers.
 

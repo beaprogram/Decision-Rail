@@ -1,6 +1,6 @@
 # Delivery plan and progress ledger
 
-Delivery is defined as **10 equally weighted scope checkpoints**; **7 are complete**. Calling that “approximately 70%” is planning shorthand, not a measurement of elapsed time, engineering effort, production readiness, or a guarantee that the remaining checkpoints are equally difficult.
+Delivery is defined as **10 equally weighted scope checkpoints**; **8 are complete**. Calling that “approximately 80%” is planning shorthand, not a measurement of elapsed time, engineering effort, production readiness, or a guarantee that the remaining checkpoints are equally difficult.
 
 A checkpoint is complete only when its implementation and relevant verification are present. Future milestones below are a delivery plan, not current capabilities.
 
@@ -13,7 +13,7 @@ A checkpoint is complete only when its implementation and relevant verification 
 | 5 | Replay and shadow evaluation | Historical replay against a chosen ruleset, comparison reports, and a shadow path that cannot alter live state. | Included |
 | 6 | Resilience controls | Timeouts, bounded retries, dependency fault behavior, circuit-breaker behaviour, and explicit degradation policies. | Included |
 | 7 | Operator experience | Searchable payments and decisions, policy comparison views, lifecycle timelines, and an accessible operator UI. | Included |
-| 8 | Telemetry and measured performance | Correlated traces and structured logs, operational metrics, load tests, published methodology, and measured limits. | Planned |
+| 8 | Telemetry and measured performance | Correlated traces and structured logs, operational metrics, load tests, published methodology, and measured limits. | Included |
 | 9 | Extended lifecycle and recovery | Refunds/reversals, reconciliation, recovery procedures, and financial correction evidence. | Planned |
 | 10 | Public demo and release | Free-budget hosting assessment, secure configuration, synthetic demo data, deployment validation, and a recorded walkthrough. | Planned |
 
@@ -76,6 +76,21 @@ features. Describe delivery as at-least-once with idempotent consumers, never as
 Throughput, latency, availability, and recovery claims should be added after repeatable measurements
 exist, and fraud accuracy claims only if labelled data ever exists. Do not imply affiliation with
 Mastercard, a bank, or a payment network.
+
+## Definition of done for checkpoint 8
+
+- [x] Trace context that survives a restart: written durably beside the event in the transaction that commits it, never in the payload a consumer fingerprints.
+- [x] One trace from HTTP command through outbox row, each publication attempt, the broker record, and the committed projection effect.
+- [x] Each retry a distinct attempt; an idempotent replay points at the original operation without overwriting its provenance; events without trace context still deliver.
+- [x] Structured JSON logs with consistent correlation fields, distinguishing an attempt from a committed effect, an acknowledgement from a fenced completion, a duplicate from a newly applied effect, and a business decline from a technical failure.
+- [x] A documented metric catalogue with bounded labels, stated units, stated freshness, and no payment, account, merchant, trace or policy identifier used as a label.
+- [x] Database-backed gauges that do not cost more as retained history grows, and that report no data rather than a false zero.
+- [x] Telemetry operationally optional: an absent collector changes no payment outcome and no readiness signal, exports are bounded, and nothing exports while a financial lock is held.
+- [x] A free, local, provisioned observability stack answering the operator questions without anyone building a dashboard by hand.
+- [x] A repeatable harness on isolated infrastructure, with an open load model, warmup excluded, and at least three repetitions for the headline figure.
+- [x] Published measurements with environment, workload, sample counts, percentiles per run, the sustained rate, and the first failing level.
+- [x] Post-run correctness checks scoped to each run's own accounts, covering funds, journals, idempotency, event intent, ordering and duplicate effects.
+- [x] Backend, frontend, browser, demo and CI verification unchanged and passing.
 
 ## Definition of done for checkpoint 7
 

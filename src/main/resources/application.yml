@@ -40,6 +40,20 @@ server:
         # sign-in would be impossible. This is the one deliberate local exception.
         secure: ${SESSION_COOKIE_SECURE:false}
       timeout: ${SESSION_TIMEOUT:30m}
+logging:
+  structured:
+    format:
+      # One JSON object per line, in a documented schema, enabled by setting LOG_FORMAT=ecs. It stays
+      # off by default because a developer reading a terminal is better served by the plain encoder,
+      # and the container profile turns it on. Trace and span ids reach these records through MDC,
+      # which is how a log line and a span find each other without either knowing about the other.
+      console: ${LOG_FORMAT:}
+  # Correlation fields are emitted by the structured encoder from MDC; this pattern is what the
+  # plain console format uses so the same identifiers are visible when JSON is off.
+  pattern:
+    correlation: "[${spring.application.name:decisionrail},%X{traceId:-},%X{spanId:-},%X{requestId:-}] "
+  include-application-name: false
+
 management:
   endpoints:
     web:
@@ -76,6 +90,41 @@ management:
           # DEGRADED stays 200: impaired asynchronous delivery is a real operational signal, but
           # it must not read as an unhealthy instance, because the payment API is still correct.
           DEGRADED: 200
+  metrics:
+    tags:
+      # Identifies the series when more than one instance or environment writes to one backend.
+      application: decisionrail
+    distribution:
+      # Percentiles are computed in the backend from these buckets, not in the application. A
+      # client-side percentile cannot be aggregated across instances or re-windowed afterwards,
+      # and this project publishes percentiles, so the raw buckets are what must be exported.
+      percentiles-histogram:
+        http.server.requests: true
+      # Latency outside these bounds still counts; the bounds only decide bucket resolution.
+      minimum-expected-value:
+        http.server.requests: 1ms
+      maximum-expected-value:
+        http.server.requests: 10s
+  tracing:
+    sampling:
+      # Every request is sampled by default. This is a synthetic single-instance system where the
+      # point of tracing is to follow one specific payment end to end; sampling it away defeats
+      # that. Lower it for a load run by setting MANAGEMENT_TRACING_SAMPLING_PROBABILITY, and note
+      # that the sampling decision is taken once at the request and honoured by every later hop.
+      probability: ${TRACING_SAMPLE_RATE:1.0}
+  otlp:
+    tracing:
+      export:
+        # Off unless deliberately enabled. Spans are still created and their ids still reach every
+        # log record, so a payment can be correlated with no collector running at all; exporting only
+        # decides whether they also leave the process. An empty endpoint is not a way to disable it:
+        # the exporter rejects one at startup, which would make telemetry able to stop the
+        # application from booting.
+        enabled: ${OTLP_EXPORT_ENABLED:false}
+      endpoint: ${OTLP_TRACES_ENDPOINT:http://localhost:4318/v1/traces}
+      # Bounded on purpose: a collector that stops reading must not consume the application's memory
+      # or block a payment thread waiting for an export.
+      timeout: 3s
 app:
   demo-enabled: ${DEMO_ENABLED:false}
   ui:

@@ -125,11 +125,11 @@ class EventPublisherDeadlineTest {
     // ----- helpers -----
 
     private EventPublisher publisherReturning(CompletableFuture<SendResult<String, String>> future) {
-        return new EventPublisher(new StubTemplate(future, null), properties, breaker, faults, metrics);
+        return new EventPublisher(new StubTemplate(future, null), properties, breaker, faults, metrics, tracing());
     }
 
     private EventPublisher publisherThrowing(RuntimeException failure) {
-        return new EventPublisher(new StubTemplate(null, failure), properties, breaker, faults, metrics);
+        return new EventPublisher(new StubTemplate(null, failure), properties, breaker, faults, metrics, tracing());
     }
 
     /** A template that returns whatever future the test supplies instead of contacting a broker. */
@@ -159,10 +159,20 @@ class EventPublisherDeadlineTest {
         return new SendResult<>(record, metadata);
     }
 
+    /**
+     * Tracing with a no-op tracer. These tests are about the send deadline, and a real tracer would add
+     * a dependency without adding an assertion; the propagation itself is verified against real
+     * infrastructure in TelemetryCorrelationTest.
+     */
+    private static com.decisionrail.telemetry.DeliveryTracing tracing() {
+        return new com.decisionrail.telemetry.DeliveryTracing(io.micrometer.tracing.Tracer.NOOP);
+    }
+
     private static ClaimedEvent event() {
         UUID paymentId = UUID.randomUUID();
         return new ClaimedEvent(UUID.randomUUID(), paymentId, 1L, "demo-merchant", "payment.authorized.v1",
-                1, "{}", paymentId.toString(), Instant.parse("2026-09-10T00:00:00Z"), 1, UUID.randomUUID());
+                1, "{}", paymentId.toString(), Instant.parse("2026-09-10T00:00:00Z"), 1, UUID.randomUUID(),
+                java.util.Optional.empty());
     }
 
     private static DeliveryProperties properties() {

@@ -81,6 +81,49 @@ async function authorizedPaymentOn(page: Page, account: string, amount: string):
   return page.url().slice(page.url().lastIndexOf('/') + 1);
 }
 
+/**
+ * Loads the accounts screen so its query is cached, then returns to the payment.
+ *
+ * The held amount is checked on the way through: it is what makes the cached entry demonstrably the
+ * pre-command one, so a later assertion can distinguish a refetch from the cache being served.
+ */
+async function primeAccountsCache(page: Page, account: string, expectedHeld: string): Promise<void> {
+  const paymentUrl = page.url();
+  await page.getByRole('link', { name: 'Accounts' }).click();
+  const row = page.locator('tbody tr', { hasText: account });
+  await expect(row.locator('td').nth(3)).toHaveText(new RegExp(`^${expectedHeld}\\s*CAD$`));
+  await page.goto(paymentUrl);
+}
+
+/**
+ * Navigates back to Accounts inside the application and proves the figures were re-read.
+ *
+ * The query has a five second stale time and no observer on the payment screen, so invalidating it
+ * only marks it stale; nothing refetches until the screen mounts again. That makes the network request
+ * the actual evidence: had the retry not invalidated the query, this mount would have served the
+ * cached entry without asking the server at all.
+ */
+async function expectAccountsRefetched(
+  page: Page,
+  account: string,
+  expected: { balance: string; held: string },
+): Promise<void> {
+  const [refetch] = await Promise.all([
+    page.waitForResponse(
+      (response) =>
+        response.url().includes('/ui/accounts') &&
+        response.request().method() === 'GET' &&
+        response.status() === 200,
+    ),
+    page.getByRole('link', { name: 'Accounts' }).click(),
+  ]);
+  expect(refetch.ok()).toBe(true);
+
+  const row = page.locator('tbody tr', { hasText: account });
+  await expect(row.locator('td').nth(2)).toHaveText(new RegExp(`^${expected.balance}\\s*CAD$`));
+  await expect(row.locator('td').nth(3)).toHaveText(new RegExp(`^${expected.held}\\s*CAD$`));
+}
+
 /** Lets the request reach the server, then drops the response so the outcome is unknowable. */
 async function withholdResponses(page: Page, pattern: string): Promise<void> {
   await page.route(pattern, async (route) => {
@@ -244,6 +287,10 @@ test.describe('recovering a command whose outcome is unknown', () => {
     // recovery read that follows it correctly says so. That is what makes this different from the
     // committed-but-response-lost case, where the first read can already see CAPTURED and would mask a
     // retry that never re-read anything.
+    // Visit Accounts first so the query cache holds this account's pre-command figures. Without that
+    // there is no stale value to serve and the assertion at the end would prove nothing.
+    await primeAccountsCache(page, account, '31.00');
+
     await blockBeforeDelivery(page, `**/payments/${paymentId}/capture`);
     await page.getByRole('button', { name: 'Capture' }).click();
     await page.getByRole('button', { name: 'Capture funds' }).click();
@@ -285,18 +332,18 @@ test.describe('recovering a command whose outcome is unknown', () => {
     expect(await sql(`SELECT count(*) FROM ledger_journals WHERE payment_id = '${paymentId}'`)).toBe('1');
     await capture(page, '42-recovered-capture');
 
-    // Account balances were invalidated too, so the accounts screen does not serve the pre-capture
-    // figures it had cached.
-    await page.goto('/dashboard/accounts');
-    const row = page.locator('tbody tr', { hasText: account });
-    await expect(row.locator('td').nth(2)).toHaveText(/^49,969\.00\s*CAD$/);
-    await expect(row.locator('td').nth(3)).toHaveText(/^0\.00\s*CAD$/);
+    // Account balances were invalidated too. Proven by navigating inside the application rather than
+    // reloading it: a reload throws the cache away and would fetch fresh figures whether or not
+    // anything was invalidated, so it could not tell the two apart.
+    await expectAccountsRefetched(page, account, { balance: '49,969.00', held: '0.00' });
   });
 
   test('a void retry re-reads the payment, so the released hold is what the screen shows', async ({ page }) => {
     const account = await createIsolatedAccount('demo-merchant', 'CAD', 4_000_000);
     await signIn(page, identities.merchant());
     const paymentId = await authorizedPaymentOn(page, account, '23.00');
+
+    await primeAccountsCache(page, account, '23.00');
 
     await blockBeforeDelivery(page, `**/payments/${paymentId}/void`);
     await page.getByRole('button', { name: 'Void' }).click();
@@ -333,9 +380,6 @@ test.describe('recovering a command whose outcome is unknown', () => {
     expect(await sql(`SELECT status FROM payments WHERE id = '${paymentId}'`)).toBe('VOIDED');
     expect(await sql(`SELECT count(*) FROM ledger_journals WHERE payment_id = '${paymentId}'`)).toBe('0');
 
-    await page.goto('/dashboard/accounts');
-    const row = page.locator('tbody tr', { hasText: account });
-    await expect(row.locator('td').nth(3)).toHaveText(/^0\.00\s*CAD$/);
-    await expect(row.locator('td').nth(4)).toHaveText(/^40,000\.00\s*CAD$/);
+    await expectAccountsRefetched(page, account, { balance: '40,000.00', held: '0.00' });
   });
 });

@@ -1,7 +1,7 @@
 # Current delivery and continuation
 
-The plan is ten equally weighted scope checkpoints. Seven are now complete: **approximately 70% of
-planned scope**, not 70% of effort or production readiness. Calling it that is planning shorthand, and
+The plan is ten equally weighted scope checkpoints. Eight are now complete: **approximately 80% of
+planned scope**, not 80% of effort or production readiness. Calling it that is planning shorthand, and
 the checkpoints are not equally difficult. The detailed scope and completion criteria are in
 [roadmap.md](roadmap.md).
 
@@ -27,6 +27,13 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
    failed-event list with redrive, and seven screens covering payments, accounts, policy versions,
    replay, shadow, and event delivery. The dashboard is built into the application jar and served from
    the same origin as the API it calls.
+
+8. Correlated telemetry and measured performance: trace context written durably beside each event so a
+   payment can be followed from its HTTP command through publication attempts to a committed projection
+   effect after a restart, structured JSON logs carrying those identifiers, a documented metric
+   catalogue with bounded labels and stated freshness, a free local Prometheus/Tempo/Grafana stack
+   provisioned in source control, and a repeatable load harness on isolated infrastructure whose
+   results, limits and correctness checks are published in [performance.md](performance.md).
 
 ## Verification record
 
@@ -105,7 +112,6 @@ Record actual commands, test counts, failures, and meaningful limitations here a
 
 ## Remaining checkpoints
 
-- [ ] 8. Correlated telemetry, reproducible load tests, and measured performance limits.
 - [ ] 9. Refunds/reversals, reconciliation, financial corrections, and recovery procedures.
 - [ ] 10. Free-budget hosting assessment, secure public demo deployment, and release walkthrough.
 
@@ -142,15 +148,25 @@ These are known and deliberate, not oversights:
 - **Breaker and backoff defaults are not derived from measurement.** They are reasonable development
   values; the retry budget is documented so it can be reasoned about.
 - **No outbox or event retention policy yet.** Published rows accumulate.
-- **Still absent:** refunds, reconciliation, distributed tracing, measured performance limits, and any
-  public deployment.
+- **Measured performance is one laptop, not a capacity figure.** The sustained rate in
+  [performance.md](performance.md) was measured with the load generator, application, database and
+  broker sharing ten CPUs, and with PostgreSQL on tmpfs with `fsync` off. It describes this machine's
+  behaviour, not a deployment's.
+- **The delivery path saturates before the API does.** Above roughly 60 events per second on that
+  hardware, publication stops keeping pace with commitment and the backlog competes with the API for
+  CPU. Correctness is unaffected; throughput is not improved, only located.
+- **Tracing keeps one trace open for the life of an event.** Under a broker outage that is minutes, and
+  a backend that closes traces on a fixed window will show such a trace in pieces.
+- **Traces are exported only when a collector is configured.** With none, spans are still created and
+  their ids still reach logs, but nothing leaves the process.
+- **Still absent:** refunds, reconciliation, and any public deployment.
 
 ## Guidance for the next implementation session
 
 Read [architecture.md](architecture.md), the [ADRs](adr/), and the [API contract](openapi.yaml) before
-extending this. Checkpoint 8 is correlated telemetry and measured performance limits. The signals it
-needs already exist as distinct health and metrics surfaces; what is missing is correlation across the
-payment transaction, the dispatcher, and the consumer, and any measurement with a stated method.
+extending this. Checkpoint 9 is refunds, reversals and reconciliation against the append-only ledger.
+Nothing in the ledger may be rewritten to support it: a correction is a new entry, and the sealed
+journal constraint is there to make that the only option.
 
 Start by confirming the current suite and both demos, with the test stack from `compose.test.yaml`.
 Integration tests install failure-injection triggers and create a throwaway database, so they must not
@@ -167,7 +183,7 @@ financial mutation. Preserve the dashboard's own: the `/ui` session chain separa
 idempotency key, and an unknown outcome reported as unknown rather than as success or failure. The
 architecture tests enforce the isolation rules; do not relax them to make a new dependency convenient.
 
-Schema changes go in new Flyway migrations after V6. Do not edit an applied migration, and extend the
+Schema changes go in new Flyway migrations after V7. Do not edit an applied migration, and extend the
 migration upgrade check when a new one backfills anything.
 
 Keep generated credentials, `.env`, local database and runtime files under `.local/`, and build output

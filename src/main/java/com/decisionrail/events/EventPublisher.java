@@ -1,6 +1,7 @@
 package com.decisionrail.events;
 
 import com.decisionrail.resilience.CircuitBreaker;
+import com.decisionrail.telemetry.DeliveryTracing;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CompletableFuture;
@@ -33,14 +34,17 @@ public class EventPublisher {
     private final CircuitBreaker breaker;
     private final DeliveryFaults faults;
     private final MeterRegistry metrics;
+    private final DeliveryTracing tracing;
 
     public EventPublisher(KafkaTemplate<String, String> kafka, DeliveryProperties properties,
-                          CircuitBreaker brokerBreaker, DeliveryFaults faults, MeterRegistry metrics) {
+                          CircuitBreaker brokerBreaker, DeliveryFaults faults, MeterRegistry metrics,
+                          DeliveryTracing tracing) {
         this.kafka = kafka;
         this.properties = properties;
         this.breaker = brokerBreaker;
         this.faults = faults;
         this.metrics = metrics;
+        this.tracing = tracing;
     }
 
     /** Broker-confirmed placement of a record. */
@@ -79,6 +83,10 @@ public class EventPublisher {
                 .add(new RecordHeader("schemaVersion", Integer.toString(event.schemaVersion()).getBytes(StandardCharsets.UTF_8)))
                 .add(new RecordHeader("merchantId", event.merchantId().getBytes(StandardCharsets.UTF_8)))
                 .add(new RecordHeader("aggregateSequence", Long.toString(event.aggregateSequence()).getBytes(StandardCharsets.UTF_8)));
+        // Trace context travels as a header, never in the payload: the payload bytes are what a
+        // consumer fingerprints for deduplication, so putting correlation there would change event
+        // identity on every attempt and invalidate every fingerprint already recorded.
+        tracing.inject(record.headers());
 
         CompletableFuture<SendResult<String, String>> pending;
         try {

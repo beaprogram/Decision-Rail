@@ -1,0 +1,27 @@
+# Provisioned so the stack is useful the moment it starts. Nobody should have to click through a
+# datasource wizard to answer "why is this slow".
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: decisionrail-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      timeInterval: 15s
+      # Links a metric to the traces recorded at the same moment.
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: decisionrail-tempo
+
+  - name: Tempo
+    type: tempo
+    uid: decisionrail-tempo
+    access: proxy
+    url: http://tempo:3200
+    jsonData:
+      # Jumps from a span to the metrics of the service it belongs to.
+      tracesToMetrics:
+        datasourceUid: decisionrail-prometheus

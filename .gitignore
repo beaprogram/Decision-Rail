@@ -25,3 +25,8 @@
 # Browser traces and screenshots from end-to-end runs can contain session cookies and tenant data.
 /frontend/e2e-artifacts/
 /screenshots/
+observability/prometheus/scrape-credentials.yml
+
+# Benchmark application logs. The sanitised result files beside them are the evidence; these are
+# megabytes of Spring Boot startup output with nothing reproducible in them.
+/benchmark/results/*.log

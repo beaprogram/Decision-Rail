@@ -1,0 +1,68 @@
+{
+  "recordedAt": "2026-09-13T04:26:42.969476+00:00",
+  "measuredRevision": "5f3f178ceaea486cbea82ba3cdb52d57859429e3",
+  "workingTreeDirty": true,
+  "scenario": "retries",
+  "repetition": 1,
+  "workload": {
+    "model": "open (constant arrival rate); the generator keeps offering the rate whether or not the application keeps up",
+    "offeredRatePerSecond": 20.0,
+    "duration": "30s",
+    "warmupExcluded": true,
+    "accounts": 24,
+    "seed": 20260913,
+    "authentication": "HTTP Basic, enabled; password verification is included in every measured request"
+  },
+  "achieved": {
+    "httpRequests": 2336,
+    "httpRequestRatePerSecond": 76.36897058073545,
+    "droppedIterations": 17,
+    "failedRequestRate": 0
+  },
+  "businessOperations": {
+    "authorizedRemaining": 584,
+    "captured": 0,
+    "voided": 0,
+    "declined": 0,
+    "idempotencyKeysUsed": 584,
+    "captureJournals": 0,
+    "durableEventsWritten": 584
+  },
+  "latencyMilliseconds": {
+    "authorize": null,
+    "capture": null,
+    "void": null,
+    "allHttp": {
+      "samples": 2336,
+      "p50_ms": 561.6036425,
+      "p95_ms": 820.3578417499999,
+      "p99_ms": 968.28008175,
+      "max_ms": 1333.70886
+    }
+  },
+  "asynchronous": {
+    "drainSeconds": 45,
+    "drainedMeans": "no unpublished outbox row remains and every payment's projection matches its authoritative status"
+  },
+  "telemetry": {
+    "tracingSampleRate": 1.0,
+    "otlpExportEnabled": false,
+    "prometheusScrapedDuringRun": false,
+    "note": "Spans are created at the sampled rate regardless of export. Export off means they are dropped rather than sent."
+  },
+  "environment": {
+    "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "arch": "arm64",
+    "cpuCount": 10,
+    "java": "openjdk version \"21.0.11\" 2026-04-21",
+    "database": "PostgreSQL 16 in Docker, tmpfs storage, fsync=off, max_connections=200, shared_buffers=256MB",
+    "broker": "Apache Kafka 3.9.1, single node, replication factor 1",
+    "applicationHost": "same machine as the load generator and the infrastructure containers"
+  },
+  "limitations": [
+    "Load generator, application, database and broker share one machine, so they compete for the same CPU.",
+    "PostgreSQL runs on tmpfs with fsync off, which flatters write latency and is not a production storage profile.",
+    "A single JVM and a single broker node. No replication, no horizontal scaling, no network between tiers.",
+    "One run of one workload shape. Percentiles are reported per run and never averaged across runs."
+  ]
+}

@@ -2,7 +2,9 @@ package com.decisionrail.events;
 
 import com.decisionrail.resilience.Backoff;
 import com.decisionrail.resilience.CircuitBreaker;
+import com.decisionrail.telemetry.DeliveryTracing;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -49,13 +51,14 @@ public class OutboxDispatcher {
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final MeterRegistry metrics;
+    private final DeliveryTracing tracing;
     private final Backoff backoff;
     private final ExecutorService sendPool;
     private final String workerId;
 
     public OutboxDispatcher(OutboxStore store, EventPublisher publisher, DeliveryProperties properties,
                             DeliveryFaults faults, CircuitBreaker brokerBreaker, TransactionTemplate transactions,
-                            Clock clock, MeterRegistry metrics) {
+                            Clock clock, MeterRegistry metrics, DeliveryTracing tracing) {
         this.store = store;
         this.publisher = publisher;
         this.properties = properties;
@@ -64,6 +67,7 @@ public class OutboxDispatcher {
         this.transactions = transactions;
         this.clock = clock;
         this.metrics = metrics;
+        this.tracing = tracing;
         this.backoff = new Backoff(properties.dispatcher().backoffBase(), properties.dispatcher().backoffCeiling(),
                 properties.dispatcher().backoffMultiplier(), new java.util.Random());
         this.workerId = buildWorkerId();
@@ -145,15 +149,31 @@ public class OutboxDispatcher {
     private enum Outcome { PUBLISHED, RETRY_SCHEDULED, TERMINALLY_FAILED, LEASE_LOST, SHORT_CIRCUITED }
 
     private Outcome deliver(ClaimedEvent event) {
+        // One span per attempt, continuing the trace of the command that produced the event. It is
+        // opened here and closed in the finally below so it also covers recording the acknowledgement,
+        // which is the part that decides whether the send counts as complete. Closing on every path is
+        // what stops context leaking onto the next event this pooled thread handles.
+        try (DeliveryTracing.Scope span = tracing.publishAttempt(event.origin(), event.eventType(), event.attempts())) {
+            return deliverTraced(event, span);
+        }
+    }
+
+    private Outcome deliverTraced(ClaimedEvent event, DeliveryTracing.Scope span) {
         EventPublisher.Acknowledgement acknowledgement;
+        Timer.Sample sample = Timer.start(metrics);
         try {
             acknowledgement = publisher.publish(event);
         } catch (BrokerSendException failure) {
+            sample.stop(publishTimer("failed"));
+            span.failed(failure);
             return recordFailure(event, failure);
         } catch (RuntimeException unexpected) {
+            sample.stop(publishTimer("failed"));
+            span.failed(unexpected);
             return recordFailure(event, new BrokerSendException(
                     "Unexpected publish failure: " + unexpected.getClass().getSimpleName(), true, unexpected));
         }
+        sample.stop(publishTimer("acknowledged"));
         try {
             // Failpoint for the acknowledged-but-not-recorded window. Inert in production.
             faults.afterAcknowledgement(event.aggregateId());
@@ -166,11 +186,29 @@ public class OutboxDispatcher {
         if (!recorded) {
             // The send really happened; another worker now owns the row and will send again.
             metrics.counter("decisionrail.outbox.lease.lost").increment();
+            span.tag("decisionrail.outcome", "lease_lost");
             log.warn("Lease lost for event {} after acknowledgement; a duplicate delivery is expected", event.id());
             return Outcome.LEASE_LOST;
         }
         metrics.counter("decisionrail.outbox.published").increment();
+        // Only now is the send complete: acknowledged by the broker and recorded under a lease we
+        // still held. An acknowledgement alone is not a completion, and the two are logged apart.
+        span.tag("decisionrail.outcome", "published");
         return Outcome.PUBLISHED;
+    }
+
+    /**
+     * How long one publication attempt took, split by how it ended.
+     *
+     * <p>Separate from the attempt counters, which say how often; this says how long, and a
+     * percentile over failures mixed with successes would describe neither.
+     */
+    private Timer publishTimer(String outcome) {
+        return Timer.builder("decisionrail.outbox.publish.duration")
+                .description("Duration of one outbox publication attempt, from send to acknowledgement")
+                .tag("outcome", outcome)
+                .publishPercentileHistogram()
+                .register(metrics);
     }
 
     private Outcome recordFailure(ClaimedEvent event, BrokerSendException failure) {

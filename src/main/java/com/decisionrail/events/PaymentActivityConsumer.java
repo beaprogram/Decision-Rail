@@ -1,6 +1,8 @@
 package com.decisionrail.events;
 
+import com.decisionrail.telemetry.DeliveryTracing;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.time.Clock;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.slf4j.Logger;
@@ -39,15 +41,18 @@ public class PaymentActivityConsumer {
     private final DeliveryProperties properties;
     private final Clock clock;
     private final MeterRegistry metrics;
+    private final DeliveryTracing tracing;
 
     public PaymentActivityConsumer(EventContract contract, InboxStore inbox, TransactionTemplate transactions,
-                                   DeliveryProperties properties, Clock clock, MeterRegistry metrics) {
+                                   DeliveryProperties properties, Clock clock, MeterRegistry metrics,
+                                   DeliveryTracing tracing) {
         this.contract = contract;
         this.inbox = inbox;
         this.transactions = transactions;
         this.properties = properties;
         this.clock = clock;
         this.metrics = metrics;
+        this.tracing = tracing;
     }
 
     @KafkaListener(
@@ -57,24 +62,58 @@ public class PaymentActivityConsumer {
             containerFactory = "paymentEventListenerFactory")
     public void consume(ConsumerRecord<String, String> record, Acknowledgment acknowledgment) {
         String group = properties.projectionGroup();
+        // Continues the publisher's trace when the header is there, and starts a fresh one when it is
+        // not, which is what an event written before correlation existed produces. The scope closes on
+        // every path, including quarantine, so nothing leaks onto the next record this thread polls.
+        try (DeliveryTracing.Scope span = tracing.consume(record.headers(), group, "consumer.project")) {
+            Timer.Sample sample = Timer.start(metrics);
+            String outcome = "failed";
+            try {
+                outcome = consumeTraced(group, record, span);
+                // Reached only when the database transaction committed or the record was quarantined.
+                //
+                // Deliberately not in the finally below. Acknowledging here is what makes the offset
+                // move, and a storage failure that prevents even the quarantine record from being
+                // written must leave the offset where it is so the record is redelivered. Putting this
+                // in a finally would acknowledge work that was never recorded, which turns a
+                // recoverable outage into lost events.
+                acknowledgment.acknowledge();
+            } finally {
+                // The timer does belong in a finally: a failed attempt still took time, and its
+                // duration is recorded under its own outcome rather than disappearing.
+                sample.stop(Timer.builder("decisionrail.consumer.processing.duration")
+                        .description("Time to process one record, from receipt to committed effect or quarantine")
+                        .tag("group", group)
+                        .tag("outcome", outcome)
+                        .publishPercentileHistogram()
+                        .register(metrics));
+            }
+        }
+    }
+
+    private String consumeTraced(String group, ConsumerRecord<String, String> record, DeliveryTracing.Scope span) {
         EventContract.Parsed parsed;
         try {
             parsed = contract.parse(record.value());
         } catch (EventContractException rejected) {
+            span.failed(rejected);
             quarantine(group, rejected, null, record);
-            acknowledgment.acknowledge();
-            return;
+            return "quarantined";
         }
+        span.tag("decisionrail.event_type", parsed.envelope().eventType());
         try {
-            apply(group, parsed, record);
+            return apply(group, parsed, record);
         } catch (EventContractException rejected) {
+            span.failed(rejected);
             quarantine(group, rejected, parsed.envelope().eventId(), record);
+            return "quarantined";
         }
-        // Reached only when the database transaction committed or the record was quarantined.
-        acknowledgment.acknowledge();
     }
 
-    private void apply(String group, EventContract.Parsed parsed, ConsumerRecord<String, String> record) {
+    private String apply(String group, EventContract.Parsed parsed, ConsumerRecord<String, String> record) {
+        // What actually happened, decided inside the transaction and read after it commits. A
+        // duplicate delivery and a newly applied effect are different facts and are never merged.
+        java.util.concurrent.atomic.AtomicReference<String> outcome = new java.util.concurrent.atomic.AtomicReference<>("applied");
         transactions.executeWithoutResult(status -> {
             EventEnvelope envelope = parsed.envelope();
             if (!inbox.merchantExists(envelope.merchantId())) {
@@ -88,19 +127,23 @@ public class PaymentActivityConsumer {
                         "Event id " + envelope.eventId() + " was already consumed with different content");
                 case DUPLICATE -> {
                     metrics.counter("decisionrail.consumer.duplicates", "group", group).increment();
+                    outcome.set("duplicate");
                     log.debug("Ignoring duplicate delivery of event {}", envelope.eventId());
                 }
                 case FIRST_DELIVERY -> {
                     if (inbox.applyToProjection(envelope, clock.instant())) {
                         metrics.counter("decisionrail.consumer.applied", "group", group).increment();
+                        outcome.set("applied");
                     } else {
                         metrics.counter("decisionrail.consumer.out_of_order", "group", group).increment();
+                        outcome.set("out_of_order");
                         log.warn("Event {} carried sequence {} which is not newer than the projection; recorded but not applied",
                                 envelope.eventId(), envelope.aggregateSequence());
                     }
                 }
             }
         });
+        return outcome.get();
     }
 
     private void quarantine(String group, EventContractException rejected, java.util.UUID eventId,

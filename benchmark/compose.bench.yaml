@@ -1,0 +1,64 @@
+# Isolated infrastructure for benchmarking.
+#
+# Deliberately separate from both the development stack (compose.yaml) and the disposable test stack
+# (compose.test.yaml), on ports that collide with neither. A benchmark must not spend the development
+# accounts' balances, must not stop the development broker, and must not race the integration suite's
+# fault injection. Those are three different ways to corrupt a measurement, and the cheapest fix is a
+# stack of its own that is destroyed afterwards.
+#
+# PostgreSQL runs on tmpfs so a teardown leaves nothing behind and disk latency does not become the
+# thing being measured. That is a deliberate deviation from production storage and is recorded in the
+# benchmark report, because it flatters write latency.
+
+name: decisionrail-bench
+
+services:
+  bench-database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: decisionrail_bench
+      POSTGRES_USER: decisionrail
+      POSTGRES_PASSWORD: local-bench-only
+    command:
+      - postgres
+      # Stated in the report: these are the settings the numbers were produced under.
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - fsync=off
+    tmpfs:
+      - /var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:55435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U decisionrail -d decisionrail_bench"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  bench-broker:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,EXTERNAL://:19094
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://bench-broker:9092,EXTERNAL://127.0.0.1:19094
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT,EXTERNAL:PLAINTEXT
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@bench-broker:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      CLUSTER_ID: bench-cluster-decisionrail
+    ports:
+      - "127.0.0.1:19094:19094"
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server bench-broker:9092 --list || exit 1"]
+      interval: 5s
+      timeout: 10s
+      retries: 30

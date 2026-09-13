@@ -3,7 +3,9 @@ package com.decisionrail.payments;
 import com.decisionrail.decision.DecisionEngine;
 import com.decisionrail.decision.DecisionInput;
 import com.decisionrail.decision.DecisionResult;
+import com.decisionrail.telemetry.Correlation;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -23,12 +25,15 @@ public class PaymentService {
     private final DecisionEngine engine;
     private final Clock clock;
     private final MeterRegistry metrics;
+    private final Correlation correlation;
 
-    public PaymentService(PaymentStore store, DecisionEngine engine, Clock clock, MeterRegistry metrics) {
+    public PaymentService(PaymentStore store, DecisionEngine engine, Clock clock, MeterRegistry metrics,
+                          Correlation correlation) {
         this.store = store;
         this.engine = engine;
         this.clock = clock;
         this.metrics = metrics;
+        this.correlation = correlation;
     }
 
     @Transactional(timeout = 15)
@@ -43,7 +48,9 @@ public class PaymentService {
         return idempotent(merchant, key, fingerprint, () -> {
             AccountView account = store.account(merchant, command.accountId(), true);
             if (!account.currency().equals(currency)) throw new PaymentException("CURRENCY_MISMATCH", 422, "Payment currency must match the account currency.");
-            DecisionResult decision = metrics.timer("decisionrail.decision.duration").record(() -> engine.evaluate(input));
+            // Timed at the calling boundary. The evaluator itself stays free of Micrometer, Spring and
+            // clocks, which is what lets replay and shadow reuse it unchanged.
+            DecisionResult decision = decisionTimer().record(() -> engine.evaluate(input));
             PaymentStatus status = switch (decision.outcome()) {
                 case APPROVE -> account.availableMinor() >= command.amountMinor() ? PaymentStatus.AUTHORIZED : PaymentStatus.DECLINED;
                 case REVIEW -> PaymentStatus.REVIEW;
@@ -56,6 +63,10 @@ public class PaymentService {
             if (status == PaymentStatus.AUTHORIZED) store.reserve(account.id(), command.amountMinor());
             store.insert(merchant, payment);
             store.recordEvent(merchant, payment);
+            // Counted after the writes are staged in this transaction and before it commits. The
+            // counter says a command produced this outcome; whether the money moved is the ledger's
+            // statement, not a metric's.
+            recordOutcome("authorize", status, decision, failureCode);
             return new CommandResult(payment, 201, false);
         });
     }
@@ -97,6 +108,8 @@ public class PaymentService {
         PaymentView updated = new PaymentView(existing.id(), existing.accountId(), existing.amountMinor(), existing.currency(), existing.country(),
                 target, existing.decision(), existing.failureCode(), existing.createdAt(), updatedAt);
         store.recordEvent(merchant, updated);
+        recordOutcome(target == PaymentStatus.CAPTURED ? "capture" : "void", target, existing.decision(),
+                existing.failureCode());
         return new CommandResult(updated, 200, false);
     }
 
@@ -106,14 +119,52 @@ public class PaymentService {
         }
         String hash = sha256(fingerprint);
         PaymentStore.IdempotencyRecord record = store.claimKey(merchant, key, hash);
-        if (!record.requestHash().equals(hash)) throw new PaymentException("IDEMPOTENCY_CONFLICT", 409, "This Idempotency-Key was already used for a different request.");
+        if (!record.requestHash().equals(hash)) {
+            metrics.counter("decisionrail.idempotency.conflicts").increment();
+            throw new PaymentException("IDEMPOTENCY_CONFLICT", 409, "This Idempotency-Key was already used for a different request.");
+        }
         if (record.responseBody() != null) {
             metrics.counter("decisionrail.idempotency.replayed").increment();
+            // This request is its own trace. It points at the operation it is replaying rather than
+            // pretending to be it, and the original's provenance is left exactly as it was.
+            if (record.originTraceId() != null) {
+                correlation.tagCurrentSpan("decisionrail.replay_of_trace_id", record.originTraceId());
+            }
             return new CommandResult(store.decodePayment(record.responseBody()), record.httpStatus(), true);
         }
         CommandResult result = action.get();
         store.completeKey(merchant, key, result);
         return result;
+    }
+
+    /**
+     * How long evaluating the active policy took.
+     *
+     * <p>Deliberately separate from HTTP latency: rule evaluation is microseconds of pure computation,
+     * and burying it inside a figure that also contains authentication, a database round trip and row
+     * locking would say nothing about either.
+     */
+    private Timer decisionTimer() {
+        return Timer.builder("decisionrail.decision.duration")
+                .description("Policy evaluation only, excluding HTTP, authentication and database work")
+                .publishPercentileHistogram()
+                .register(metrics);
+    }
+
+    /**
+     * What a command decided, as bounded facts.
+     *
+     * <p>Every tag is a closed enumeration. No payment id, account id, merchant id or policy version
+     * appears here: those grow without limit and would turn the metrics backend into its own outage.
+     * A funding decline is tagged apart from a policy decline because they are different events with
+     * different operator responses, and collapsing them is the mistake this project keeps correcting.
+     */
+    private void recordOutcome(String operation, PaymentStatus status, DecisionResult decision, String failureCode) {
+        metrics.counter("decisionrail.payments.commands",
+                "operation", operation,
+                "status", status.name(),
+                "risk_outcome", decision == null ? "none" : decision.outcome().name(),
+                "funding", failureCode == null ? "none" : failureCode).increment();
     }
 
     private Instant now() { return clock.instant().truncatedTo(ChronoUnit.MICROS); }

@@ -1,0 +1,27 @@
+# Single-binary Tempo with local storage. Enough to open one trace; not a production deployment.
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+
+ingester:
+  # Short, so a trace opened during a run appears without waiting for a long flush.
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    # Bounded retention, matching Prometheus. Local disk is not an archive.
+    block_retention: 6h
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal

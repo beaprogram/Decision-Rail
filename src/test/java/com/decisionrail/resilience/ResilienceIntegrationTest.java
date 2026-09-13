@@ -70,6 +70,7 @@ class ResilienceIntegrationTest {
     @Autowired OutboxDispatcher dispatcher;
     @Autowired OutboxStore outbox;
     @Autowired EventPublisher publisher;
+    @Autowired com.decisionrail.telemetry.DeliveryTracing tracing;
     @Autowired DeliveryProperties properties;
     @Autowired DeliveryFaults faults;
     @Autowired CircuitBreaker brokerBreaker;
@@ -135,7 +136,7 @@ class ResilienceIntegrationTest {
 
         // A genuinely different worker identity stands in for the restarted process.
         OutboxDispatcher restarted = new OutboxDispatcher(outbox, publisher, properties, faults, brokerBreaker,
-                transactions, clock, metrics);
+                transactions, clock, metrics, tracing);
         assertThat(restarted.workerId()).isNotEqualTo("worker-before-restart");
 
         // It cannot simply steal the claim; the work becomes available when the lease expires.

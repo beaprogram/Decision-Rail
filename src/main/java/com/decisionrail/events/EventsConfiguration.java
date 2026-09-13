@@ -2,8 +2,10 @@ package com.decisionrail.events;
 
 import com.decisionrail.resilience.CircuitBreaker;
 import io.micrometer.core.instrument.Gauge;
+import com.decisionrail.telemetry.Cached;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.time.Clock;
+import java.time.Duration;
 import java.util.HashMap;
 import java.util.Map;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -153,24 +155,45 @@ public class EventsConfiguration {
         return new DeliveryMetrics(outbox, inbox, brokerBreaker, properties, clock, registry);
     }
 
-    /** Registers gauges that read current backlog and breaker state on scrape. */
+    /**
+     * Registers gauges for backlog and breaker state.
+     *
+     * <p>The backlog figures come from one cached aggregate rather than a {@code count(*)} per status
+     * per scrape. Each of those was a full count over a table that grows for the life of the
+     * deployment, so the cost of watching the system used to rise with its own history. The cached
+     * value is at most {@link #BACKLOG_FRESHNESS} old, which is stated in the metric catalogue, and it
+     * reports no data rather than zero when the database cannot answer.
+     */
     public static class DeliveryMetrics {
+        /** How stale a backlog reading may be. Shorter than any sensible alert window. */
+        public static final Duration BACKLOG_FRESHNESS = Duration.ofSeconds(5);
+
         public DeliveryMetrics(OutboxStore outbox, InboxStore inbox, CircuitBreaker breaker,
                                DeliveryProperties properties, Clock clock, MeterRegistry registry) {
+            Cached<OutboxBacklog> backlog = new Cached<>("outbox.backlog", BACKLOG_FRESHNESS, clock,
+                    () -> outbox.backlog(clock.instant(), breaker.state().name()));
             for (String status : new String[]{"PENDING", "CLAIMED", "PUBLISHED", "FAILED"}) {
-                Gauge.builder("decisionrail.outbox.backlog", () -> outbox.countByStatus(status))
-                        .description("Outbox rows by delivery status")
+                Gauge.builder("decisionrail.outbox.backlog",
+                                () -> backlog.reading(current -> current.countsByStatus().getOrDefault(status, 0L)))
+                        .description("Outbox rows by delivery status, at most " + BACKLOG_FRESHNESS.toSeconds() + "s old")
                         .tag("status", status)
                         .register(registry);
             }
-            Gauge.builder("decisionrail.outbox.backlog.age", () -> outbox.oldestUndeliveredAgeSeconds(clock.instant()))
-                    .description("Age in seconds of the oldest undelivered outbox event")
+            Gauge.builder("decisionrail.outbox.backlog.age",
+                            () -> backlog.reading(OutboxBacklog::oldestPendingAgeSeconds))
+                    .description("Age of the oldest undelivered outbox event, measured from its occurred_at")
                     .baseUnit("seconds")
+                    .register(registry);
+            Gauge.builder("decisionrail.outbox.blocked.payments",
+                            () -> backlog.reading(OutboxBacklog::blockedPaymentCount))
+                    .description("Payments whose event stream is blocked by a terminally failed event")
                     .register(registry);
             Gauge.builder("decisionrail.broker.breaker.state", breaker::stateCode)
                     .description("Broker circuit breaker state: 0 closed, 1 half-open, 2 open")
                     .register(registry);
-            Gauge.builder("decisionrail.consumer.quarantine.size", () -> inbox.quarantineCount(properties.projectionGroup()))
+            Cached<Long> quarantined = new Cached<>("consumer.quarantine", BACKLOG_FRESHNESS, clock,
+                    () -> inbox.quarantineCount(properties.projectionGroup()));
+            Gauge.builder("decisionrail.consumer.quarantine.size", () -> quarantined.reading(Long::doubleValue))
                     .description("Records the projection consumer refused to apply")
                     .tag("group", properties.projectionGroup())
                     .register(registry);

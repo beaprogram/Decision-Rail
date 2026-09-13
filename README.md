@@ -10,9 +10,9 @@ It now answers a second one: **when the broker is down, a worker dies mid-send, 
 
 The transactional payment core handles synthetic funds with merchant isolation, concurrency-safe authorizations, durable idempotency, versioned policy decisions, and a balanced capture journal. On top of that, committed events are delivered to Kafka in per-payment order with idempotent consumers, candidate policies can be replayed against real history or evaluated alongside live traffic without touching it, and the new dependencies have explicit, tested failure behaviour. All of it is now usable through an operator console served by the same application.
 
-**Status:** **7 of 10 planned scope checkpoints** · Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Kafka 3.9 · React 19 + TypeScript
+**Status:** **8 of 10 planned scope checkpoints** · Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Kafka 3.9 · React 19 + TypeScript
 
-“Approximately 70%” refers to those equally weighted scope checkpoints, not elapsed effort or production readiness. See the [delivery ledger](docs/roadmap.md) for the exact boundary and [PROGRESS.md](docs/PROGRESS.md) for the material limitations.
+“Approximately 80%” refers to those equally weighted scope checkpoints, not elapsed effort or production readiness. See the [delivery ledger](docs/roadmap.md) for the exact boundary and [PROGRESS.md](docs/PROGRESS.md) for the material limitations.
 
 ## What is implemented
 
@@ -212,11 +212,27 @@ Seven screens, all against real data from the same application:
 - **Policy replay and shadow.** Compare a candidate against real history or alongside live authorizations, with baseline and candidate explanations side by side and the divergence denominator stated.
 - **Event delivery.** Liveness, readiness, and asynchronous capability as three distinct signals, plus backlog counts, stalled payment streams, and a redrive control that requires an explicit selection.
 
+## Telemetry and measured performance
+
+One synthetic payment can be followed from its HTTP command through the durable event it committed,
+each publication attempt, the broker record, and the committed projection effect — after a restart,
+because the trace of the command is written beside the event in the same transaction rather than held
+in a thread. Structured JSON logs carry the same identifiers, and the
+[metric catalogue](docs/observability.md) documents every series, its units, its bounded labels and how
+fresh it is. An optional local Prometheus, Tempo and Grafana stack is provisioned in source control.
+
+Performance is measured, not asserted. On one laptop with everything colocated, the system sustained
+**30 business operations per second (60 HTTP requests/s)** across three repetitions with no dropped
+work and authorize p99 between 174 and 250 ms; **40/s is the first failing level**. Through a
+25-second broker outage under load, **zero requests failed**, 800 events backlogged, and the backlog
+drained in 7 seconds. The method, the environment, the ceiling and the limitations are in
+[performance.md](docs/performance.md); the harness is in [benchmarking.md](docs/benchmarking.md).
+
 ## What comes next
 
-The next checkpoint is correlated telemetry with measured performance limits. After that come refunds and reconciliation against the append-only ledger, and a free-budget hosting assessment.
+The next checkpoint is refunds and reconciliation against the append-only ledger. After that comes a free-budget hosting assessment.
 
-Distributed tracing, measured throughput or latency figures, Redis features, refunds, reconciliation, candidate policy promotion, a highly available broker, and public deployment are **not included**. The console also authenticates against the identities in the generated local environment file and is not hardened for deployment to the public internet. The [roadmap](docs/roadmap.md) tracks the remaining checkpoints, and [PROGRESS.md](docs/PROGRESS.md) lists the material limitations of what is shipped.
+Redis features, refunds, reconciliation, candidate policy promotion, a highly available broker, and public deployment are **not included**. The console also authenticates against the identities in the generated local environment file and is not hardened for deployment to the public internet. The [roadmap](docs/roadmap.md) tracks the remaining checkpoints, and [PROGRESS.md](docs/PROGRESS.md) lists the material limitations of what is shipped.
 
 ## Portfolio value
 
