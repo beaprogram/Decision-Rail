@@ -34,6 +34,22 @@ const DURATION = __ENV.DURATION || '60s';
 const WARMUP = __ENV.WARMUP || '15s';
 const AMOUNT_MINOR = Number(__ENV.AMOUNT_MINOR || 500);
 
+/**
+ * Virtual users, sized so the generator is never the constraint.
+ *
+ * An arrival-rate executor drops an iteration when no virtual user is free at the moment it is due.
+ * The pool grows lazily, so a pool sized close to the steady-state need will drop work during a latency
+ * spike simply because allocating another user is not instantaneous - and those drops say something
+ * about the generator, not about the application.
+ *
+ * Sized by Little's law with headroom: concurrency is rate x iteration duration, an iteration is two
+ * sequential requests, and these rates have shown p99s near a second per request under load. Six times
+ * the rate covers a two-second iteration outright, and the ceiling is twice that again. Chosen as a
+ * rule before the runs rather than tuned afterwards until the drops disappeared.
+ */
+const PREALLOCATED_VUS = Math.max(50, RATE * 6);
+const MAX_VUS = Math.max(100, RATE * 12);
+
 if (!PASSWORD) throw new Error('MERCHANT_PASSWORD is required; it is read from the generated .env');
 if (ACCOUNTS.length === 0) throw new Error('ACCOUNT_IDS is required; the harness seeds them');
 
@@ -60,8 +76,8 @@ export const options = {
       rate: Math.max(1, Math.round(RATE / 2)),
       timeUnit: '1s',
       duration: WARMUP,
-      preAllocatedVUs: Math.max(10, RATE),
-      maxVUs: Math.max(50, RATE * 4),
+      preAllocatedVUs: PREALLOCATED_VUS,
+      maxVUs: MAX_VUS,
       tags: { phase: 'warmup' },
       exec: 'lifecycle',
     },
@@ -71,8 +87,8 @@ export const options = {
       timeUnit: '1s',
       duration: DURATION,
       startTime: WARMUP,
-      preAllocatedVUs: Math.max(10, RATE),
-      maxVUs: Math.max(50, RATE * 4),
+      preAllocatedVUs: PREALLOCATED_VUS,
+      maxVUs: MAX_VUS,
       tags: { phase: 'measured' },
       exec: 'lifecycle',
     },

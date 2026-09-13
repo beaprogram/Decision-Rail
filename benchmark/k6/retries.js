@@ -46,8 +46,9 @@ export const options = {
       rate: RATE,
       timeUnit: '1s',
       duration: DURATION,
-      preAllocatedVUs: Math.max(10, RATE),
-      maxVUs: Math.max(50, RATE * 4),
+      // Sized on the same rule as payments.js: the generator must not be the constraint.
+      preAllocatedVUs: Math.max(50, RATE * 6),
+      maxVUs: Math.max(100, RATE * 12),
       tags: { phase: 'measured' },
       exec: 'replay',
     },
