@@ -1,0 +1,133 @@
+{
+  "recordedAt": "2026-09-13T15:48:31.526223+00:00",
+  "measuredRevision": "f6b248be5a235585fd0f888292c102461f207934",
+  "workingTreeDirtyAtStart": "false",
+  "artifact": {
+    "jarSha256": "86d2414c69c5126cd91f428237b6a476b00ce4b0c6672b8b8969d7b15e90a2fc",
+    "jarBuiltAt": "2026-09-09T00:00:00Z",
+    "note": "the packaged jar actually executed; a revision alone does not establish what ran"
+  },
+  "scenario": "spread",
+  "repetition": "1",
+  "workload": {
+    "model": "open (constant arrival rate); the generator keeps offering the rate whether or not the application keeps up",
+    "offeredRatePerSecond": 30.0,
+    "duration": "60s",
+    "warmupExcluded": true,
+    "warmupSeparateScenario": "15s",
+    "accounts": 24,
+    "seed": 20260913,
+    "authentication": "HTTP Basic, enabled; password verification is included in every measured request"
+  },
+  "dropAttribution": {
+    "measured": 0,
+    "warmup": 0,
+    "aggregateAllScenarios": 0,
+    "reconciles": true,
+    "attributedBy": "the built-in scenario tag; custom scenario tags do not reach executor-dropped iterations"
+  },
+  "population": {
+    "phase": "measured",
+    "windowSeconds": 60.0,
+    "definition": "Samples tagged with the measured scenario. Warmup runs as a separate scenario at half rate and none of its samples appear in any figure below.",
+    "iterationsCompletedInWindow": 1801,
+    "lateCompletionsNote": "The window is when work was offered, not when the last response arrived. An iteration starting inside it and finishing after it keeps its measured tag, because k6 lets in-flight iterations finish during graceful stop. An iteration still unfinished when graceful stop ends contributes no sample at all, which is why the sample count can sit slightly below rate x window even with no dropped iterations. Both counts are reported so the gap is visible rather than assumed away.",
+    "offeredIterations": 1800.0
+  },
+  "achieved": {
+    "httpRequests": 3602,
+    "httpRequestRatePerSecond": 60.033,
+    "iterationRatePerSecond": 30.017,
+    "droppedIterations": 0,
+    "failedRequestRate": 0,
+    "unexpectedErrors": 0
+  },
+  "idempotentReplays": null,
+  "wholeRunIncludingWarmup": {
+    "note": "Reported only so the contaminated aggregate is visible rather than hidden; not a measurement.",
+    "authorizeAggregate": {
+      "samples": 2027,
+      "p50_ms": 146.006338,
+      "max_ms": 570.119277
+    },
+    "httpRequests": 4054
+  },
+  "businessOperations": {
+    "authorizedRemaining": 0,
+    "captured": 1345,
+    "voided": 682,
+    "declined": 0,
+    "idempotencyKeysUsed": 4054,
+    "captureJournals": 1345,
+    "durableEventsWritten": 4054
+  },
+  "latencyMilliseconds": {
+    "authorize": {
+      "samples": 1801,
+      "p50_ms": 152.724216,
+      "p95_ms": 327.919029,
+      "p99_ms": 450.379777,
+      "max_ms": 570.119277
+    },
+    "capture": {
+      "samples": 1199,
+      "p50_ms": 165.962883,
+      "p95_ms": 356.43979049999996,
+      "p99_ms": 494.98553711999995,
+      "max_ms": 609.875749
+    },
+    "void": {
+      "samples": 602,
+      "p50_ms": 149.876811,
+      "p95_ms": 328.04796894999987,
+      "p99_ms": 452.94648057999996,
+      "max_ms": 818.99933
+    },
+    "allHttp": {
+      "samples": 3602,
+      "p50_ms": 157.8682045,
+      "p95_ms": 336.965534,
+      "p99_ms": 468.24253613999997,
+      "max_ms": 818.99933
+    }
+  },
+  "asynchronous": {
+    "brokerOutageInjected": false,
+    "observedMaxUndeliveredBacklog": 120,
+    "backlogObservations": 31,
+    "backlogTimelineMarkers": 2,
+    "backlogFailedObservations": 0,
+    "backlogConfiguredDelaySeconds": 2.0,
+    "backlogObservedGapSeconds": {
+      "min": 2,
+      "median": 3,
+      "max": 3
+    },
+    "drainSecondsFromLoadEnd": 2,
+    "drainSecondsFromBrokerReachable": null,
+    "recoveryMeans": "the broker answered a topic listing again, not merely that the container start command returned",
+    "drainedMeans": "no unpublished outbox row remains and every payment's projection matches its authoritative status",
+    "timeline": "per-sample observations with timestamps are in the .backlog.tsv beside this file"
+  },
+  "telemetry": {
+    "tracingSampleRate": 1.0,
+    "otlpExportEnabled": false,
+    "prometheusScrapedDuringRun": false,
+    "note": "Spans are created at the sampled rate regardless of export. Export off means they are dropped rather than sent."
+  },
+  "environment": {
+    "os": "macOS-26.6.2-arm64-arm-64bit-Mach-O",
+    "arch": "arm64",
+    "cpuCount": 10,
+    "java": "openjdk version \"21.0.11\" 2026-04-21",
+    "database": "PostgreSQL 16 in Docker, tmpfs storage, fsync=off, max_connections=200, shared_buffers=256MB",
+    "broker": "Apache Kafka 3.9.1, single node, replication factor 1",
+    "applicationHost": "same machine as the load generator and the infrastructure containers"
+  },
+  "limitations": [
+    "Load generator, application, database and broker share one machine, so they compete for the same CPU.",
+    "PostgreSQL runs on tmpfs with fsync off, which flatters write latency and is not a production storage profile.",
+    "A single JVM and a single broker node. No replication, no horizontal scaling, no network between tiers.",
+    "One run of one workload shape. Percentiles are reported per run and never averaged across runs."
+  ]
+}

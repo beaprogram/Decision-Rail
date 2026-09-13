@@ -42,13 +42,19 @@ const AMOUNT_MINOR = Number(__ENV.AMOUNT_MINOR || 500);
  * spike simply because allocating another user is not instantaneous - and those drops say something
  * about the generator, not about the application.
  *
- * Sized by Little's law with headroom: concurrency is rate x iteration duration, an iteration is two
- * sequential requests, and these rates have shown p99s near a second per request under load. Six times
- * the rate covers a two-second iteration outright, and the ceiling is twice that again. Chosen as a
- * rule before the runs rather than tuned afterwards until the drops disappeared.
+ * The generator has two ways to become the constraint and both have been observed here. Too few users
+ * and it drops work during a latency spike while the pool is still growing: 25/s runs peaked at 32 users
+ * against a pool growing from 50 to 60 and dropped iterations anyway. Too many and it exhausts the
+ * connection capacity of the Docker network between the container and the host: preallocating six times
+ * the rate meant 360 users across the two scenarios, and one run in three failed with `dial: i/o
+ * timeout` on connection establishment, with no application error of any kind.
+ *
+ * Three times the rate covers a three-second iteration by Little's law, which is far beyond any p99
+ * observed at these rates, while halving that connection footprint. Both scenarios preallocate, so the
+ * real total is twice this.
  */
-const PREALLOCATED_VUS = Math.max(50, RATE * 6);
-const MAX_VUS = Math.max(100, RATE * 12);
+const PREALLOCATED_VUS = Math.max(50, RATE * 3);
+const MAX_VUS = Math.max(100, RATE * 6);
 
 if (!PASSWORD) throw new Error('MERCHANT_PASSWORD is required; it is read from the generated .env');
 if (ACCOUNTS.length === 0) throw new Error('ACCOUNT_IDS is required; the harness seeds them');
