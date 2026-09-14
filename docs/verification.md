@@ -130,6 +130,16 @@ Backend tests went from 213 (checkpoint 8's recorded figure) to **281**, and bro
 | The administrative view | ADMIN 200; merchant, other merchant and operations all 403 | A broader view reachable by adding a query parameter |
 | Migration over existing records | Captured payments get their budget, uncaptured ones do not, stored responses are typed PAYMENT with unchanged bytes, historical event payloads gain no new fields, and a return works against a V1-era capture whose journal stays sealed | An upgrade that strands history or rewrites delivered events |
 
+### Running the browser suite locally
+
+The suite needs a database where `demo-merchant` has fewer than 100 accounts, because the dashboard's
+account picker lists only the 100 oldest and the tests authorize against accounts they have just
+created. CI is unaffected: it builds its database fresh. Locally, both the development database (104
+accounts) and the shared test database (1,169) have accumulated past that bound, so the recorded run
+used a throwaway database on the disposable PostgreSQL, with the packaged jar on port 8081 - the same
+arrangement CI uses, and dropped afterwards. The cap itself is a pre-existing limitation recorded in
+[PROGRESS.md](PROGRESS.md), not something this checkpoint introduced.
+
 ### Migration evidence against a real, populated database
 
 The throwaway-database check above proves the upgrade applies to constructed records. It was also

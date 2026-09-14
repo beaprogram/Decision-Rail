@@ -289,6 +289,14 @@ These are known and deliberate, not oversights:
   outage of the payment API too, which is exactly what readiness excluding the broker was meant to
   avoid. This is **not fixed here**: the fix belongs to the resilience checkpoint's listener lifecycle,
   not to the return lifecycle, and it needs its own tests.
+- **The dashboard's account picker silently shows only the 100 oldest accounts.**
+  `PaymentReadService.MAX_ACCOUNTS` is 100 and the query orders `created_at, id` ascending with no
+  pagination and no indication that the list was truncated, so a merchant with more than 100 accounts
+  cannot see or authorize against their newest ones. Pre-existing since checkpoint 7 (`87e34cb`) and
+  untouched here; it surfaced because checkpoint 9's demo and browser fixtures pushed the local
+  development database to 104 accounts for `demo-merchant`. It is inconsistent with how the payment
+  search reports `matchedCountCapped`, and the fix - paginate, or report the cap - belongs to the
+  operator console rather than to the return lifecycle.
 - **Recovery of an undelivered event across a real process boundary is not demonstrated.** What is
   demonstrated is that the outbox row alone suffices: every piece of the dispatcher's in-process state
   is discarded and delivery still happens with the committed identity. A genuine restart was attempted
