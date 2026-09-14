@@ -49,7 +49,7 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 Local evidence recorded **2026-09-14 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
 **3.9.1**.
 
-- Pinned-wrapper build and suite: **281 backend tests passed**, with **0 failures, 0 errors, and
+- Pinned-wrapper build and suite: **282 backend tests passed**, with **0 failures, 0 errors, and
   0 skipped**, up from 213 at checkpoint 8.
 - Dashboard: **41 frontend unit tests** and **53 browser end-to-end tests** with retries disabled, up
   from 44.

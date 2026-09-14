@@ -70,10 +70,10 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 Recorded **2026-09-14 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw clean test` passed **281 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
+`./mvnw clean verify` passed **282 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
 **41 frontend unit tests** and **53 browser end-to-end tests** with retries disabled. The table below is
 the checkpoint 8 record, kept because it is what the group breakdown was counted against; the checkpoint
-9 additions are listed in the section that follows it. The **281** figure is the current total and the
+9 additions are listed in the section that follows it. The **282** figure is the current total and the
 **213** figure is a historical record of an earlier revision — they are not two counts of the same thing.
 
 ### The earlier recorded result (checkpoint 8)
@@ -98,7 +98,7 @@ real PostgreSQL and Kafka, with retries disabled.
 
 ## What checkpoint 9 added
 
-Backend tests went from 213 (checkpoint 8's recorded figure) to **281**, and browser tests from 44 to
+Backend tests went from 213 (checkpoint 8's recorded figure) to **282**, and browser tests from 44 to
 **53**. The new coverage, and the failure each case exists to prevent:
 
 | Case | Evidence | Failure prevented |
