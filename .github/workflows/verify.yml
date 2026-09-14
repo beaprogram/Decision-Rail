@@ -54,7 +54,7 @@ jobs:
         run: ./mvnw --batch-mode --no-transfer-progress verify
       - name: Build application container
         run: docker build --tag decisionrail:ci .
-      - name: Run application container and both operator demos
+      - name: Run application container and the operator demos
         shell: bash
         run: |
           docker run --detach --name decisionrail-smoke --network host \
@@ -72,6 +72,12 @@ jobs:
             sleep 2
           done
           ./scripts/demo.sh
+          # Checkpoint 9: refunds, reversal, compensating journals and reconciliation. It creates its
+          # own account and undoes the one inconsistency it deliberately introduces, so it leaves the
+          # database as it found it.
+          COMPOSE_FILE_PATH=compose.test.yaml DATABASE_SERVICE=test-database \
+            DATABASE_NAME=decisionrail_test ADMIN_PASSWORD="$ADMIN_PASSWORD" ./scripts/lifecycle-demo.sh
+          # Last, because it stops the broker: anything after it would run against an outage it caused.
           COMPOSE_FILE_PATH=compose.test.yaml BROKER_SERVICE=test-broker \
             DATABASE_SERVICE=test-database DATABASE_NAME=decisionrail_test \
             ADMIN_PASSWORD="$ADMIN_PASSWORD" ./scripts/async-demo.sh
