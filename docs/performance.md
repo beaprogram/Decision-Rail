@@ -206,10 +206,17 @@ seven were never retried and their recovery was never exercised here.
 
 ### The seven failures
 
-All seven were `dial: i/o timeout` — the TCP connection was never established, so no HTTP request was
-sent. The application logged no error of any kind for that run, and **no idempotency record exists for
-those seven keys**, which is direct evidence that they never reached the application rather than an
-inference from the error text.
+All seven failed at `dial: i/o timeout`. That is the generator reporting that it never completed a TCP
+connection, so it never sent an HTTP request — and it is the **transport-level evidence that carries
+the conclusion**, not the absence of database rows.
+
+The database evidence is weaker than it was previously described here, and the distinction matters.
+**No idempotency record exists for those seven keys.** What that establishes is that no durable
+idempotency result was committed for them: no payment was created and no money moved. It does not by
+itself prove the bytes never arrived, because a request that reached the application and then failed
+before its transaction committed would leave exactly the same absence. The two pieces of evidence do
+different jobs: the dial error says the connection was never established, and the missing records
+confirm that nothing was committed either way.
 
 Why the connection failed is **not established by the retained evidence**. A dial timeout is consistent
 with saturation of the Docker network between the generator container and the host, and equally with
@@ -218,7 +225,7 @@ collected that would separate them. It is left unattributed rather than assigned
 comfortable of the two.
 
 The scenario's threshold tolerates a failure rate below 1%, which is why that run passed at 0.3%. The
-tolerance stays, because a connection that never reached the application says nothing about
+tolerance stays, because a connection that was never established says nothing about
 idempotency, but failed originals are now counted and reported, and a run with any of them is not
 described as a zero-failure demonstration.
 

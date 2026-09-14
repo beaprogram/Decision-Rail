@@ -7,6 +7,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatNoException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
  * What a worker sees when a test disarms fault injection while that worker is parked at a gate.
@@ -107,11 +109,47 @@ class DeliveryFaultsClearOrderingTest {
         // problem; asserting them keeps clear() honest about meaning "everything off".
         faults.afterAcknowledgement(aggregate);
         faults.beforeSend(aggregate);
-        long before = System.nanoTime();
-        faults.beforeShadowEvaluation("any-worker", aggregate);
-        assertThat(System.nanoTime() - before)
-                .as("the injected delay must be disarmed as well")
-                .isLessThan(TimeUnit.MILLISECONDS.toNanos(40));
+
+        // The delay is checked by interrupting the calling thread rather than by timing the call. An
+        // armed delay reaches Thread.sleep, which throws immediately when the interrupt flag is already
+        // set; a disarmed one never calls sleep at all and returns with the flag untouched. That
+        // distinguishes the two states from each other rather than from a wall-clock threshold, so a
+        // descheduled machine cannot fail it and a delay short enough to fit under the threshold
+        // cannot pass it.
+        Thread.currentThread().interrupt();
+        try {
+            assertThatNoException()
+                    .as("a disarmed delay must not sleep, so the interrupt must go unnoticed")
+                    .isThrownBy(() -> faults.beforeShadowEvaluation("any-worker", aggregate));
+            assertThat(Thread.currentThread().isInterrupted())
+                    .as("nothing should have consumed the interrupt, because nothing should have waited")
+                    .isTrue();
+        } finally {
+            Thread.interrupted();
+        }
+    }
+
+    /**
+     * Proves the check above can fail, so its passing means something.
+     *
+     * <p>An assertion that an interrupt survives a call is worth nothing unless an armed delay actually
+     * consumes it. This arms one and shows that the same call then fails instead.
+     */
+    @Test
+    void theDisarmedDelayCheckWouldFailIfTheDelayWereStillArmed() {
+        DeliveryFaults faults = new DeliveryFaults(true);
+        UUID aggregate = UUID.randomUUID();
+        faults.setShadowEvaluationDelayMillis(50);
+
+        Thread.currentThread().interrupt();
+        try {
+            assertThatThrownBy(() -> faults.beforeShadowEvaluation("any-worker", aggregate))
+                    .as("an armed delay reaches Thread.sleep, which refuses to run on an interrupted thread")
+                    .isInstanceOf(IllegalStateException.class)
+                    .hasMessageContaining("Interrupted during injected shadow delay");
+        } finally {
+            Thread.interrupted();
+        }
     }
 
     /** Starts a worker that parks in the failpoint and records whatever it comes out with. */

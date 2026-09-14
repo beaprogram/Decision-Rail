@@ -261,9 +261,16 @@ result = {
     "population": {
         "phase": "measured",
         "windowSeconds": MEASURED_SECONDS,
+        # Written from what this run actually contained rather than from what the harness offers every
+        # scenario. The generic sentence claimed a half-rate warmup scenario under every report,
+        # including the retry scenario, which declares none - leaving the prose contradicting the
+        # warmupExcluded field a few lines above it.
         "definition": (
             "Samples tagged with the measured scenario. Warmup runs as a separate scenario at half "
             "rate and none of its samples appear in any figure below."
+            if ("iterations" + WARMUP) in metrics else
+            "Samples tagged with the measured scenario. This scenario declares no warmup, so the "
+            "measured scenario is the whole run and there are no warmup samples to exclude."
         ),
         # k6 increments its iteration counter when an iteration ends, so this is completions
         # tagged with the measured scenario, not starts. Reported beside offeredIterations so the
@@ -327,7 +334,14 @@ result = {
         ),
     } if "replays_sent" + MEASURED in metrics else None),
     "wholeRunIncludingWarmup": {
-        "note": "Reported only so the contaminated aggregate is visible rather than hidden; not a measurement.",
+        # Same correction as population.definition: an aggregate is only contaminated when there is a
+        # warmup scenario mixed into it. Without one it is simply the measured scenario seen again.
+        "note": (
+            "Reported only so the contaminated aggregate is visible rather than hidden; not a measurement."
+            if ("iterations" + WARMUP) in metrics else
+            "No warmup scenario ran, so this aggregate covers the same samples as the measured phase. "
+            "Reported for completeness, not as a second measurement."
+        ),
         "authorizeAggregate": aggregate_trend("op_authorize"),
         "httpRequests": metrics.get("http_reqs", {}).get("count"),
     },
