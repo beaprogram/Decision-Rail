@@ -69,11 +69,21 @@ public class PaymentStore {
         return values.getFirst();
     }
 
-    /** Every account this merchant owns, oldest first. Ownership is part of the query. */
+    /**
+     * The merchant's accounts, newest first, bounded. Ownership is part of the query.
+     *
+     * <p>Ordered newest first rather than oldest first, which is what it was. Under a bounded list the
+     * ordering decides which accounts become invisible, and hiding the newest is the harmful direction:
+     * an account someone has just created is the one they are about to use, and it was falling off the
+     * end. Hiding the oldest is survivable, and matches how payments are already listed.
+     *
+     * <p>The bound is still a bound. A merchant with more accounts than the limit sees only this page
+     * of them, and the caller is expected to say so rather than present a truncated list as complete.
+     */
     public List<AccountView> accounts(String merchant, int limit) {
         return jdbc.query("""
                 SELECT id, currency, balance_minor, held_minor FROM accounts
-                WHERE merchant_id = ? ORDER BY created_at, id LIMIT ?
+                WHERE merchant_id = ? ORDER BY created_at DESC, id DESC LIMIT ?
                 """, (rs, n) -> new AccountView(rs.getObject(1, UUID.class), rs.getString(2).trim(),
                         rs.getLong(3), rs.getLong(4), rs.getLong(3) - rs.getLong(4)), merchant, limit);
     }

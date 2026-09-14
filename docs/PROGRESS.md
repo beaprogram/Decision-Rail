@@ -289,14 +289,15 @@ These are known and deliberate, not oversights:
   outage of the payment API too, which is exactly what readiness excluding the broker was meant to
   avoid. This is **not fixed here**: the fix belongs to the resilience checkpoint's listener lifecycle,
   not to the return lifecycle, and it needs its own tests.
-- **The dashboard's account picker silently shows only the 100 oldest accounts.**
-  `PaymentReadService.MAX_ACCOUNTS` is 100 and the query orders `created_at, id` ascending with no
-  pagination and no indication that the list was truncated, so a merchant with more than 100 accounts
-  cannot see or authorize against their newest ones. Pre-existing since checkpoint 7 (`87e34cb`) and
-  untouched here; it surfaced because checkpoint 9's demo and browser fixtures pushed the local
-  development database to 104 accounts for `demo-merchant`. It is inconsistent with how the payment
-  search reports `matchedCountCapped`, and the fix - paginate, or report the cap - belongs to the
-  operator console rather than to the return lifecycle.
+- **The dashboard's account list is still bounded at 100 and still unpaged**, though it no longer hides
+  the wrong end. It listed the 100 *oldest* accounts, ascending, with nothing said about truncation, so
+  a merchant with more than 100 could not see or authorize against the account they had just created.
+  Pre-existing since checkpoint 7 (`87e34cb`); it surfaced here because this checkpoint's fixtures
+  pushed both the development database (104 accounts) and a single CI run past that bound, and it
+  failed four browser tests. Now ordered newest first, and the screen says when the list is at its
+  limit rather than presenting a truncated list as complete. **Paging is still absent**: a merchant
+  with more than 100 accounts cannot reach the older ones from the dashboard at all. That remains the
+  operator console's work, not the return lifecycle's.
 - **Recovery of an undelivered event across a real process boundary is not demonstrated.** What is
   demonstrated is that the outbox row alone suffices: every piece of the dispatcher's in-process state
   is discarded and delivery still happens with the committed identity. A genuine restart was attempted

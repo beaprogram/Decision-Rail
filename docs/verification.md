@@ -130,15 +130,24 @@ Backend tests went from 213 (checkpoint 8's recorded figure) to **281**, and bro
 | The administrative view | ADMIN 200; merchant, other merchant and operations all 403 | A broader view reachable by adding a query parameter |
 | Migration over existing records | Captured payments get their budget, uncaptured ones do not, stored responses are typed PAYMENT with unchanged bytes, historical event payloads gain no new fields, and a return works against a V1-era capture whose journal stays sealed | An upgrade that strands history or rewrites delivered events |
 
-### Running the browser suite locally
+### The account list, and why this suite found it
 
-The suite needs a database where `demo-merchant` has fewer than 100 accounts, because the dashboard's
-account picker lists only the 100 oldest and the tests authorize against accounts they have just
-created. CI is unaffected: it builds its database fresh. Locally, both the development database (104
-accounts) and the shared test database (1,169) have accumulated past that bound, so the recorded run
-used a throwaway database on the disposable PostgreSQL, with the packaged jar on port 8081 - the same
-arrangement CI uses, and dropped afterwards. The cap itself is a pre-existing limitation recorded in
-[PROGRESS.md](PROGRESS.md), not something this checkpoint introduced.
+Four browser tests failed in CI on a fresh database, and locally on the development one, with
+`did not find some options` on the account picker. The cause was not the tests: the account list
+returned the 100 *oldest* accounts, so any account a test had just created was off the end once the
+shared database held more than a hundred. Both databases had - CI accumulates them within one run,
+since `verify`, the demos and the browser suite share it.
+
+Two things changed, and one deliberately did not. The list is now ordered newest first, because under
+a bound the ordering decides what disappears and hiding a just-created account is the harmful
+direction. The screen now says when the list is at its limit instead of presenting a truncated list as
+complete, which is what the payment search already does with `matchedCountCapped`. Paging was not
+added; it is the operator console's work and is recorded as still open.
+
+The browser helper also stopped selecting an account by position. It now creates its own funded
+account per authorization, which is what the rest of the suite already does and what makes each test
+independent of every other test's leftovers. The recorded run is against the development database at
+104 accounts - the population that exposed the problem - not a fresh one.
 
 ### Migration evidence against a real, populated database
 

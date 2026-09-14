@@ -8,7 +8,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.Instant;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
+import com.decisionrail.payments.PaymentReadService;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -392,4 +394,22 @@ class DashboardReadApiIntegrationTest {
     private MvcResult perform(MockHttpServletRequestBuilder request, String username, String role) throws Exception {
         return mvc.perform(request.with(user(username).roles(role))).andReturn();
     }
+    @Test
+    void theAccountListShowsTheNewestFirstAndIsBounded() throws Exception {
+        // The suite shares a database, so this merchant may already own more accounts than the list
+        // returns. That is the point: a just-created account has to be visible anyway, because it is
+        // the one someone is about to use. Ordered oldest-first, as this was, it fell off the end.
+        UUID newest = newAccount("demo-merchant", "CAD", 5_000);
+
+        List<Map<String, Object>> listed = json.readValue(
+                mvc.perform(get("/ui/accounts").with(user("demo-merchant").roles("MERCHANT")))
+                        .andReturn().getResponse().getContentAsString(),
+                new com.fasterxml.jackson.core.type.TypeReference<List<Map<String, Object>>>() {});
+
+        assertThat(listed).isNotEmpty();
+        assertThat(listed.getFirst().get("id")).as("the newest account leads the list").isEqualTo(newest.toString());
+        assertThat(listed.size()).as("the list stays bounded").isLessThanOrEqualTo(PaymentReadService.MAX_ACCOUNTS);
+        assertThat(listed).allSatisfy(account -> assertThat(account).containsKeys("currency", "balanceMinor", "heldMinor", "availableMinor"));
+    }
+
 }

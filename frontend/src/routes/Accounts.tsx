@@ -115,6 +115,18 @@ export function AccountsPage() {
           )}
         </Card>
 
+        {/* Mirrors PaymentReadService.MAX_ACCOUNTS. A truncated list that says nothing about being
+            truncated is the same mistake the payment search avoids by reporting matchedCountCapped;
+            until this list is paged, saying so is the least it can do. */}
+        {accounts.data && accounts.data.length >= 100 && (
+          <Notice tone="warning" title="Showing the 100 most recent accounts">
+            <span>
+              You own at least this many. Older accounts are not listed here, and this screen cannot
+              page through them yet.
+            </span>
+          </Notice>
+        )}
+
         {accounts.data && accounts.data.length > 0 && (
           <Notice tone="info" title="Available is balance minus held">
             An authorization holds funds without spending them. Capturing consumes the hold and reduces the

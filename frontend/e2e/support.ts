@@ -182,12 +182,21 @@ export async function statusWithSessionCookie(cookie: string | undefined, path: 
 export async function authorizeThroughUi(
   page: Page,
   amount: string,
-  options: { country?: string; accountIndex?: number } = {},
+  options: { country?: string; accountId?: string } = {},
 ): Promise<string> {
+  // Its own funded account unless the caller names one.
+  //
+  // Selecting by position, as this did, meant depending on the account list's ordering and on how many
+  // accounts the rest of the suite had already created. The list is bounded and unpaged, so on a
+  // database with more accounts than that bound something is always missing from it: ordered oldest
+  // first a new account is invisible, ordered newest first the seeded one is. An account this call
+  // just created is the one case that is visible either way, and it makes each authorization
+  // independent of every other test's leftovers, which is what the rest of this suite already does.
+  const account = options.accountId ?? (await createIsolatedAccount('demo-merchant', 'CAD', 5_000_000));
   await page.goto('/dashboard/payments/new');
   const accountSelect = page.getByLabel('Account');
   await expect(accountSelect.locator('option').nth(1)).toBeAttached();
-  await accountSelect.selectOption({ index: (options.accountIndex ?? 0) + 1 });
+  await accountSelect.selectOption(account);
   await page.getByLabel(/^Amount/).fill(amount);
   if (options.country) await page.getByLabel('Country').fill(options.country);
   await page.getByRole('button', { name: 'Review and authorize' }).click();
