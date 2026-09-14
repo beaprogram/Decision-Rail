@@ -9,8 +9,17 @@ import com.decisionrail.payments.PaymentSearchPage;
 import com.decisionrail.payments.PaymentSearchQuery;
 import com.decisionrail.payments.PaymentService;
 import com.decisionrail.payments.PaymentTimelineView;
+import com.decisionrail.payments.PaymentReturnsView;
 import com.decisionrail.payments.PaymentView;
+import com.decisionrail.payments.ReturnCommand;
+import com.decisionrail.payments.ReturnReceiptView;
+import com.decisionrail.payments.ReturnType;
+import com.decisionrail.payments.PaymentException;
 import com.decisionrail.api.AuthorizationRequest;
+import com.decisionrail.api.ReturnRequest;
+import com.decisionrail.reconciliation.ReconciliationReport;
+import com.decisionrail.reconciliation.ReconciliationRequest;
+import com.decisionrail.reconciliation.ReconciliationService;
 import com.decisionrail.replay.ReplayJobView;
 import com.decisionrail.replay.ReplayReport;
 import com.decisionrail.replay.ReplayResultView;
@@ -54,13 +63,16 @@ public class UiMerchantController {
     private final PaymentReadService reads;
     private final ReplayService replay;
     private final ShadowService shadow;
+    private final ReconciliationService reconciliation;
 
     public UiMerchantController(PaymentService payments, PaymentReadService reads,
-                               ReplayService replay, ShadowService shadow) {
+                               ReplayService replay, ShadowService shadow,
+                               ReconciliationService reconciliation) {
         this.payments = payments;
         this.reads = reads;
         this.replay = replay;
         this.shadow = shadow;
+        this.reconciliation = reconciliation;
     }
 
     // ----- accounts and payments -----
@@ -147,6 +159,50 @@ public class UiMerchantController {
         return command(payments.voidPayment(principal.getName(), key, id));
     }
 
+    // ----- returns -----
+
+    /** What was captured, what has been returned, what is left, and every return operation so far. */
+    @GetMapping("/payments/{id}/returns")
+    public PaymentReturnsView returns(Principal principal, @PathVariable UUID id) {
+        return payments.returns(principal.getName(), id);
+    }
+
+    @PostMapping("/payments/{id}/refunds")
+    public ResponseEntity<ReturnReceiptView> refund(Principal principal, @PathVariable UUID id,
+            @RequestHeader("Idempotency-Key") String key, @Valid @RequestBody ReturnRequest request) {
+        return returnCommand(payments.returnFunds(principal.getName(), key,
+                new ReturnCommand(id, ReturnType.REFUND, request.amountMinor(), request.reason())));
+    }
+
+    @PostMapping("/payments/{id}/reversal")
+    public ResponseEntity<ReturnReceiptView> reverse(Principal principal, @PathVariable UUID id,
+            @RequestHeader("Idempotency-Key") String key,
+            @RequestBody(required = false) @Valid ReturnRequest request) {
+        if (request != null && request.amountMinor() != null) {
+            throw new PaymentException("INVALID_RETURN_INPUT", 400,
+                    "A reversal returns the whole captured amount and must not state one.");
+        }
+        return returnCommand(payments.returnFunds(principal.getName(), key,
+                new ReturnCommand(id, ReturnType.REVERSAL, null, request == null ? null : request.reason())));
+    }
+
+    // ----- reconciliation -----
+
+    /**
+     * The merchant's own reconciliation report.
+     *
+     * <p>Read-only and merchant-scoped. It derives what the balances ought to be from the ledger and
+     * the operations that wrote it, and reports where they disagree; it never repairs anything.
+     */
+    @GetMapping("/reconciliation")
+    public ReconciliationReport reconciliation(Principal principal,
+            @RequestParam(required = false) String accountId,
+            @RequestParam(required = false) Integer accountLimit,
+            @RequestParam(required = false) Integer paymentLimit) {
+        return reconciliation.forMerchant(principal.getName(),
+                ReconciliationRequest.parse(accountId, accountLimit, paymentLimit));
+    }
+
     // ----- replay -----
 
     @PostMapping("/replay-jobs")
@@ -182,13 +238,19 @@ public class UiMerchantController {
         return replay.results(principal.getName(), id, divergedOnly, limit, offset);
     }
 
-    private static ResponseEntity<PaymentView> command(CommandResult result) {
+    private static ResponseEntity<ReturnReceiptView> returnCommand(CommandResult<ReturnReceiptView> result) {
+        return ResponseEntity.status(result.httpStatus())
+                .header("Idempotency-Replayed", Boolean.toString(result.replayed()))
+                .body(result.body());
+    }
+
+    private static ResponseEntity<PaymentView> command(CommandResult<PaymentView> result) {
         return ResponseEntity.status(result.httpStatus())
                 // Tells the dashboard this response came from the durable idempotency record, which
                 // matters because a replayed authorization carries the snapshot from when it was first
                 // made and may be older than the payment's current state.
                 .header("Idempotency-Replayed", Boolean.toString(result.replayed()))
-                .body(result.payment());
+                .body(result.body());
     }
 
     public record CreateReplayJobRequest(

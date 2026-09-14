@@ -40,6 +40,16 @@ class ArchitectureTest {
     }
 
     @Test
+    void reconciliationCannotMoveMoney() {
+        noClasses().that().resideInAPackage("..reconciliation..")
+                .should().dependOnClassesThat().haveFullyQualifiedName("com.decisionrail.payments.PaymentService")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("com.decisionrail.payments.ReturnStore")
+                .orShould().dependOnClassesThat().haveFullyQualifiedName("com.decisionrail.payments.PaymentStore")
+                .because("reconciliation reports discrepancies and must have no way to turn one into a financial mutation")
+                .check(classes);
+    }
+
+    @Test
     void httpHandlersCannotBypassTransactionalPaymentService() {
         noClasses().that().resideInAPackage("..api..")
                 .should().dependOnClassesThat().resideInAnyPackage("org.springframework.jdbc..", "java.sql..")

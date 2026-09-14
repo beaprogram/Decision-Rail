@@ -63,6 +63,10 @@ class MigrationUpgradeTest {
                 assertNewTablesExist(connection);
                 assertSealedJournalStillRejectsLateEntries(connection, seeded);
                 assertCorrelationColumnsAreOptionalForOlderRows(connection, seeded);
+                assertReturnBudgetBackfilledFromExistingCaptures(connection, seeded);
+                assertHistoricalResponsesAreTypedAndUnchanged(connection, seeded);
+                assertHistoricalEventsAreNotRewrittenForReturns(connection, seeded);
+                assertReturnsWorkAgainstAnUpgradedCapture(connection, seeded);
             }
         } finally {
             dropDatabase(target, database);
@@ -109,6 +113,144 @@ class MigrationUpgradeTest {
         assertThat(rejected(connection, "UPDATE outbox_events SET origin_trace_id = 'not-hex' WHERE id = '"
                 + seeded.authorizedEvent() + "'"))
                 .as("a non-hex trace id is refused").isTrue();
+    }
+
+    /**
+     * V10 has to give a capture that predates it a return budget, or every historical captured payment
+     * becomes unrefundable after the upgrade.
+     *
+     * <p>The backfill is exact rather than approximate: capture always moved the full authorized
+     * amount, so captured_amount_minor is amount_minor for CAPTURED rows and must stay null for
+     * everything else. A payment that was never captured with a captured amount set would offer a
+     * refund against money that never moved.
+     */
+    private void assertReturnBudgetBackfilledFromExistingCaptures(Connection connection, Seeded seeded)
+            throws Exception {
+        try (var statement = connection.prepareStatement(
+                "SELECT captured_amount_minor, returned_amount_minor FROM payments WHERE id = ?")) {
+            statement.setObject(1, seeded.capturedPayment());
+            try (var rows = statement.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getLong(1)).as("a pre-upgrade capture keeps its full amount as its budget").isEqualTo(2500);
+                assertThat(rows.getLong(2)).as("and nothing has been returned").isZero();
+            }
+        }
+        try (var statement = connection.prepareStatement("SELECT captured_amount_minor FROM payments WHERE id = ?")) {
+            statement.setObject(1, seeded.authorizedPayment());
+            try (var rows = statement.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                rows.getLong(1);
+                assertThat(rows.wasNull()).as("a payment that was never captured has no captured amount").isTrue();
+            }
+        }
+        assertThat(rejected(connection, "UPDATE payments SET returned_amount_minor = 2501 WHERE id = '"
+                + seeded.capturedPayment() + "'"))
+                .as("the cap applies to upgraded rows too").isTrue();
+        assertThat(rejected(connection, "UPDATE payments SET captured_amount_minor = 4000 WHERE id = '"
+                + seeded.authorizedPayment() + "'"))
+                .as("an uncaptured payment cannot acquire a captured amount").isTrue();
+    }
+
+    /**
+     * A stored idempotent response written before refunds existed is a payment, and says so after the
+     * upgrade. Its bytes are unchanged: the response a caller was given years ago is what they get on
+     * a replay, not a re-rendering of it.
+     */
+    private void assertHistoricalResponsesAreTypedAndUnchanged(Connection connection, Seeded seeded)
+            throws Exception {
+        try (var statement = connection.prepareStatement("""
+                SELECT response_kind, response_body::text, http_status FROM idempotency_records
+                WHERE merchant_id = 'demo-merchant' AND idempotency_key = 'legacy-key-00000001'
+                """)) {
+            try (var rows = statement.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("PAYMENT");
+                assertThat(rows.getString(2)).isEqualTo("{\"id\": \"" + seeded.capturedPayment() + "\"}");
+                assertThat(rows.getInt(3)).isEqualTo(201);
+            }
+        }
+        assertThat(rejected(connection, """
+                UPDATE idempotency_records SET response_kind = 'GUESS'
+                WHERE idempotency_key = 'legacy-key-00000001'
+                """)).as("only known response kinds are accepted").isTrue();
+    }
+
+    /**
+     * The new envelope fields are absent from historical events, and must stay absent.
+     *
+     * <p>Backfilling them would change bytes a consumer has already fingerprinted and deduplicated on,
+     * which would make a redelivered historical event look like identity reuse. V3 backfilled payloads
+     * because those rows had never been delivered; these have, so the contract tolerates the absence
+     * instead.
+     */
+    private void assertHistoricalEventsAreNotRewrittenForReturns(Connection connection, Seeded seeded)
+            throws Exception {
+        try (var statement = connection.prepareStatement("SELECT payload::text FROM outbox_events WHERE id = ?")) {
+            statement.setObject(1, seeded.authorizedEvent());
+            try (var rows = statement.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                String payload = rows.getString(1);
+                assertThat(payload).doesNotContain("capturedAmountMinor")
+                        .doesNotContain("returnedAmountMinor")
+                        .doesNotContain("returnOperation");
+            }
+        }
+    }
+
+    /**
+     * The upgraded capture is genuinely refundable: a return operation and its compensating journal
+     * can be written against a payment whose capture journal was created by V1.
+     *
+     * <p>That original journal is sealed and untouched afterwards, which is the property a
+     * compensating-entry ledger exists to provide.
+     */
+    private void assertReturnsWorkAgainstAnUpgradedCapture(Connection connection, Seeded seeded) throws Exception {
+        UUID returnId = UUID.randomUUID();
+        UUID journalId = UUID.randomUUID();
+        connection.setAutoCommit(false);
+        try (Statement statement = connection.createStatement()) {
+            statement.execute("""
+                    INSERT INTO payment_returns (id, payment_id, merchant_id, account_id, return_type,
+                            amount_minor, currency, reason, sequence_number, created_at)
+                    VALUES ('%s', '%s', 'demo-merchant', '%s', 'REFUND', 1000, 'CAD', 'upgrade check', 1, now())
+                    """.formatted(returnId, seeded.capturedPayment(), seeded.accountId()));
+            statement.execute("UPDATE payments SET returned_amount_minor = 1000 WHERE id = '"
+                    + seeded.capturedPayment() + "'");
+            statement.execute("""
+                    INSERT INTO ledger_journals (id, payment_id, merchant_id, currency, journal_kind, source_return_id)
+                    VALUES ('%s', '%s', 'demo-merchant', 'CAD', 'RETURN', '%s')
+                    """.formatted(journalId, seeded.capturedPayment(), returnId));
+            statement.execute("""
+                    INSERT INTO ledger_entries (id, journal_id, ledger_account, side, amount_minor) VALUES
+                      ('%s', '%s', 'merchant-clearing:demo-merchant', 'DEBIT', 1000),
+                      ('%s', '%s', 'wallet:%s', 'CREDIT', 1000)
+                    """.formatted(UUID.randomUUID(), journalId, UUID.randomUUID(), journalId, seeded.accountId()));
+            statement.execute("UPDATE accounts SET balance_minor = balance_minor + 1000 WHERE id = '"
+                    + seeded.accountId() + "'");
+        }
+        connection.commit();
+        connection.setAutoCommit(true);
+
+        try (var statement = connection.prepareStatement("""
+                SELECT journal_kind, count(*) FROM ledger_journals WHERE payment_id = ? GROUP BY journal_kind ORDER BY 1
+                """)) {
+            statement.setObject(1, seeded.capturedPayment());
+            try (var rows = statement.executeQuery()) {
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("CAPTURE");
+                assertThat(rows.getInt(2)).as("the original capture journal is still there, exactly once").isEqualTo(1);
+                assertThat(rows.next()).isTrue();
+                assertThat(rows.getString(1)).isEqualTo("RETURN");
+                assertThat(rows.getInt(2)).isEqualTo(1);
+            }
+        }
+        // The V1 journal is still sealed against additions, and the capture evidence is unchanged.
+        assertThat(rejected(connection, """
+                INSERT INTO ledger_entries (id, journal_id, ledger_account, side, amount_minor)
+                SELECT gen_random_uuid(), j.id, 'wallet:late', 'DEBIT', 1
+                FROM ledger_journals j WHERE j.payment_id = '%s' AND j.journal_kind = 'CAPTURE'
+                """.formatted(seeded.capturedPayment())))
+                .as("the original capture journal stays sealed after compensation").isTrue();
     }
 
     /** Runs a statement expected to violate a constraint, and reports whether the database refused it. */

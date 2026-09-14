@@ -1,6 +1,9 @@
 package com.decisionrail.api;
 
 import com.decisionrail.events.OutboxBacklog;
+import com.decisionrail.reconciliation.ReconciliationReport;
+import com.decisionrail.reconciliation.ReconciliationRequest;
+import com.decisionrail.reconciliation.ReconciliationService;
 import com.decisionrail.events.OutboxDispatcher;
 import com.decisionrail.shadow.ShadowService;
 import com.decisionrail.shadow.ShadowSettingsView;
@@ -17,6 +20,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
@@ -30,10 +34,31 @@ public class OpsController {
 
     private final OutboxDispatcher dispatcher;
     private final ShadowService shadow;
+    private final ReconciliationService reconciliation;
 
-    public OpsController(OutboxDispatcher dispatcher, ShadowService shadow) {
+    public OpsController(OutboxDispatcher dispatcher, ShadowService shadow,
+                         ReconciliationService reconciliation) {
         this.dispatcher = dispatcher;
         this.shadow = shadow;
+        this.reconciliation = reconciliation;
+    }
+
+    /**
+     * Reconciliation for any merchant, which is why it lives here rather than beside the merchant API.
+     *
+     * <p>{@code /v1/ops/**} is restricted to ADMIN by the security configuration, listed ahead of the
+     * broad merchant rule so it cannot fall through and be authorised as an ordinary merchant call.
+     * The merchant is read from the query, and the service method that accepts one is separate from
+     * the one merchants use.
+     */
+    @GetMapping("/reconciliation")
+    public ReconciliationReport reconciliation(
+            @RequestParam String merchantId,
+            @RequestParam(required = false) String accountId,
+            @RequestParam(required = false) Integer accountLimit,
+            @RequestParam(required = false) Integer paymentLimit) {
+        return reconciliation.forNamedMerchant(merchantId,
+                ReconciliationRequest.parse(accountId, accountLimit, paymentLimit));
     }
 
     /** Durable backlog, terminal failures, blocked payment streams, and breaker state. */

@@ -95,7 +95,10 @@ class EventContractBoundsTest {
                 .isInstanceOf(EventContractException.class)
                 .extracting(thrown -> ((EventContractException) thrown).reason())
                 .isEqualTo("UNSUPPORTED_SCHEMA");
-        assertThatThrownBy(() -> contract.parse(envelope(Map.of("eventType", "\"payment.refunded.v1\""))))
+        // payment.refunded.v1 stood here until checkpoint 9 made it a supported type. The distinction
+        // being tested is unchanged; the example has to be a type this consumer genuinely does not
+        // know, or the test would be asserting that a supported event is refused.
+        assertThatThrownBy(() -> contract.parse(envelope(Map.of("eventType", "\"payment.settled.v1\""))))
                 .isInstanceOf(EventContractException.class)
                 .extracting(thrown -> ((EventContractException) thrown).reason())
                 .isEqualTo("UNSUPPORTED_TYPE");
@@ -124,6 +127,126 @@ class EventContractBoundsTest {
                 .hasMessageContaining(expectedMention)
                 .extracting(thrown -> ((EventContractException) thrown).reason())
                 .isEqualTo(expectedReason);
+    }
+
+    // ----- return events -----
+
+    @Test
+    void aReturnEventIsAcceptedWithItsOperation() {
+        EventContract.Parsed parsed = contract.parse(refundEvent(java.util.Map.of()));
+        assertThat(parsed.envelope().eventType()).isEqualTo("payment.refunded.v1");
+        assertThat(parsed.envelope().returnOperation().amountMinor()).isEqualTo(1_000);
+        assertThat(parsed.envelope().payment().capturedAmountMinor()).isEqualTo(2_500);
+        assertThat(parsed.envelope().payment().returnedAmountMinor()).isEqualTo(1_000);
+    }
+
+    @Test
+    void aHistoricalEventWithoutAnyReturnFieldsIsStillAccepted() {
+        // Every event written before checkpoint 9 looks exactly like this. Its bytes are immutable, so
+        // the contract has to accept their absence rather than expect a backfill that must never happen.
+        EventContract.Parsed parsed = contract.parse(envelope(Map.of()));
+        assertThat(parsed.envelope().payment().capturedAmountMinor()).isNull();
+        assertThat(parsed.envelope().payment().returnedAmountMinor()).isZero();
+        assertThat(parsed.envelope().returnOperation()).isNull();
+    }
+
+    @Test
+    void aReturnEventWithoutItsOperationIsRejected() {
+        // Without this block two partial refunds are indistinguishable, so it is required rather than
+        // treated as optional detail.
+        assertRejected("MALFORMED", "return operation",
+                envelope(Map.of("eventType", "\"payment.refunded.v1\"",
+                        "payment", capturedPaymentObject("", "", 1_000))));
+    }
+
+    @Test
+    void aLifecycleEventCarryingAReturnOperationIsRejected() {
+        assertRejected("MALFORMED", "must not carry",
+                envelope(Map.of("returnOperation", returnObject(""))));
+    }
+
+    @Test
+    void aReturnThatDisagreesWithItsOwnTotalsIsRejected() {
+        // The event states both the operation's amount and the running total it produced, so they can
+        // be checked against each other rather than taken on trust by whatever applies them.
+        assertRejected("MALFORMED", "returnedAmountMinor must include this return",
+                refundEvent(Map.of("payment", capturedPaymentObject("", "", 500))));
+        assertRejected("MALFORMED", "cannot exceed capturedAmountMinor",
+                refundEvent(Map.of("payment", capturedPaymentObject("\"capturedAmountMinor\":900", "", 1_000))));
+    }
+
+    @Test
+    void aReversalThatDoesNotReturnTheWholeCaptureIsRejected() {
+        // A partial "reversal" is a refund wearing the wrong name, and the two have different meanings
+        // for what may happen next.
+        assertRejected("MALFORMED", "reversal must return the full captured amount",
+                envelope(Map.of("eventType", "\"payment.reversed.v1\"",
+                        "payment", capturedPaymentObject("", "", 1_000),
+                        "returnOperation", returnObject("\"type\":\"REVERSAL\""))));
+    }
+
+    @Test
+    void aReturnOnAPaymentThatWasNeverCapturedIsRejected() {
+        // The totals agree with each other here, so the only thing wrong is that money is being
+        // returned from a payment that never took any.
+        assertRejected("MALFORMED", "captured payment",
+                refundEvent(Map.of("payment", capturedPaymentObject("\"status\":\"AUTHORIZED\"", "", 1_000))));
+        assertRejected("MALFORMED", "must state the captured amount",
+                refundEvent(Map.of("payment", capturedPaymentObject("\"capturedAmountMinor\":null", "", 1_000))));
+    }
+
+    @Test
+    void returnOperationFieldsAreBoundedLikeTheirColumns() {
+        assertRejected("MALFORMED", "return type", refundEvent(Map.of("returnOperation", returnObject("\"type\":\"CHARGEBACK\""))));
+        assertRejected("MALFORMED", "return amountMinor", refundEvent(Map.of("returnOperation", returnObject("\"amountMinor\":0"))));
+        assertRejected("MALFORMED", "return currency", refundEvent(Map.of("returnOperation", returnObject("\"currency\":\"usd\""))));
+        assertRejected("MALFORMED", "match the payment currency", refundEvent(Map.of("returnOperation", returnObject("\"currency\":\"USD\""))));
+        assertRejected("MALFORMED", "return sequenceNumber", refundEvent(Map.of("returnOperation", returnObject("\"sequenceNumber\":0"))));
+        // varchar(140) on payment_returns.reason.
+        assertRejected("MALFORMED", "return reason",
+                refundEvent(Map.of("returnOperation", returnObject("\"reason\":\"" + "r".repeat(141) + "\""))));
+    }
+
+    /** A canonical refund event: a captured payment, 1000 returned of 2500, with its operation. */
+    private String refundEvent(java.util.Map<String, String> overrides) {
+        java.util.LinkedHashMap<String, String> fields = new java.util.LinkedHashMap<>();
+        fields.put("eventType", "\"payment.refunded.v1\"");
+        fields.put("aggregateSequence", "3");
+        fields.put("payment", capturedPaymentObject("", "", 1_000));
+        fields.put("returnOperation", returnObject(""));
+        fields.putAll(overrides);
+        return envelope(fields);
+    }
+
+    private String capturedPaymentObject(String paymentOverride, String decisionOverride, long returned) {
+        java.util.LinkedHashMap<String, String> payment = new java.util.LinkedHashMap<>();
+        payment.put("id", "\"" + PAYMENT_ID + "\"");
+        payment.put("accountId", "\"aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\"");
+        payment.put("amountMinor", "2500");
+        payment.put("currency", "\"CAD\"");
+        payment.put("country", "\"CA\"");
+        payment.put("status", "\"CAPTURED\"");
+        payment.put("decision", decisionObject(decisionOverride));
+        payment.put("failureCode", "null");
+        payment.put("createdAt", "\"2026-09-10T12:00:00Z\"");
+        payment.put("updatedAt", "\"2026-09-10T12:05:00Z\"");
+        payment.put("capturedAmountMinor", "2500");
+        payment.put("returnedAmountMinor", Long.toString(returned));
+        applyOverride(payment, paymentOverride);
+        return render(payment);
+    }
+
+    private String returnObject(String override) {
+        java.util.LinkedHashMap<String, String> operation = new java.util.LinkedHashMap<>();
+        operation.put("id", "\"cccccccc-dddd-eeee-ffff-111111111111\"");
+        operation.put("type", "\"REFUND\"");
+        operation.put("amountMinor", "1000");
+        operation.put("currency", "\"CAD\"");
+        operation.put("reason", "\"customer returned an item\"");
+        operation.put("sequenceNumber", "1");
+        operation.put("occurredAt", "\"2026-09-10T12:05:00Z\"");
+        applyOverride(operation, override);
+        return render(operation);
     }
 
     private static final String PAYMENT_ID = "11111111-2222-3333-4444-555555555555";

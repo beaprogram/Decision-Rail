@@ -40,17 +40,20 @@ public class PaymentStore {
                 VALUES (?,?,?,?) ON CONFLICT DO NOTHING
                 """, merchant, key, hash, correlation.currentTraceId().orElse(null));
         return jdbc.queryForObject("""
-                SELECT request_hash,response_body,http_status,origin_trace_id
+                SELECT request_hash,response_body,http_status,origin_trace_id,response_kind
                 FROM idempotency_records WHERE merchant_id=? AND idempotency_key=? FOR UPDATE
                 """,
                 (rs, n) -> new IdempotencyRecord(rs.getString(1), rs.getString(2), rs.getObject(3, Integer.class),
-                        rs.getString(4)),
+                        rs.getString(4),
+                        rs.getString(5) == null ? null : StoredResponseKind.valueOf(rs.getString(5))),
                 merchant, key);
     }
 
-    public void completeKey(String merchant, String key, CommandResult result) {
-        jdbc.update("UPDATE idempotency_records SET response_body=?::jsonb,http_status=? WHERE merchant_id=? AND idempotency_key=?",
-                encode(result.payment()), result.httpStatus(), merchant, key);
+    public void completeKey(String merchant, String key, StoredResponseKind kind, CommandResult<?> result) {
+        jdbc.update("""
+                UPDATE idempotency_records SET response_body=?::jsonb,http_status=?,response_kind=?
+                WHERE merchant_id=? AND idempotency_key=?
+                """, encode(result.body()), result.httpStatus(), kind.name(), merchant, key);
     }
 
     public AccountView account(String merchant, UUID id, boolean lock) {
@@ -201,6 +204,25 @@ public class PaymentStore {
         jdbc.update("UPDATE accounts SET balance_minor=balance_minor-?,held_minor=held_minor-? WHERE id=?", amount, amount, account);
     }
 
+    /**
+     * Moves a payment to CAPTURED and records what the capture moved, in one statement.
+     *
+     * <p>The captured amount is what caps everything that can be returned later, and it is written
+     * here rather than re-derived from the authorized amount whenever a refund asks. One statement
+     * because the two are one fact: a CHECK constraint requires a CAPTURED payment to state its
+     * captured amount and every other status not to, so writing them separately would leave the row
+     * momentarily invalid and be rejected outright.
+     */
+    public void capture(UUID payment, long capturedAmountMinor, Instant updatedAt) {
+        jdbc.update("UPDATE payments SET status='CAPTURED',captured_amount_minor=?,updated_at=? WHERE id=?",
+                capturedAmountMinor, Timestamp.from(updatedAt), payment);
+    }
+
+    /** What a capture moved, or null when this payment was never captured. */
+    public Long capturedAmount(UUID payment) {
+        return jdbc.queryForObject("SELECT captured_amount_minor FROM payments WHERE id=?", Long.class, payment);
+    }
+
     public void transition(UUID payment, PaymentStatus status, Instant updatedAt) {
         jdbc.update("UPDATE payments SET status=?,updated_at=? WHERE id=?", status.name(), Timestamp.from(updatedAt), payment);
     }
@@ -236,12 +258,45 @@ public class PaymentStore {
      * operator redrive of this event carries the same identity a consumer deduplicates on.
      */
     public void recordEvent(String merchant, PaymentView payment) {
-        String eventType = "payment." + payment.status().name().toLowerCase(java.util.Locale.ROOT) + ".v1";
+        // A capture moves the full authorized amount, so that is what the snapshot records as captured.
+        // Nothing has been returned at the moment any lifecycle event is written: a return is its own
+        // event, recorded by recordReturnEvent below.
+        Long captured = payment.status() == PaymentStatus.CAPTURED ? payment.amountMinor() : null;
+        recordEvent(merchant, payment, "payment." + payment.status().name().toLowerCase(java.util.Locale.ROOT) + ".v1",
+                null, captured, 0L);
+    }
+
+    /**
+     * Records a return's event intent alongside the lifecycle events of the same payment.
+     *
+     * <p>A return needs its own event even though the payment's status does not move: two partial
+     * refunds are two distinct operations, and an event stream that showed only status changes would
+     * report nothing at all for either. The return block carries which operation this was, so a
+     * consumer can tell them apart without comparing snapshots.
+     *
+     * <p>It shares the payment's aggregate sequence, so a refund cannot be delivered before the
+     * capture it compensates.
+     */
+    public void recordReturnEvent(String merchant, PaymentView payment, ReturnReceiptView receipt) {
+        String eventType = switch (receipt.returnType()) {
+            case REFUND -> "payment.refunded.v1";
+            case REVERSAL -> "payment.reversed.v1";
+        };
+        EventEnvelope.Return operation = new EventEnvelope.Return(receipt.returnId(), receipt.returnType().name(),
+                receipt.amountMinor(), receipt.currency(), receipt.reason(), receipt.sequenceNumber(),
+                receipt.createdAt());
+        recordEvent(merchant, payment, eventType, operation, receipt.capturedAmountMinor(),
+                receipt.returnedAmountMinor());
+    }
+
+    private void recordEvent(String merchant, PaymentView payment, String eventType,
+                             EventEnvelope.Return operation, Long capturedAmountMinor, long returnedAmountMinor) {
         UUID eventId = UUID.randomUUID();
         long sequence = outbox.nextSequence(payment.id());
         EventEnvelope envelope = new EventEnvelope(eventId, eventType, EventEnvelope.SUPPORTED_SCHEMA_VERSION,
                 payment.id(), EventEnvelope.PAYMENT_AGGREGATE, sequence, merchant,
-                payment.updatedAt(), payment.updatedAt(), snapshot(payment));
+                payment.updatedAt(), payment.updatedAt(),
+                snapshot(payment, capturedAmountMinor, returnedAmountMinor), operation);
         // The trace of the command being committed, captured while the thread that ran it still exists.
         outbox.append(eventId, payment.id(), sequence, merchant, eventType,
                 EventEnvelope.SUPPORTED_SCHEMA_VERSION, encode(envelope), payment.updatedAt(),
@@ -249,7 +304,8 @@ public class PaymentStore {
         jdbc.update("INSERT INTO audit_events(id,merchant_id,payment_id,action) VALUES (?,?,?,?)", UUID.randomUUID(), merchant, payment.id(), eventType);
     }
 
-    private static EventEnvelope.Payment snapshot(PaymentView payment) {
+    private static EventEnvelope.Payment snapshot(PaymentView payment, Long capturedAmountMinor,
+                                                  long returnedAmountMinor) {
         DecisionResult decision = payment.decision();
         return new EventEnvelope.Payment(payment.id(), payment.accountId(), payment.amountMinor(),
                 payment.currency(), payment.country(), payment.status().name(),
@@ -258,7 +314,28 @@ public class PaymentStore {
                                 .map(reason -> new EventEnvelope.Reason(reason.code(), reason.description(), reason.scoreContribution()))
                                 .toList(),
                         decision.flags().stream().map(Enum::name).toList()),
-                payment.failureCode(), payment.createdAt(), payment.updatedAt());
+                payment.failureCode(), payment.createdAt(), payment.updatedAt(),
+                capturedAmountMinor, returnedAmountMinor);
+    }
+
+    /**
+     * Decodes a stored idempotent response as the kind it was written as.
+     *
+     * <p>The expected kind is what the command being replayed produces. A mismatch means the same key
+     * was accepted for two different commands, which the request fingerprint should already have
+     * refused; failing here rather than decoding anyway keeps that a loud error instead of a silently
+     * wrong response.
+     */
+    public Object decodeResponse(IdempotencyRecord record, StoredResponseKind expected) {
+        StoredResponseKind stored = record.responseKind() == null ? StoredResponseKind.PAYMENT : record.responseKind();
+        if (stored != expected) {
+            throw new IllegalStateException("Stored idempotent response is a " + stored
+                    + " but this command produces a " + expected);
+        }
+        return switch (stored) {
+            case PAYMENT -> decode(record.responseBody(), PaymentView.class);
+            case RETURN -> decode(record.responseBody(), ReturnReceiptView.class);
+        };
     }
 
     public PaymentView decodePayment(String value) { return decode(value, PaymentView.class); }
@@ -285,5 +362,5 @@ public class PaymentStore {
      *                      ran untraced. A replay points at it rather than claiming to be it.
      */
     public record IdempotencyRecord(String requestHash, String responseBody, Integer httpStatus,
-                                    String originTraceId) {}
+                                    String originTraceId, StoredResponseKind responseKind) {}
 }

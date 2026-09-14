@@ -3,6 +3,9 @@ package com.decisionrail.ui;
 import com.decisionrail.events.FailedEventView;
 import com.decisionrail.events.OutboxBacklog;
 import com.decisionrail.events.OutboxDispatcher;
+import com.decisionrail.reconciliation.ReconciliationReport;
+import com.decisionrail.reconciliation.ReconciliationRequest;
+import com.decisionrail.reconciliation.ReconciliationService;
 import com.decisionrail.events.OutboxStore;
 import com.decisionrail.payments.PaymentException;
 import com.decisionrail.shadow.ShadowService;
@@ -41,8 +44,11 @@ public class UiOpsController {
     private final OutboxStore outbox;
     private final ShadowService shadow;
     private final HealthEndpoint health;
+    private final ReconciliationService reconciliation;
 
-    public UiOpsController(OutboxDispatcher dispatcher, OutboxStore outbox, ShadowService shadow, HealthEndpoint health) {
+    public UiOpsController(OutboxDispatcher dispatcher, OutboxStore outbox, ShadowService shadow, HealthEndpoint health,
+                           ReconciliationService reconciliation) {
+        this.reconciliation = reconciliation;
         this.dispatcher = dispatcher;
         this.outbox = outbox;
         this.shadow = shadow;
@@ -56,6 +62,22 @@ public class UiOpsController {
      * different things: readiness excludes the broker, so a broker outage degrades the asynchronous
      * signal while readiness correctly stays up and payment traffic keeps arriving.
      */
+    /**
+     * Reconciliation for any merchant, from the administrative workspace.
+     *
+     * <p>{@code /ui/ops/**} is restricted to ADMIN on the browser chain, separately from the stateless
+     * one. The two chains enforce this independently and neither borrows the other's protection.
+     */
+    @GetMapping("/reconciliation")
+    public ReconciliationReport reconciliation(
+            @RequestParam String merchantId,
+            @RequestParam(required = false) String accountId,
+            @RequestParam(required = false) Integer accountLimit,
+            @RequestParam(required = false) Integer paymentLimit) {
+        return reconciliation.forNamedMerchant(merchantId,
+                ReconciliationRequest.parse(accountId, accountLimit, paymentLimit));
+    }
+
     @GetMapping("/delivery")
     public DeliveryStatus delivery() {
         OutboxBacklog backlog = dispatcher.backlog();

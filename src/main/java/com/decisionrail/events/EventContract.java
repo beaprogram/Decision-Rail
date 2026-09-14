@@ -7,6 +7,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Set;
+import java.util.stream.Stream;
 import org.springframework.stereotype.Component;
 
 /**
@@ -20,9 +21,23 @@ import org.springframework.stereotype.Component;
 @Component
 public class EventContract {
     /** Lifecycle events this consumer understands, one per payment status. */
-    public static final Set<String> SUPPORTED_TYPES = Set.of(
+    public static final Set<String> LIFECYCLE_TYPES = Set.of(
             "payment.authorized.v1", "payment.captured.v1", "payment.voided.v1",
             "payment.declined.v1", "payment.review.v1");
+    /**
+     * Events that record money going back after a capture.
+     *
+     * <p>They carry a payment whose status is still CAPTURED, because a return does not move the
+     * payment's state. What distinguishes them is the return block, which is required here and
+     * forbidden on a lifecycle event: that is the only thing that makes two partial refunds of the
+     * same payment legible as two operations rather than one repeated snapshot.
+     */
+    public static final Set<String> RETURN_TYPES = Set.of("payment.refunded.v1", "payment.reversed.v1");
+    public static final Set<String> SUPPORTED_TYPES =
+            Set.copyOf(Stream.concat(LIFECYCLE_TYPES.stream(), RETURN_TYPES.stream()).toList());
+    private static final Set<String> RETURN_OPERATION_TYPES = Set.of("REFUND", "REVERSAL");
+    /** Mirrors payment_returns.reason varchar(140). */
+    private static final int MAX_RETURN_REASON = 140;
     private static final Set<String> RISK_OUTCOMES = Set.of("APPROVE", "REVIEW", "DECLINE");
     private static final Set<String> CURRENCIES = Set.of("CAD", "USD");
     /** The lifecycle states a payment can be in, and the only values the projection column accepts. */
@@ -107,6 +122,18 @@ public class EventContract {
         require(decision.ruleSetVersion() != null && POLICY_VERSION.matcher(decision.ruleSetVersion()).matches(),
                 "policy version must be an identifier of at most 64 characters");
         require(decision.reasons() != null && !decision.reasons().isEmpty(), "decision reasons are required");
+        require(payment.capturedAmountMinor() == null
+                        || (payment.capturedAmountMinor() > 0 && payment.capturedAmountMinor() <= MAX_AMOUNT_MINOR),
+                "payment capturedAmountMinor is out of range");
+        require(payment.returnedAmountMinor() >= 0 && payment.returnedAmountMinor() <= MAX_AMOUNT_MINOR,
+                "payment returnedAmountMinor is out of range");
+        // Absent means "this event did not state it", which is what every event written before returns
+        // existed looks like. Only a stated capture amount can be compared against a stated return
+        // total, so the cap is checked when both are present rather than assuming zero for a missing
+        // one and rejecting perfectly good history.
+        require(payment.capturedAmountMinor() == null
+                        || payment.returnedAmountMinor() <= payment.capturedAmountMinor(),
+                "payment returnedAmountMinor cannot exceed capturedAmountMinor");
         for (EventEnvelope.Reason reason : decision.reasons()) {
             require(reason != null, "a decision reason cannot be null");
             require(reason.code() != null && REASON_CODE.matcher(reason.code()).matches(),
@@ -117,7 +144,51 @@ public class EventContract {
             require(reason.scoreContribution() >= 0 && reason.scoreContribution() <= 100,
                     "a decision reason contribution must be between 0 and 100");
         }
+        validateReturnOperation(envelope, payment);
         return new Parsed(envelope, fingerprint(raw));
+    }
+
+    /**
+     * A return event must name its return operation; a lifecycle event must not.
+     *
+     * <p>Requiring it is what makes repeated partial refunds distinguishable. Forbidding it on a
+     * lifecycle event is the other half: an authorization that arrived carrying a return block would
+     * mean the producer and this consumer disagree about what the event is, and applying either
+     * reading would be a guess.
+     */
+    private static void validateReturnOperation(EventEnvelope envelope, EventEnvelope.Payment payment) {
+        EventEnvelope.Return operation = envelope.returnOperation();
+        if (!RETURN_TYPES.contains(envelope.eventType())) {
+            require(operation == null, "a lifecycle event must not carry a return operation");
+            return;
+        }
+        require(operation != null, "a return event must carry its return operation");
+        require(operation.id() != null, "return id is required");
+        require(operation.type() != null && RETURN_OPERATION_TYPES.contains(operation.type()),
+                "return type must be one of " + RETURN_OPERATION_TYPES.stream().sorted().toList());
+        require(operation.amountMinor() > 0 && operation.amountMinor() <= MAX_AMOUNT_MINOR,
+                "return amountMinor is out of range");
+        require(operation.currency() != null && CURRENCIES.contains(operation.currency()),
+                "return currency must be one of " + CURRENCIES.stream().sorted().toList() + " in canonical upper case");
+        require(operation.currency().equals(payment.currency()),
+                "return currency must match the payment currency");
+        require(operation.reason() == null || (!operation.reason().isBlank()
+                        && operation.reason().length() <= MAX_RETURN_REASON),
+                "a return reason, when present, must contain 1 to " + MAX_RETURN_REASON + " characters");
+        require(operation.sequenceNumber() > 0, "return sequenceNumber must be positive");
+        require(operation.occurredAt() != null, "return occurredAt is required");
+        // The event states both the operation's amount and the running total it produced, so the two
+        // can be checked against each other here rather than taken on trust by whatever applies them.
+        require(payment.returnedAmountMinor() >= operation.amountMinor(),
+                "returnedAmountMinor must include this return");
+        // A return only exists after a capture, and this consumer is entitled to refuse an event that
+        // says otherwise rather than project a refund onto a payment that never took money.
+        require("CAPTURED".equals(payment.status()), "a return event must carry a captured payment");
+        require(payment.capturedAmountMinor() != null, "a return event must state the captured amount");
+        // REVERSAL means the whole capture came back. Anything less is a refund wearing the wrong name.
+        require(!"REVERSAL".equals(operation.type())
+                        || operation.amountMinor() == payment.capturedAmountMinor(),
+                "a reversal must return the full captured amount");
     }
 
     public static String fingerprint(String raw) {

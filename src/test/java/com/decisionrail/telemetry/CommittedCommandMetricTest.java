@@ -2,6 +2,7 @@ package com.decisionrail.telemetry;
 
 import com.decisionrail.payments.AuthorizationCommand;
 import com.decisionrail.payments.CommandResult;
+import com.decisionrail.payments.PaymentView;
 import com.decisionrail.payments.PaymentService;
 import io.micrometer.core.instrument.MeterRegistry;
 import java.util.UUID;
@@ -61,9 +62,9 @@ class CommittedCommandMetricTest {
         // The service joins this transaction, so execution reaches the counter and then the whole thing
         // is discarded: exactly the window a completeKey or commit failure opens.
         transactions.executeWithoutResult(status -> {
-            CommandResult result = payments.authorize(MERCHANT, key,
+            CommandResult<PaymentView> result = payments.authorize(MERCHANT, key,
                     new AuthorizationCommand(account, 2_500, "CAD", "CA"));
-            assertThat(result.payment().status().name()).isEqualTo("AUTHORIZED");
+            assertThat(result.body().status().name()).isEqualTo("AUTHORIZED");
             status.setRollbackOnly();
         });
 
@@ -83,14 +84,14 @@ class CommittedCommandMetricTest {
         String key = "committed-" + UUID.randomUUID();
         AuthorizationCommand command = new AuthorizationCommand(account, 3_100, "CAD", "CA");
 
-        CommandResult first = payments.authorize(MERCHANT, key, command);
+        CommandResult<PaymentView> first = payments.authorize(MERCHANT, key, command);
         assertThat(first.replayed()).isFalse();
         assertThat(committedCommands()).isEqualTo(before + 1);
 
         // The same key and the same request. No new command was performed, so nothing new is counted.
-        CommandResult replay = payments.authorize(MERCHANT, key, command);
+        CommandResult<PaymentView> replay = payments.authorize(MERCHANT, key, command);
         assertThat(replay.replayed()).isTrue();
-        assertThat(replay.payment().id()).isEqualTo(first.payment().id());
+        assertThat(replay.body().id()).isEqualTo(first.body().id());
         assertThat(committedCommands())
                 .as("an idempotent replay performs no command, so it commits none")
                 .isEqualTo(before + 1);

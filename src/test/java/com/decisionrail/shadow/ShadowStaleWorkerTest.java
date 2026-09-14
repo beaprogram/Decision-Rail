@@ -314,10 +314,11 @@ class ShadowStaleWorkerTest {
         EventEnvelope.Decision decision = new EventEnvelope.Decision("APPROVE", 0, "demo-v1",
                 List.of(new EventEnvelope.Reason("NO_RISK_SIGNALS", "No synthetic demo risk rules matched.", 0)),
                 List.of());
+        // An authorization: never captured, nothing returned, and no return operation.
         EventEnvelope.Payment snapshot = new EventEnvelope.Payment(payment, UUID.randomUUID(), 2_500,
-                "CAD", "CA", "AUTHORIZED", decision, null, now, now);
+                "CAD", "CA", "AUTHORIZED", decision, null, now, now, null, 0L);
         return new EventEnvelope(UUID.randomUUID(), "payment.authorized.v1", 1, payment, "payment", 1L,
-                "demo-merchant", now, now, snapshot);
+                "demo-merchant", now, now, snapshot, null);
     }
 
     private List<Map<String, Object>> comparisons(UUID payment) {

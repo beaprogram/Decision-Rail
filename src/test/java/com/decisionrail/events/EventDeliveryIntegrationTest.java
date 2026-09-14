@@ -149,6 +149,50 @@ class EventDeliveryIntegrationTest {
     }
 
     @Test
+    void refundEventsProjectAsDistinctOperationsAndNeverEnqueueShadowWork() throws Exception {
+        UUID payment = authorize(accountId, 4_000);
+        capture(payment);
+        refund(payment, 1_000);
+        refund(payment, 500);
+        assertThat(outboxSequences(payment)).containsExactly(1L, 2L, 3L, 4L);
+        long shadowTasksBefore = shadowTaskCount();
+
+        deliver(payment);
+
+        // Two partial refunds leave the payment CAPTURED, so a projection that only tracked status
+        // would look identical whether it applied them or ignored them.
+        Waits.until("the projection applies both refund events", BUDGET, () -> {
+            Map<String, Object> activity = activityRow(payment);
+            return activity != null && ((Number) activity.get("last_sequence")).longValue() == 4L;
+        });
+        Map<String, Object> activity = activityRow(payment);
+        assertThat(activity.get("last_status")).isEqualTo("CAPTURED");
+        assertThat(activity.get("last_event_type")).isEqualTo("payment.refunded.v1");
+        assertThat(((Number) activity.get("applied_event_count")).intValue()).isEqualTo(4);
+        assertThat(((Number) activity.get("return_event_count")).intValue()).isEqualTo(2);
+        assertThat(((Number) activity.get("returned_amount_minor")).longValue()).isEqualTo(1_500);
+        assertThat(((Number) activity.get("captured_amount_minor")).longValue()).isEqualTo(4_000);
+        assertThat(activity.get("last_return_at")).isNotNull();
+        assertThat(inbox.consumedCount(GROUP, payment)).isEqualTo(4);
+
+        // Shadow evaluation exists to compare a candidate policy against an authorization decision.
+        // A refund carries the same decision the authorization already recorded, so enqueuing work for
+        // it would duplicate an evaluation and make a candidate's divergence rate depend on how often
+        // merchants issue refunds.
+        Waits.neverDuring("a refund event enqueues shadow work", Duration.ofSeconds(3),
+                () -> shadowTaskCount() > shadowTasksBefore);
+        assertThat(jdbc.queryForObject(
+                "SELECT count(*) FROM consumer_quarantine q JOIN outbox_events o ON o.id = q.event_id WHERE o.aggregate_id = ?",
+                Long.class, payment)).isZero();
+
+        List<JsonNode> delivered = publishedEnvelopes(payment);
+        assertThat(delivered).hasSize(4);
+        assertThat(delivered.stream().map(node -> node.path("aggregateSequence").asLong()).toList())
+                .containsExactly(1L, 2L, 3L, 4L);
+        assertThat(delivered.get(3).path("returnOperation").path("amountMinor").asLong()).isEqualTo(500);
+    }
+
+    @Test
     void duplicateDeliveryOfTheSameEventProducesOneProjectionEffect() throws Exception {
         UUID payment = authorize(accountId, 3_100);
         deliver(payment);
@@ -339,7 +383,10 @@ class EventDeliveryIntegrationTest {
 
         BrokerProbe.publishRaw(TOPIC, payment.toString(), "{ this is not valid json");
         BrokerProbe.publishRaw(TOPIC, payment.toString(), mutate(valid, node -> node.put("schemaVersion", 99)));
-        BrokerProbe.publishRaw(TOPIC, payment.toString(), mutate(valid, node -> node.put("eventType", "payment.refunded.v1")));
+        // payment.refunded.v1 stood here until checkpoint 9 made it a supported type, at which point
+        // this record started being quarantined as MALFORMED - correctly, since it carries a lifecycle
+        // payload with no return operation - and stopped demonstrating UNSUPPORTED_TYPE at all.
+        BrokerProbe.publishRaw(TOPIC, payment.toString(), mutate(valid, node -> node.put("eventType", "payment.settled.v1")));
         BrokerProbe.publishRaw(TOPIC, payment.toString(), mutate(valid, node -> node.put("merchantId", "ghost-merchant")));
         // Same event id, different content: identity reuse, not a duplicate.
         BrokerProbe.publishRaw(TOPIC, payment.toString(),
@@ -484,6 +531,19 @@ class EventDeliveryIntegrationTest {
         JsonNode node = json.readTree(response);
         assertThat(node.path("status").asText()).isEqualTo("AUTHORIZED");
         return UUID.fromString(node.path("id").asText());
+    }
+
+    private long shadowTaskCount() {
+        return jdbc.queryForObject("SELECT count(*) FROM shadow_tasks", Long.class);
+    }
+
+    private void refund(UUID payment, long amountMinor) throws Exception {
+        String body = json.writeValueAsString(Map.of("amountMinor", amountMinor, "reason", "delivery test"));
+        int status = mvc.perform(post("/v1/payments/" + payment + "/refunds").header("Authorization", DEMO)
+                        .header("Idempotency-Key", UUID.randomUUID().toString())
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andReturn().getResponse().getStatus();
+        assertThat(status).isEqualTo(201);
     }
 
     private void capture(UUID payment) throws Exception {

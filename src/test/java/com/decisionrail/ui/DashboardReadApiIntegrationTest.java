@@ -335,7 +335,7 @@ class DashboardReadApiIntegrationTest {
 
     private PaymentView authorize(String merchant, UUID account, long amountMinor, String currency, String country) {
         return payments.authorize(merchant, "ui-test-" + UUID.randomUUID(),
-                new AuthorizationCommand(account, amountMinor, currency, country)).payment();
+                new AuthorizationCommand(account, amountMinor, currency, country)).body();
     }
 
     private UUID newAccount(String merchant, String currency, long balance) {

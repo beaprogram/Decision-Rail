@@ -63,12 +63,14 @@ public class InboxStore {
      */
     public boolean applyToProjection(EventEnvelope envelope, Instant now) {
         EventEnvelope.Payment payment = envelope.payment();
+        EventEnvelope.Return operation = envelope.returnOperation();
         return jdbc.update("""
                 INSERT INTO payment_activity
                     (payment_id, merchant_id, account_id, amount_minor, currency, country, last_status,
                      last_event_type, last_sequence, risk_outcome, risk_score, policy_version, failure_code,
-                     applied_event_count, first_event_at, last_event_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+                     applied_event_count, first_event_at, last_event_at, updated_at,
+                     captured_amount_minor, returned_amount_minor, last_return_at, return_event_count)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (payment_id) DO UPDATE SET
                     last_status = EXCLUDED.last_status,
                     last_event_type = EXCLUDED.last_event_type,
@@ -79,13 +81,26 @@ public class InboxStore {
                     failure_code = EXCLUDED.failure_code,
                     applied_event_count = payment_activity.applied_event_count + 1,
                     last_event_at = EXCLUDED.last_event_at,
-                    updated_at = EXCLUDED.updated_at
+                    updated_at = EXCLUDED.updated_at,
+                    -- Kept once stated. An event that does not state the captured amount - every event
+                    -- written before returns existed, and every pre-capture lifecycle event - must not
+                    -- erase one an earlier event did state.
+                    captured_amount_minor = coalesce(EXCLUDED.captured_amount_minor, payment_activity.captured_amount_minor),
+                    -- Returns only ever accumulate, and a lifecycle event states zero. GREATEST is what
+                    -- stops such an event from reporting that returned money came back, which would be
+                    -- a read model claiming money moved when nothing did.
+                    returned_amount_minor = GREATEST(payment_activity.returned_amount_minor, EXCLUDED.returned_amount_minor),
+                    last_return_at = coalesce(EXCLUDED.last_return_at, payment_activity.last_return_at),
+                    return_event_count = payment_activity.return_event_count + EXCLUDED.return_event_count
                 WHERE payment_activity.last_sequence < EXCLUDED.last_sequence
                 """, payment.id(), envelope.merchantId(), payment.accountId(), payment.amountMinor(),
                 payment.currency(), payment.country(), payment.status(), envelope.eventType(),
                 envelope.aggregateSequence(), payment.decision().outcome(), payment.decision().score(),
                 payment.decision().ruleSetVersion(), payment.failureCode(),
-                Timestamp.from(payment.createdAt()), Timestamp.from(envelope.occurredAt()), Timestamp.from(now)) == 1;
+                Timestamp.from(payment.createdAt()), Timestamp.from(envelope.occurredAt()), Timestamp.from(now),
+                payment.capturedAmountMinor(), payment.returnedAmountMinor(),
+                operation == null ? null : Timestamp.from(operation.occurredAt()),
+                operation == null ? 0 : 1) == 1;
     }
 
     public void quarantine(String group, String reason, UUID eventId, String topic, int partition, long offset, String detail) {
@@ -103,7 +118,8 @@ public class InboxStore {
         List<PaymentActivityView> rows = jdbc.query("""
                 SELECT payment_id, account_id, amount_minor, currency, country, last_status, last_event_type,
                        last_sequence, risk_outcome, risk_score, policy_version, failure_code,
-                       applied_event_count, first_event_at, last_event_at
+                       applied_event_count, first_event_at, last_event_at,
+                       captured_amount_minor, returned_amount_minor, last_return_at, return_event_count
                 FROM payment_activity WHERE merchant_id = ? AND payment_id = ?
                 """, InboxStore::mapActivity, merchantId, paymentId);
         return rows.isEmpty() ? null : rows.getFirst();
@@ -113,7 +129,8 @@ public class InboxStore {
         return jdbc.query("""
                 SELECT payment_id, account_id, amount_minor, currency, country, last_status, last_event_type,
                        last_sequence, risk_outcome, risk_score, policy_version, failure_code,
-                       applied_event_count, first_event_at, last_event_at
+                       applied_event_count, first_event_at, last_event_at,
+                       captured_amount_minor, returned_amount_minor, last_return_at, return_event_count
                 FROM payment_activity WHERE merchant_id = ?
                 ORDER BY last_event_at DESC, payment_id LIMIT ?
                 """, InboxStore::mapActivity, merchantId, limit);
@@ -156,6 +173,8 @@ public class InboxStore {
                 rs.getObject(1, UUID.class), rs.getObject(2, UUID.class), rs.getLong(3), rs.getString(4).trim(),
                 rs.getString(5).trim(), rs.getString(6), rs.getString(7), rs.getLong(8), rs.getString(9),
                 rs.getInt(10), rs.getString(11), rs.getString(12), rs.getInt(13),
-                rs.getTimestamp(14).toInstant(), rs.getTimestamp(15).toInstant());
+                rs.getTimestamp(14).toInstant(), rs.getTimestamp(15).toInstant(),
+                rs.getObject(16, Long.class), rs.getLong(17),
+                rs.getTimestamp(18) == null ? null : rs.getTimestamp(18).toInstant(), rs.getInt(19));
     }
 }
