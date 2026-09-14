@@ -6,9 +6,11 @@ import type {
   Identity,
   LedgerEntry,
   Payment,
+  PaymentReturns,
   PaymentSearchPage,
   PaymentTimeline,
   PolicyVersion,
+  ReconciliationReport,
   RedriveResult,
   ReplayJob,
   ReplayReport,
@@ -71,6 +73,17 @@ export const merchantApi = {
 
   timeline: (id: string, signal?: AbortSignal) =>
     apiFetch<PaymentTimeline>(`/ui/payments/${id}/timeline`, { signal }),
+
+  /** What was captured, what has been returned, what is left, and every return so far. */
+  returns: (id: string, signal?: AbortSignal) =>
+    apiFetch<PaymentReturns>(`/ui/payments/${id}/returns`, { signal }),
+
+  /**
+   * The merchant's own reconciliation report. Read-only: this endpoint reports discrepancies and has
+   * no form that changes anything.
+   */
+  reconciliation: (params: { accountId?: string }, signal?: AbortSignal) =>
+    apiFetch<ReconciliationReport>(`/ui/reconciliation${queryString({ ...params })}`, { signal }),
 
   paymentShadow: (id: string, signal?: AbortSignal) =>
     apiFetch<ShadowComparison[]>(`/ui/payments/${id}/shadow`, { signal }),

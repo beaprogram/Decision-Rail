@@ -293,3 +293,112 @@ export interface RedriveResult {
   stillBlockedPaymentCount: number;
   remainingFailedCount: number;
 }
+
+// ----- returns -----
+
+export type ReturnType = 'REFUND' | 'REVERSAL';
+
+/** One committed return operation, with the compensating journal that recorded it. */
+export interface PaymentReturn {
+  id: string;
+  paymentId: string;
+  accountId: string;
+  returnType: ReturnType;
+  amountMinor: number;
+  currency: Currency;
+  reason: string | null;
+  sequenceNumber: number;
+  journalId: string | null;
+  createdAt: string;
+}
+
+/**
+ * What may still be returned on one payment, decided by the server.
+ *
+ * `refundable` and `reversible` are not re-derived in the browser. Reimplementing a financial rule
+ * here would put a second copy of it in a place that cannot enforce anything, and the two would drift.
+ */
+export interface PaymentReturns {
+  paymentId: string;
+  accountId: string;
+  status: PaymentStatus;
+  currency: Currency;
+  capturedAmountMinor: number | null;
+  returnedAmountMinor: number;
+  remainingRefundableMinor: number;
+  refundable: boolean;
+  reversible: boolean;
+  unavailableReason: 'NOT_CAPTURED' | 'FULLY_RETURNED' | 'PARTIALLY_RETURNED' | null;
+  returns: PaymentReturn[];
+}
+
+/**
+ * The receipt for one return command.
+ *
+ * The totals are those at the moment it committed, not current ones, so a replayed key keeps
+ * describing its own operation rather than the payment's later state.
+ */
+export interface ReturnReceipt {
+  returnId: string;
+  paymentId: string;
+  accountId: string;
+  returnType: ReturnType;
+  amountMinor: number;
+  currency: Currency;
+  reason: string | null;
+  sequenceNumber: number;
+  journalId: string;
+  capturedAmountMinor: number;
+  returnedAmountMinor: number;
+  remainingRefundableMinor: number;
+  createdAt: string;
+}
+
+// ----- reconciliation -----
+
+export type ReconciliationStatus =
+  | 'CLEAN'
+  | 'DISCREPANCIES_FOUND'
+  | 'INCOMPLETE'
+  | 'INCOMPLETE_WITH_DISCREPANCIES';
+
+export interface ReconciliationReference {
+  kind: string;
+  id: string;
+}
+
+export interface ReconciliationFinding {
+  type: string;
+  severity: 'CRITICAL' | 'WARNING';
+  resourceType: string;
+  resourceId: string;
+  currency: Currency | null;
+  expectedMinor: number | null;
+  actualMinor: number | null;
+  deltaMinor: number | null;
+  detail: string;
+  references: ReconciliationReference[];
+}
+
+export interface ReconciliationScope {
+  accountFilter: string | null;
+  accountLimit: number;
+  paymentLimit: number;
+  accountsExamined: number;
+  paymentsExamined: number;
+  returnsExamined: number;
+  currencies: Currency[];
+  snapshot: string;
+  complete: boolean;
+  incompleteReason: string | null;
+  checks: string[];
+}
+
+export interface ReconciliationReport {
+  merchantId: string;
+  generatedAt: string;
+  status: ReconciliationStatus;
+  scope: ReconciliationScope;
+  findings: ReconciliationFinding[];
+  limitations: string[];
+}

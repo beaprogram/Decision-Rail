@@ -37,6 +37,7 @@ export function Shell({ children }: { children: ReactNode }) {
               </span>
               <NavLink to="/payments">Payments</NavLink>
               <NavLink to="/accounts">Accounts</NavLink>
+              <NavLink to="/reconciliation">Reconciliation</NavLink>
               {can.viewReplay && <NavLink to="/replay">Policy replay</NavLink>}
               {can.viewShadowComparisons && <NavLink to="/shadow">Shadow comparisons</NavLink>}
             </>

@@ -107,11 +107,17 @@ test.describe('payment workspace', () => {
     await expect(page.getByText('Capture completed')).toBeVisible();
     await expect(page.getByText('CAPTURED').first()).toBeVisible();
     // A capture writes a balanced journal, which the detail screen then shows.
+    // Scoped to the journal card. The returns panel's confirmation copy also contains the word
+    // "credited", so a page-wide text match no longer says anything about the journal.
+    const journal = page.locator('section.card', { hasText: 'Capture journal' });
     await expect(page.getByRole('heading', { name: 'Capture journal' })).toBeVisible();
-    await expect(page.getByText('DEBIT')).toBeVisible();
-    await expect(page.getByText('CREDIT')).toBeVisible();
+    await expect(journal.getByText('DEBIT', { exact: true })).toBeVisible();
+    await expect(journal.getByText('CREDIT', { exact: true })).toBeVisible();
     // Capture and void are no longer offered for a terminal payment.
-    await expect(page.getByRole('button', { name: 'Capture' })).toHaveCount(0);
+    // exact: true because an accessible-name match is a substring match, and the returns panel
+    // offers "Reverse the capture" on a captured payment. The assertion is about the Capture
+    // button being gone, so it says exactly that.
+    await expect(page.getByRole('button', { name: 'Capture', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Void' })).toHaveCount(0);
     await capture(page, '09-captured-with-journal');
 

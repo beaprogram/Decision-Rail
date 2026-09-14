@@ -326,7 +326,10 @@ test.describe('recovering a command whose outcome is unknown', () => {
     await expect(page.getByText('Capture completed')).toBeVisible();
     await expect(page.getByRole('heading', { name: 'Capture journal' })).toBeVisible();
     await expect(page.getByText('Funds captured').first()).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Capture' })).toHaveCount(0);
+    // exact: true because an accessible-name match is a substring match, and the returns panel
+    // offers "Reverse the capture" on a captured payment. The assertion is about the Capture
+    // button being gone, so it says exactly that.
+    await expect(page.getByRole('button', { name: 'Capture', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Void' })).toHaveCount(0);
     expect(await sql(`SELECT status FROM payments WHERE id = '${paymentId}'`)).toBe('CAPTURED');
     expect(await sql(`SELECT count(*) FROM ledger_journals WHERE payment_id = '${paymentId}'`)).toBe('1');
@@ -374,7 +377,10 @@ test.describe('recovering a command whose outcome is unknown', () => {
 
     await expect(page.getByText('Void completed')).toBeVisible();
     await expect(page.getByText('Hold released').first()).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Capture' })).toHaveCount(0);
+    // exact: true because an accessible-name match is a substring match, and the returns panel
+    // offers "Reverse the capture" on a captured payment. The assertion is about the Capture
+    // button being gone, so it says exactly that.
+    await expect(page.getByRole('button', { name: 'Capture', exact: true })).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Void' })).toHaveCount(0);
     // A void returns the hold; nothing is captured, so no journal exists for it.
     expect(await sql(`SELECT status FROM payments WHERE id = '${paymentId}'`)).toBe('VOIDED');

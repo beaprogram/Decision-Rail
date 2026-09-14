@@ -10,6 +10,7 @@ import { DeliveryPage } from './routes/Delivery';
 import { PaymentDetailPage } from './routes/PaymentDetail';
 import { PaymentsPage } from './routes/Payments';
 import { PoliciesPage } from './routes/Policies';
+import { ReconciliationPage } from './routes/Reconciliation';
 import { ReplayDetailPage } from './routes/ReplayDetail';
 import { ReplayPage } from './routes/Replay';
 import { ShadowPage } from './routes/Shadow';
@@ -73,6 +74,7 @@ function Authenticated() {
         <Route path="/payments/new" element={<AuthorizePage />} />
         <Route path="/payments/:paymentId" element={<PaymentDetailPage />} />
         <Route path="/accounts" element={<AccountsPage />} />
+        <Route path="/reconciliation" element={<ReconciliationPage />} />
         <Route path="/policies" element={<PoliciesPage />} />
         <Route path="/replay" element={<ReplayPage />} />
         <Route path="/replay/:jobId" element={<ReplayDetailPage />} />

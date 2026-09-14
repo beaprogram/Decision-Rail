@@ -5,7 +5,7 @@ import { ApiError } from '../api/client';
 import { merchantApi } from '../api/endpoints';
 import { useSession } from '../auth/session';
 import { useIdempotentCommand, type CommandHandle } from '../lib/command';
-import { formatMinorUnits } from '../lib/money';
+import { formatMinorUnits, parseMinorUnits } from '../lib/money';
 import { fundingPresentation } from '../components/funding';
 import { PageHeader } from '../components/Shell';
 import {
@@ -15,6 +15,7 @@ import {
   DeliveryBadge,
   EmptyState,
   ErrorNotice,
+  Field,
   Identifier,
   KeyValues,
   LoadingRows,
@@ -30,7 +31,7 @@ import {
   Timestamp,
   UnresolvedCommand,
 } from '../components/ui';
-import type { Payment, PaymentTimeline } from '../api/types';
+import type { Payment, PaymentReturns, PaymentTimeline, ReturnReceipt } from '../api/types';
 
 export function PaymentDetailPage() {
   const { paymentId = '' } = useParams();
@@ -45,6 +46,10 @@ export function PaymentDetailPage() {
     queryKey: ['payment', paymentId, 'ledger'],
     queryFn: ({ signal }) => merchantApi.ledger(paymentId, signal),
     enabled: payment.data?.status === 'CAPTURED',
+  });
+  const returns = useQuery({
+    queryKey: ['payment', paymentId, 'returns'],
+    queryFn: ({ signal }) => merchantApi.returns(paymentId, signal),
   });
   const timeline = useQuery({
     queryKey: ['payment', paymentId, 'timeline'],
@@ -65,6 +70,8 @@ export function PaymentDetailPage() {
 
   const capture = useIdempotentCommand<Payment>('capture');
   const voidCommand = useIdempotentCommand<Payment>('void');
+  const refundCommand = useIdempotentCommand<ReturnReceipt>('refund');
+  const reverseCommand = useIdempotentCommand<ReturnReceipt>('reverse');
   const [pending, setPending] = useState<'capture' | 'void' | null>(null);
 
   if (payment.isPending) {
@@ -125,6 +132,39 @@ export function PaymentDetailPage() {
     }
   };
 
+  /**
+   * Sends a return, then re-reads authoritative state exactly as a lifecycle command does.
+   *
+   * The amount is taken from the caller as integer minor units that were already converted from the
+   * digit string, and it is serialized once at submission. A retry replays those exact bytes: rebuilding
+   * the body from the form would send a different amount under the original key, which the server
+   * correctly refuses as conflicting reuse - destroying the one thing that could have recovered the
+   * original command.
+   */
+  const runReturn = (kind: 'refund' | 'reverse', amountMinor: number | null, reason: string) =>
+    attemptCommand(async () => {
+      const handle = kind === 'refund' ? refundCommand : reverseCommand;
+      const trimmed = reason.trim();
+      await handle.submit({
+        method: 'POST',
+        path: `/ui/payments/${paymentId}/${kind === 'refund' ? 'refunds' : 'reversal'}`,
+        body: {
+          ...(amountMinor === null ? {} : { amountMinor }),
+          ...(trimmed === '' ? {} : { reason: trimmed }),
+        },
+        summary: [
+          { label: 'Payment', value: paymentId },
+          { label: 'Command', value: kind === 'refund' ? 'Refund' : 'Reversal' },
+          ...(amountMinor === null
+            ? []
+            : [{ label: 'Amount', value: `${formatMinorUnits(amountMinor)} ${record.currency}` }]),
+        ],
+      });
+    });
+
+  const retryReturn = (kind: 'refund' | 'reverse') =>
+    attemptCommand(() => (kind === 'refund' ? refundCommand : reverseCommand).retry());
+
   const runCommand = (kind: 'capture' | 'void') =>
     attemptCommand(async () => {
       const handle = kind === 'capture' ? capture : voidCommand;
@@ -180,6 +220,8 @@ export function PaymentDetailPage() {
       <div className="page-body">
         <CommandOutcome kind="capture" handle={capture} onRetry={() => void retryCommand('capture')} />
         <CommandOutcome kind="void" handle={voidCommand} onRetry={() => void retryCommand('void')} />
+        <ReturnOutcome kind="refund" handle={refundCommand} onRetry={() => void retryReturn('refund')} />
+        <ReturnOutcome kind="reverse" handle={reverseCommand} onRetry={() => void retryReturn('reverse')} />
 
         {fundingDecline && (
           <Notice tone="info" title="Declined for funds, not by policy">
@@ -287,6 +329,15 @@ export function PaymentDetailPage() {
           </Card>
         )}
 
+        <ReturnsPanel
+          query={returns}
+          canCommand={can.createPayments}
+          busy={refundCommand.busy || reverseCommand.busy}
+          blocked={refundCommand.unresolved || reverseCommand.unresolved}
+          onRefund={(amountMinor, reason) => void runReturn('refund', amountMinor, reason)}
+          onReverse={(reason) => void runReturn('reverse', null, reason)}
+        />
+
         <LifecycleTimeline query={timeline} />
 
         {can.viewShadowComparisons && (
@@ -380,6 +431,297 @@ export function PaymentDetailPage() {
       </ConfirmDialog>
     </>
   );
+}
+
+/**
+ * What was captured, what has come back, and what may still be returned.
+ *
+ * Every one of those numbers comes from the server, including whether a refund or a reversal is
+ * available and why one is not. Recomputing eligibility here would be a second copy of a financial
+ * rule living somewhere that cannot enforce it.
+ */
+function ReturnsPanel({
+  query,
+  canCommand,
+  busy,
+  blocked,
+  onRefund,
+  onReverse,
+}: {
+  query: { isPending: boolean; error: unknown; data: PaymentReturns | undefined };
+  canCommand: boolean;
+  busy: boolean;
+  /** True while a return's outcome is unknown: a new submission must not be offered until it resolves. */
+  blocked: boolean;
+  onRefund: (amountMinor: number, reason: string) => void;
+  onReverse: (reason: string) => void;
+}) {
+  const [amountText, setAmountText] = useState('');
+  const [reason, setReason] = useState('');
+  const [confirming, setConfirming] = useState<'refund' | 'reverse' | null>(null);
+
+  if (query.isPending) {
+    return (
+      <Card title="Returns" scope="Refunds and reversals against this payment.">
+        <LoadingRows rows={2} label="Loading returns" />
+      </Card>
+    );
+  }
+  if (query.error || !query.data) {
+    return (
+      <Card title="Returns" scope="Refunds and reversals against this payment.">
+        <ErrorNotice error={query.error} context="Loading returns" />
+      </Card>
+    );
+  }
+
+  const summary = query.data;
+  const parsed = parseMinorUnits(amountText);
+  const typedTooMuch =
+    parsed.ok && parsed.minorUnits > summary.remainingRefundableMinor
+      ? `At most ${formatMinorUnits(summary.remainingRefundableMinor)} ${summary.currency} can still be returned.`
+      : null;
+  const amountError = amountText.trim() === '' ? null : parsed.ok ? typedTooMuch : parsed.message;
+  const amountReady = parsed.ok && typedTooMuch === null;
+
+  // The server's own words for why an action is unavailable, so the screen and the API never disagree.
+  const unavailable: Record<string, string> = {
+    NOT_CAPTURED:
+      'Nothing has been captured on this payment, so there is nothing to return. An authorization that has not been captured is released with Void, which moves no money.',
+    FULLY_RETURNED: 'Everything captured on this payment has already been returned.',
+    PARTIALLY_RETURNED:
+      'Part of this capture has already been returned, so it can no longer be reversed. A reversal means the whole capture is undone; returning what is left is a refund.',
+  };
+
+  return (
+    <>
+      <Card
+        title="Returns"
+        scope="Money returned after capture. Each return is its own operation with its own balanced journal; the original capture is never altered."
+      >
+        <div className="grid cols-3">
+          <Stat
+            label="Captured"
+            value={
+              summary.capturedAmountMinor === null ? (
+                <span className="id-short">not captured</span>
+              ) : (
+                <Money minorUnits={summary.capturedAmountMinor} currency={summary.currency} />
+              )
+            }
+            note="What the capture moved"
+          />
+          <Stat
+            label="Returned"
+            value={<Money minorUnits={summary.returnedAmountMinor} currency={summary.currency} />}
+            note={`${summary.returns.length} return${summary.returns.length === 1 ? '' : 's'}`}
+          />
+          <Stat
+            label="Remaining refundable"
+            value={<Money minorUnits={summary.remainingRefundableMinor} currency={summary.currency} />}
+            note="Shared by refunds and reversal"
+          />
+        </div>
+
+        {summary.unavailableReason && (
+          <Notice
+            tone={summary.unavailableReason === 'NOT_CAPTURED' ? 'info' : 'warning'}
+            title={summary.refundable ? 'Reversal is no longer available' : 'No further returns are possible'}
+          >
+            <span>{unavailable[summary.unavailableReason]}</span>
+          </Notice>
+        )}
+
+        {canCommand && summary.refundable && (
+          <div className="stack">
+            <Field
+              label="Refund amount"
+              hint={`Up to ${formatMinorUnits(summary.remainingRefundableMinor)} ${summary.currency}. Converted exactly from what you type; excess decimals are refused rather than rounded.`}
+              error={amountError}
+            >
+              {(fieldProps) => (
+                <input
+                  {...fieldProps}
+                  type="text"
+                  inputMode="decimal"
+                  autoComplete="off"
+                  placeholder="0.00"
+                  value={amountText}
+                  onChange={(event) => setAmountText(event.target.value)}
+                />
+              )}
+            </Field>
+            <Field label="Reason" hint="Optional, kept with the return operation as provenance. At most 140 characters.">
+              {(fieldProps) => (
+                <input
+                  {...fieldProps}
+                  type="text"
+                  maxLength={140}
+                  autoComplete="off"
+                  value={reason}
+                  onChange={(event) => setReason(event.target.value)}
+                />
+              )}
+            </Field>
+            <div className="row">
+              <button
+                type="button"
+                className="primary"
+                disabled={!amountReady || busy || blocked}
+                onClick={() => setConfirming('refund')}
+              >
+                Refund
+              </button>
+              <button
+                type="button"
+                disabled={busy || blocked}
+                onClick={() => setAmountText(formatMinorUnits(summary.remainingRefundableMinor).replace(/,/g, ''))}
+              >
+                Refund everything remaining
+              </button>
+              {summary.reversible && (
+                <button type="button" disabled={busy || blocked} onClick={() => setConfirming('reverse')}>
+                  Reverse the capture
+                </button>
+              )}
+            </div>
+            {/* "Refund everything remaining" fills the exact amount rather than sending a request that
+                means "whatever is left". The remainder changes as other refunds commit, so a key whose
+                meaning depends on when it arrives would be a key whose meaning drifts. */}
+          </div>
+        )}
+
+        {summary.returns.length === 0 ? (
+          <EmptyState title="No returns on this payment" />
+        ) : (
+          <TableScroll>
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">#</th>
+                  <th scope="col">Type</th>
+                  <th scope="col" className="numeric">Amount</th>
+                  <th scope="col">Reason</th>
+                  <th scope="col">Journal</th>
+                  <th scope="col">Recorded</th>
+                </tr>
+              </thead>
+              <tbody>
+                {summary.returns.map((entry) => (
+                  <tr key={entry.id}>
+                    <td>{entry.sequenceNumber}</td>
+                    <td>
+                      <Badge tone={entry.returnType === 'REVERSAL' ? 'warning' : 'info'}>{entry.returnType}</Badge>
+                    </td>
+                    <td className="numeric">
+                      <Money minorUnits={entry.amountMinor} currency={entry.currency} />
+                    </td>
+                    <td>{entry.reason ?? '—'}</td>
+                    <td>{entry.journalId ? <ShortIdentifier value={entry.journalId} /> : '—'}</td>
+                    <td><Timestamp value={entry.createdAt} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </TableScroll>
+        )}
+      </Card>
+
+      <ConfirmDialog
+        open={confirming !== null}
+        title={confirming === 'reverse' ? 'Reverse this capture?' : 'Refund this amount?'}
+        confirmLabel={confirming === 'reverse' ? 'Reverse the capture' : 'Return the funds'}
+        destructive={confirming === 'reverse'}
+        confirming={busy}
+        onCancel={() => setConfirming(null)}
+        onConfirm={() => {
+          if (confirming === 'reverse') {
+            onReverse(reason);
+          } else if (parsed.ok) {
+            onRefund(parsed.minorUnits, reason);
+          }
+          setConfirming(null);
+          setAmountText('');
+          setReason('');
+        }}
+      >
+        <div className="confirm-summary stack tight">
+          <div className="row between">
+            <span className="field-label">Payment</span>
+            <Identifier value={summary.paymentId} />
+          </div>
+          <div className="row between">
+            <span className="field-label">Amount returned</span>
+            <strong>
+              {confirming === 'reverse'
+                ? `${formatMinorUnits(summary.capturedAmountMinor ?? 0)} ${summary.currency}`
+                : `${parsed.ok ? formatMinorUnits(parsed.minorUnits) : '—'} ${summary.currency}`}
+            </strong>
+          </div>
+          <div className="row between">
+            <span className="field-label">Account credited</span>
+            <ShortIdentifier value={summary.accountId} />
+          </div>
+        </div>
+        <p>
+          {confirming === 'reverse'
+            ? 'A reversal returns the whole captured amount in one operation and cannot be undone. The original capture and its journal stay exactly as they are; this adds a new balanced journal recording the money coming back.'
+            : 'The funds are credited back to the account and recorded in a new balanced journal. The original capture is not altered. Holds belonging to other authorizations on this account are untouched.'}
+        </p>
+      </ConfirmDialog>
+    </>
+  );
+}
+
+/** Reports what a return did, including the case where its outcome is unknown. */
+function ReturnOutcome({
+  kind,
+  handle,
+  onRetry,
+}: {
+  kind: 'refund' | 'reverse';
+  handle: CommandHandle<ReturnReceipt>;
+  onRetry: () => void;
+}) {
+  const label = kind === 'refund' ? 'Refund' : 'Reversal';
+  if (handle.state.phase === 'uncertain' && handle.submitted) {
+    return (
+      <UnresolvedCommand
+        title={`${label} may or may not have been applied`}
+        detail={handle.state.error.detail}
+        submitted={handle.submitted}
+        busy={handle.busy}
+        onRetry={onRetry}
+      />
+    );
+  }
+  if (handle.state.phase === 'failed') {
+    const error = handle.state.error;
+    if (error instanceof ApiError && error.conflict) {
+      return (
+        <Notice tone="warning" title={`${label} was refused`}>
+          <span>{error.detail}</span>
+          <span>The returns shown below have been re-read from the server.</span>
+        </Notice>
+      );
+    }
+    return <ErrorNotice error={error} context={label} />;
+  }
+  if (handle.state.phase === 'succeeded') {
+    const receipt = handle.state.result;
+    return (
+      <Notice tone="success" title={`${label} recorded`}>
+        {/* The receipt's own numbers are shown, because they describe this operation. What is left to
+            return comes from the fresh read below, not from here: a replayed key returns the receipt as
+            it stood when the command first ran. */}
+        <span>
+          {formatMinorUnits(receipt.amountMinor)} {receipt.currency} was returned to the account, recorded
+          in journal {receipt.journalId}. The totals below have been re-read from the server.
+        </span>
+      </Notice>
+    );
+  }
+  return null;
 }
 
 /** Reports what a command did, including the case where its outcome is unknown. */
