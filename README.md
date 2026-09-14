@@ -6,22 +6,25 @@
 
 DecisionRail is a Java payment decisioning and resilience portfolio project. It answers a deceptively difficult question: **when a payment request is retried, races another request, or is declined, can we explain the outcome and prove that the money state is still correct?**
 
-It now answers a second one: **when the broker is down, a worker dies mid-send, or someone wants to change a rule, what happens to the committed events and to the money?** And a third: **can an operator open a browser and see why a payment got the decision it did, how a different policy compares, and whether delivery is healthy?**
+It now answers a second one: **when the broker is down, a worker dies mid-send, or someone wants to change a rule, what happens to the committed events and to the money?** A third: **can an operator open a browser and see why a payment got the decision it did, how a different policy compares, and whether delivery is healthy?** And a fourth: **when money has to go back, how is that recorded without rewriting what already happened — and how would anyone know if the books stopped agreeing?**
 
 The transactional payment core handles synthetic funds with merchant isolation, concurrency-safe authorizations, durable idempotency, versioned policy decisions, and a balanced capture journal. On top of that, committed events are delivered to Kafka in per-payment order with idempotent consumers, candidate policies can be replayed against real history or evaluated alongside live traffic without touching it, and the new dependencies have explicit, tested failure behaviour. All of it is now usable through an operator console served by the same application.
 
-**Status:** **8 of 10 planned scope checkpoints** · Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Kafka 3.9 · React 19 + TypeScript
+**Status:** **9 of 10 planned scope checkpoints** · Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Kafka 3.9 · React 19 + TypeScript
 
-“Approximately 80%” refers to those equally weighted scope checkpoints, not elapsed effort or production readiness. See the [delivery ledger](docs/roadmap.md) for the exact boundary and [PROGRESS.md](docs/PROGRESS.md) for the material limitations.
+“Approximately 90%” refers to those equally weighted scope checkpoints, not elapsed effort or production readiness. See the [delivery ledger](docs/roadmap.md) for the exact boundary and [PROGRESS.md](docs/PROGRESS.md) for the material limitations.
 
 ## What is implemented
 
 | Capability | Concrete behavior |
 | --- | --- |
 | Payment lifecycle | Authorize synthetic funds, capture an authorization, or void it and release its hold. |
+| Refunds and reversal | Return captured money in part, repeatedly, or reverse a capture outright. Both draw on one capped budget, so a payment can never credit back more than it captured even when returns race. A reversal is refused once anything has been returned rather than silently becoming a refund of the remainder. |
+| Financial correction | A return is a new operation with its own balanced compensating journal, linked to the payment and the capture. The original authorization, capture amount and capture journal are untouched and stay sealed; the database rejects every attempt to edit them. |
+| Reconciliation | A read-only report that rebuilds expected balances from the ledger and cross-checks each payment's returned total against its return operations and their journals. It reports discrepancies with expected, actual, delta, currency and supporting references — and never repairs, rewrites, or mutates anything it finds. |
 | Retry safety | Every mutation requires a merchant-scoped `Idempotency-Key`; the same request replays its durable result, while conflicting key reuse returns `409`. |
 | Concurrency control | Database locks and constraints protect available funds and competing payment transitions. |
-| Accounting evidence | Capture writes one balanced debit/credit journal. Database constraints verify exactly two entries matching the captured payment; sealed journals reject later additions, updates, and deletes. |
+| Accounting evidence | Capture writes one balanced debit/credit journal, and each return writes one compensating journal that reverses it. Database constraints verify exactly two entries matching the operation's amount, currency, merchant and both ledger accounts in the correct direction; sealed journals reject later additions, updates, and deletes. |
 | Explainable decisions | The stored decision contains the ruleset version, outcome, score, matched reasons, and flags. |
 | Tenant isolation | Merchant authentication and ownership checks protect payment, account, and ledger reads and writes. |
 | Durable event intent | Outbox records commit with payment state, carrying a per-payment sequence assigned under the payment row lock. |
@@ -32,7 +35,7 @@ The transactional payment core handles synthetic funds with merchant isolation, 
 | Historical replay | A job pins a candidate and materialises its inputs, so results are reproducible, membership cannot shift, and an interrupted job resumes without inflating totals. |
 | Shadow evaluation | A pinned candidate is evaluated from committed authorization events. It cannot reserve funds, capture, write a ledger entry, change a decision, or emit an event, and architecture tests enforce that. |
 | Resilience controls | Bounded send deadlines, a documented retry budget, a circuit breaker at the broker boundary, bounded batches and workers, and liveness, readiness, and degraded asynchronous capability as three separate signals. |
-| Repeatable delivery | Database migrations with a verified upgrade path, PostgreSQL and Kafka integration verification, CI, Docker configuration, and two executable demos. |
+| Repeatable delivery | Database migrations with a verified upgrade path, PostgreSQL and Kafka integration verification, CI, Docker configuration, and three executable demos. |
 
 This is an independent educational implementation. It does not process real money or integrate with a card network. Its synthetic policy is a demonstrator, not a trained fraud model or a compliance screen.
 
@@ -56,7 +59,7 @@ flowchart LR
 
 One Spring Boot application owns the transaction boundary. What the diagram deliberately lacks is any arrow from Kafka, the shadow worker, or a replay job back into the payment core or the ledger: evaluating a candidate policy cannot move money, and architecture tests assert those dependencies stay absent.
 
-**The delivery guarantee is at-least-once with idempotent consumer effects**, not exactly-once across PostgreSQL and Kafka. A crash between a broker acknowledgement and the outbox update resends; consumers deduplicate by event id. The [architecture guide](docs/architecture.md) enumerates every remaining failure window, and the ADRs cover the [transactional core](docs/adr/0001-transactional-core.md), [delivery and ordering](docs/adr/0002-outbox-delivery-and-ordering.md), [policy snapshots, replay, and shadow](docs/adr/0003-policy-snapshots-replay-and-shadow.md), and [resilience boundaries](docs/adr/0004-resilience-boundaries.md).
+**The delivery guarantee is at-least-once with idempotent consumer effects**, not exactly-once across PostgreSQL and Kafka. A crash between a broker acknowledgement and the outbox update resends; consumers deduplicate by event id. The [architecture guide](docs/architecture.md) enumerates every remaining failure window, and the ADRs cover the [transactional core](docs/adr/0001-transactional-core.md), [delivery and ordering](docs/adr/0002-outbox-delivery-and-ordering.md), [policy snapshots, replay, and shadow](docs/adr/0003-policy-snapshots-replay-and-shadow.md), [resilience boundaries](docs/adr/0004-resilience-boundaries.md), and [returns, reconciliation, and recovery](docs/adr/0007-returns-reconciliation-and-recovery.md).
 
 ## Run locally
 
@@ -127,7 +130,11 @@ All `/v1/**` routes require HTTP Basic authentication. Four identities have non-
 | `POST` | `/v1/payments/{id}/capture` | Capture an existing authorization; no request body. |
 | `POST` | `/v1/payments/{id}/void` | Release an existing authorization; no request body. |
 | `GET` | `/v1/payments/{id}` | Read lifecycle state and original decision evidence. |
-| `GET` | `/v1/payments/{id}/ledger` | Read the captured payment's journal entries. |
+| `GET` | `/v1/payments/{id}/ledger` | Read the payment's journal entries: the capture, plus one per return. |
+| `POST` | `/v1/payments/{id}/refunds` | Return part or all of a captured payment. The amount is required and exact. |
+| `POST` | `/v1/payments/{id}/reversal` | Reverse a capture in full. States no amount; refused once anything has been returned. |
+| `GET` | `/v1/payments/{id}/returns` | Captured, returned and remaining amounts, and every return with its journal. |
+| `GET` | `/v1/reconciliation` | Check that your own recorded money agrees with the evidence for it. Read-only. |
 | `GET` | `/v1/accounts/{id}` | Read currency, balance, held funds, and available funds. |
 | `GET` | `/v1/rules/active` | Inspect the active synthetic policy. |
 | `GET` | `/v1/payments/{id}/activity` | Read the event-derived activity projection for a payment. |
@@ -140,6 +147,7 @@ All `/v1/**` routes require HTTP Basic authentication. Four identities have non-
 | `GET` | `/v1/ops/outbox/backlog` | Delivery backlog, terminal failures, blocked streams, breaker state. Admin only. |
 | `POST` | `/v1/ops/outbox/redrive` | Return failed events to the pending pool, preserving identity. Admin only. |
 | `GET`, `PUT` | `/v1/ops/shadow` | Read or change shadow configuration. Admin only. |
+| `GET` | `/v1/ops/reconciliation` | Reconcile any named merchant. Admin only; a separate service method from the merchant one. |
 | `GET` | `/actuator/health` | Public service health without internal details. |
 | `GET` | `/actuator/health/liveness`, `/readiness`, `/async` | Process liveness, payment-traffic readiness, and degraded asynchronous capability. |
 
@@ -157,6 +165,22 @@ Example authorization body:
 Send a fresh `Idempotency-Key` for each distinct command. Reuse that same key and request when retrying a command. A successful creation returns `201`; capture and void return `200`. Replayed results carry `Idempotency-Replayed: true` and return the original command snapshot, even after a later capture or void. Read the payment with `GET` when you need current state.
 
 Money uses integer minor units: `2500` is CAD 25.00. The account currency must match the payment currency; this release supports CAD and USD and performs no foreign exchange conversion.
+
+Returning money works the same way, with one rule worth stating up front: **a refund names its amount**. There is no "refund whatever is left" request, because the remainder changes as other refunds commit and an idempotency key whose meaning drifts is worse than no key at all. Read `remainingRefundableMinor` and send that number.
+
+```bash
+# What can still come back
+curl -u "demo-merchant:$MERCHANT_DEMO_PASSWORD" \
+  "http://localhost:8080/v1/payments/$payment/returns"
+
+# A partial refund. Repeat with the same key and body to get the original receipt back.
+curl -u "demo-merchant:$MERCHANT_DEMO_PASSWORD" \
+  -H 'Content-Type: application/json' -H "Idempotency-Key: refund-001" \
+  -d '{"amountMinor":1500,"reason":"customer returned one item"}' \
+  "http://localhost:8080/v1/payments/$payment/refunds"
+```
+
+A refund leaves the payment `CAPTURED`. The capture happened and its journal is sealed evidence of it; what records the money coming back is the returned total and a new compensating journal, not a changed status. `./scripts/lifecycle-demo.sh` walks the whole path in 26 checks.
 
 ## Decision semantics
 
@@ -192,21 +216,23 @@ docker compose -f compose.test.yaml up -d --wait
 
 The test profile already defaults to that stack. Use a dedicated database and broker: integration tests install triggers that inject storage failures, publish synthetic events, and create a throwaway database for the migration upgrade check.
 
-Local verification on **2026-09-12 UTC** passed **213 backend tests**, **41 frontend unit tests**, and **44 browser end-to-end tests** on Java 21.0.11, PostgreSQL 16.15, Kafka 3.9.1, and the pinned Node 22.14.0 that the build downloads (the browser suite ran on the machine's own Node 25.2.1), with zero failures, errors, or skipped tests. The backend total covers 107 domain and contract units, 4 architecture rules, 48 PostgreSQL integration tests, 27 against both PostgreSQL and a real broker, and 27 covering browser authentication and the dashboard read APIs. Every test from the earlier milestones still passes. The browser suite runs with **retries disabled**, locally and in CI, so a first-attempt failure cannot be hidden by a passing retry. The packaged application passed **12** transactional demo checks and **27** asynchronous demo checks.
+Local verification on **2026-09-14 UTC** passed **281 backend tests**, **41 frontend unit tests**, and **53 browser end-to-end tests** on Java 21.0.11, PostgreSQL 16.15, Kafka 3.9.1, and the pinned Node 22.14.0 that the build downloads (the browser suite ran on the machine's own Node 25.2.1), with zero failures, errors, or skipped tests. Every test from the earlier milestones still passes. The browser suite runs with **retries disabled**, locally and in CI, so a first-attempt failure cannot be hidden by a passing retry. The packaged application passed **12** transactional demo checks, **26** lifecycle and reconciliation demo checks, and **27** asynchronous demo checks. The per-group breakdown, and the first-attempt failures recorded rather than absorbed, are in the [verification guide](docs/verification.md).
 
-The browser tests run a real Chromium against the packaged application with real PostgreSQL and Kafka. They sign in and out, prove one merchant cannot reach another's data even when a response from the previous identity arrives late, authorize and capture and void, register a candidate policy and read back its validation errors, run a replay to completion, observe a shadow divergence, inspect and redrive a failed event, and stop the broker to watch delivery degrade while payment reads stay available. They also sign in and out repeatedly on one page without reloading it, since a reload obtains a fresh CSRF token as a side effect and would hide a broken transition; and they let the server commit a command and then drop its response, to check that the retry resends the submitted bytes rather than whatever the form holds by then.
+The browser tests run a real Chromium against the packaged application with real PostgreSQL and Kafka. They sign in and out, prove one merchant cannot reach another's data even when a response from the previous identity arrives late, authorize and capture and void, register a candidate policy and read back its validation errors, run a replay to completion, observe a shadow divergence, inspect and redrive a failed event, and stop the broker to watch delivery degrade while payment reads stay available. They also sign in and out repeatedly on one page without reloading it, since a reload obtains a fresh CSRF token as a side effect and would hide a broken transition; and they let the server commit a command and then drop its response, to check that the retry resends the submitted bytes rather than whatever the form holds by then. Refunds are exercised the same way: a partial refund then the remainder, a reversal and its refusal after a partial refund, an amount above what remains, excess decimal precision, and a refund whose response is dropped after it commits, where the retry must carry the same key and the same bytes and must not return the money twice.
 
 Timing-sensitive behaviour is tested with injected clocks, explicit failpoints, and bounded polling rather than sleeps. A test named for recovery leaves behind exactly the state a killed process leaves, so recovery has to happen through durable state and lease expiry. The [verification guide](docs/verification.md) explains the failure cases and why real infrastructure matters.
 
-[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) passed the backend, frontend, and browser suites plus both demos on revision `4754fab`, against PostgreSQL 16 and Kafka. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) passed the backend, frontend, and browser suites plus the demos on revision `4754fab`, against PostgreSQL 16 and Kafka. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 ## Operator console
 
-Seven screens, all against real data from the same application:
+Eight screens, all against real data from the same application:
 
 - **Payments.** Authoritative search over committed payments with filters for status, risk outcome, currency, account, and creation time. A payment is findable the moment its transaction commits, including while the broker is down and nothing has been delivered. Paging is by keyset cursor, so a payment created mid-paging cannot shift a boundary and hide a row.
 - **Payment detail.** The stored decision that produced the outcome: risk outcome, score, policy version, flags, and every reason contribution. A funding decline is presented separately from a policy decline, because an APPROVE risk decision sitting next to a DECLINED payment is a normal, correct combination. Plus the capture journal and a lifecycle that keeps the payment transaction, broker publication, and each consumer group's own record distinct.
 - **Authorize, capture, void.** Typed amounts convert to integer minor units exactly, never by multiplying a float. Each command carries one idempotency key reused across retries, and a timed-out command is reported as an unknown outcome rather than a failure.
+- **Refunds and reversal.** Captured, returned and remaining amounts, a refund form bounded by what is actually left, a "refund everything remaining" control that fills the exact amount rather than sending a request meaning "whatever is left", and the return history with each operation's linked journal. Eligibility comes from the server, including the reason an action is unavailable; the browser never re-derives a financial rule. Retries behave exactly as they do for a capture: the same key, the same bytes, and authoritative state re-read afterwards.
+- **Reconciliation.** Whether recorded money agrees with the evidence for it, with each finding's expected value, actual value, difference, currency and supporting references. The report states its snapshot, the checks it performed and what it cannot establish, and it is never described as clean when only part of the population was examined. It is read-only, and the screen offers nothing that would change anything.
 - **Accounts.** Balance, held, and available per account, subtotalled per currency and never combined across them.
 - **Policy versions.** Immutable versions with their rules, order, conditions, contributions, flags, and terminal behaviour. Administrators register candidates through a validated editor that surfaces the server's field paths.
 - **Policy replay and shadow.** Compare a candidate against real history or alongside live authorizations, with baseline and candidate explanations side by side and the divergence denominator stated.
@@ -232,13 +258,15 @@ again. The method, the environment, the ceiling and the limitations are in
 
 ## What comes next
 
-The next checkpoint is refunds and reconciliation against the append-only ledger. After that comes a free-budget hosting assessment.
+The next and final checkpoint is a free-budget hosting assessment with a recorded walkthrough.
 
-Redis features, refunds, reconciliation, candidate policy promotion, a highly available broker, and public deployment are **not included**. The console also authenticates against the identities in the generated local environment file and is not hardened for deployment to the public internet. The [roadmap](docs/roadmap.md) tracks the remaining checkpoints, and [PROGRESS.md](docs/PROGRESS.md) lists the material limitations of what is shipped.
+Redis features, candidate policy promotion, a highly available broker, and public deployment are **not included**. Neither are settlement rails, merchant liquidity accounts, chargebacks, or foreign exchange: returns move money between the two synthetic accounts that already exist. No backup or restore procedure has been demonstrated, so no recovery-point or recovery-time objective is claimed. The console also authenticates against the identities in the generated local environment file and is not hardened for deployment to the public internet. The [roadmap](docs/roadmap.md) tracks the remaining checkpoints, and [PROGRESS.md](docs/PROGRESS.md) lists the material limitations of what is shipped.
 
 ## Portfolio value
 
 The core demonstrates decisions that can be inspected and defended in a technical interview: why retries need durable request identity, why account locks protect against double spending, why journal balance is checked at commit, and why event intent belongs in the payment transaction.
+
+The extended lifecycle adds a third conversation, and it is the one a payments interview usually reaches eventually. What a second money movement does to a schema that assumed exactly one. Why a correction is a compensating entry rather than an edit, and what the database has to refuse for that to be true. How a shared budget stays capped when two refunds race. What "reversal" is allowed to mean once part of a capture has already come back. How an idempotent response stays historical when the thing it describes has moved on. And what a reconciliation report can honestly claim when every record it compares lives in the same database.
 
 The asynchronous work adds the harder conversation. Why a database commit and a broker publish cannot be made atomic, and what is left over. What actually establishes event order once you accept that timestamps, random ids, partition keys, and `SKIP LOCKED` do not. Why a failed event blocking one payment's stream is better than quietly dropping it. How a read model survives redelivery. How a rule change can be measured against real history without touching it. And why a broker outage should degrade one capability rather than take a correct payment API out of rotation.
 

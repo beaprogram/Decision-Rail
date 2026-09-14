@@ -68,6 +68,16 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 ## Recorded local result
 
+Recorded **2026-09-14 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
+
+`./mvnw clean test` passed **281 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
+**41 frontend unit tests** and **53 browser end-to-end tests** with retries disabled. The table below is
+the checkpoint 8 record, kept because it is what the group breakdown was counted against; the checkpoint
+9 additions are listed in the section that follows it. The **281** figure is the current total and the
+**213** figure is a historical record of an earlier revision — they are not two counts of the same thing.
+
+### The earlier recorded result (checkpoint 8)
+
 Recorded **2026-09-12 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
 `./mvnw clean verify` passed **213 backend tests** with **0 failures, 0 errors, and 0 skipped**:
@@ -85,6 +95,56 @@ The frontend adds **41 unit tests** covering exact money conversion, response cl
 the transport boundary, idempotent command submission and replay, and funding presentation, and
 **44 browser end-to-end tests** run by a real Chromium against the packaged application with
 real PostgreSQL and Kafka, with retries disabled.
+
+## What checkpoint 9 added
+
+Backend tests went from 213 (checkpoint 8's recorded figure) to **281**, and browser tests from 44 to
+**53**. The new coverage, and the failure each case exists to prevent:
+
+| Case | Evidence | Failure prevented |
+| --- | --- | --- |
+| A partial refund, then the remainder | Three refunds of one capture; the account returns to its opening balance and nothing further is accepted | A budget that resets, or a remainder that can be refunded twice |
+| A refund above what remains | 422 with the remaining amount stated; no return row, no journal, no balance change | An over-credit reported as a rejection after the money had already moved |
+| Concurrent returns exceeding the budget | Eight simultaneous 300-unit refunds against a 1000-unit capture: exactly three commit, five are refused, the recorded total and the operation sum both read 900 | A cap that holds only when requests arrive one at a time |
+| Concurrent retries of one key | Six simultaneous identical refunds return one return id; one operation, one journal, one credit | An idempotency key that is only idempotent when the retry is late enough |
+| A changed fingerprint under a used key | Different amount, different reason, different payment and a different operation type each rejected | A key that silently answers for a command nobody sent |
+| The same key text across merchants | Both merchants' refunds commit independently with different ids and amounts | A tenant boundary that a shared string can cross |
+| A rollback after the financial writes | The surrounding transaction fails: no return, no journal, no returned total, no extra event, balance unchanged — and the key is free | A partial financial effect surviving a failure |
+| A committed refund whose response was lost | The same key returns the original receipt; one return exists | Money returned twice because the caller never heard back |
+| A historical receipt after later returns | The first of three refunds still reports its own totals, while the live view reports current ones | A durable receipt quietly becoming a live view |
+| Historical payment responses after refunds exist | Authorize and capture keys still replay byte-identical payment responses | A new response shape breaking the decoding of old ones |
+| Reversal after a partial refund | Refused with `PAYMENT_NOT_REVERSIBLE`; refunding the remainder still works, and the summary says why | A "reversal" that silently means something different depending on history |
+| Cross-merchant refund, reversal and read | 404 for another merchant, 403 for the operations identity; no return written | Ownership enforced only by what the dashboard chooses to show |
+| Malformed compensating journals | The database refuses a second journal for one return, a wrong amount, a reversed direction, a second capture journal, and any deletion of entries | "Balanced" accepted as sufficient, when a balanced pair can still name the wrong account |
+| Database-level over-return | A direct UPDATE above the capture, and a return row disagreeing with the recorded total, are both refused | A cap that only exists in application code |
+| Other payments on the same account | A refund credits the balance and leaves an unrelated hold exactly as it was; that authorization still captures | Refunded money silently reserved against work nobody requested |
+| Ordered return events | Four events in sequence, the two refunds distinguished by their return block, each naming its operation | Two partial refunds indistinguishable because the status did not move |
+| Refund events and shadow | No shadow task is enqueued during a bounded window after two refunds are delivered | A candidate's divergence rate depending on how often merchants issue refunds |
+| A refund during a broker outage | Commits with the broker unreachable; intent durable and unpublished; delivered in broker-offset order after recovery | A financial command made to depend on a broker |
+| Recovery across a process boundary | The dispatcher's in-memory state is discarded; delivery resumes from the outbox row alone, with the committed event identity | A "restart" test that only calls the same method twice |
+| Reconciliation of valid state | A captured, partly refunded account reports CLEAN with its scope, snapshot, checks and limitations | A report whose silence cannot be distinguished from a report that checked nothing |
+| An inconsistent fixture | A skewed balance and a skewed returned total are each detected with expected, actual, delta, currency and references | A reconciliation that only agrees with itself |
+| Reconciliation under concurrent load | Twelve reports while refunds and captures commit continuously: no findings | A snapshot so loose it invents discrepancies under ordinary traffic |
+| A bounded population | A limit below the population reports INCOMPLETE with no findings, and INCOMPLETE_WITH_DISCREPANCIES when something was also wrong | "Nothing found" read as "nothing wrong" |
+| Reconciliation as a mutation | Three consecutive reports over a known-broken account change no balance, no return, no journal | A report that repairs what it finds, destroying the evidence |
+| The administrative view | ADMIN 200; merchant, other merchant and operations all 403 | A broader view reachable by adding a query parameter |
+| Migration over existing records | Captured payments get their budget, uncaptured ones do not, stored responses are typed PAYMENT with unchanged bytes, historical event payloads gain no new fields, and a return works against a V1-era capture whose journal stays sealed | An upgrade that strands history or rewrites delivered events |
+
+### Migration evidence against a real, populated database
+
+The throwaway-database check above proves the upgrade applies to constructed records. It was also
+applied to the local development database, which had accumulated real history across checkpoints 1
+to 8 — **346 payments, 65 accounts, 55 journals and 439 stored idempotent responses**:
+
+| After applying V10 and V11 | Result |
+| --- | --- |
+| CAPTURED payments given a return budget | 55 of 55 |
+| Non-captured payments wrongly given one | 0 |
+| Stored idempotent responses typed | 439 of 439, all `PAYMENT` |
+| Existing journals classified | 55, all `CAPTURE` |
+| Historical event payloads rewritten | none |
+
+Both migrations reported success, and the three demos then ran against that same database.
 
 ### Browser verification
 
@@ -325,7 +385,10 @@ Both demo scripts passed against the packaged application in the local Compose s
 | Bounded work | A cycle claims at most its batch size with a full backlog. | Unbounded claiming or queueing under load. |
 | Worker restart | Work is recovered after lease expiry, and a live claim cannot be stolen. | Losing in-flight work, or two workers owning one row. |
 | Storage failure | `503` with nothing reserved, recorded, or queued. | A successful financial response the database never stored. |
-| Migration upgrade with existing records | Sequence backfill, delivery status, and payload identity are correct; money and seals intact. | An upgrade that strands committed history or weakens an existing guarantee. |
+| Migration upgrade with existing records | Sequence backfill, delivery status, and payload identity are correct; money and seals intact. The return budget and response kind are backfilled, and historical event payloads gain no new fields. | An upgrade that strands committed history or weakens an existing guarantee. |
+| Return budget under concurrency | Eight simultaneous refunds against one capture commit exactly the three the budget allows. | A cap that holds only for sequential requests. |
+| Compensating journal validity | A return journal must match its operation on amount, currency, merchant, payment and both ledger accounts in the correct direction. | A balanced pair that records the wrong amount or moves value the wrong way. |
+| Reconciliation as a read | Repeated reports over a broken account change no balance, return, or journal. | A report that repairs what it finds, destroying the evidence. |
 | Unhealthy health status codes | DOWN and OUT_OF_SERVICE answer `503`; DEGRADED answers `200`. | A readiness probe reporting failure in its body while returning a success code. |
 | Health indicator with an unreadable dependency | The indicator reports DOWN with a reason instead of throwing. | One failing indicator replacing the whole health document with a generic error. |
 | Stale shadow worker after takeover | No comparison, no task change, and the new owner's result is the only one stored. | A task marked successful while its stored comparison records a failure. |
@@ -370,10 +433,17 @@ The same rule applies to the word "restart". Tests named for recovery leave behi
 With the backend running:
 
 ```bash
-./scripts/demo.sh
+./scripts/demo.sh          # 12 checks: the transactional lifecycle
+./scripts/lifecycle-demo.sh # 26 checks: refunds, reversal, compensating journals, reconciliation
+./scripts/async-demo.sh    # 27 checks: delivery, outage, replay, shadow. Run last: it stops the broker.
 ```
 
-This validates an externally observable sequence and checks the final synthetic balance. Run it against an idle demo account; other writers can legitimately change the balance while the script is checking it. The script is complementary to the integration suite and is not a concurrency or performance benchmark.
+`lifecycle-demo.sh` creates its own synthetic account rather than spending a seeded demo balance, and
+it deliberately skews that account's balance to show a discrepancy being detected before putting it
+back. Reconciliation itself never writes; the undo is the script undoing its own fixture, and the
+script asserts the account reconciles again afterwards.
+
+The first validates an externally observable sequence and checks the final synthetic balance. Run it against an idle demo account; other writers can legitimately change the balance while the script is checking it. The script is complementary to the integration suite and is not a concurrency or performance benchmark.
 
 ## Claims deliberately deferred
 
@@ -386,3 +456,6 @@ Specific to this phase:
 - **No fraud accuracy metrics.** No labelled outcome data exists for synthetic traffic, so precision, recall, and false-positive rates are not computed anywhere.
 - **Replay timings are observations, not benchmarks.** `timingMethod` in every report states exactly what was measured: in-process evaluation only, single JVM, no warmup control or repetition.
 - **Breaker and backoff defaults are not tuned from measurement.** They are reasonable values for a development stack. The retry budget is documented so it can be reasoned about, not because it was derived from observed production behaviour.
+- **No backup or restore has been demonstrated.** There is no tested recovery from a lost PostgreSQL volume, and no recovery-point or recovery-time objective is claimed anywhere. Losing the database loses payments, ledger, idempotency records and outbox together. What *is* demonstrated is recovery of undelivered events across a process boundary from durable state, which is a much narrower claim.
+- **Reconciliation compares records, not reality.** Every record it reads lives in one database. It detects independently maintained records disagreeing with each other; it cannot detect a single mistaken transaction that wrote the same wrong amount to the payment, its journal and the balance together. The report states this in its own `limitations` field rather than leaving it to documentation.
+- **Return performance is unmeasured.** The published throughput figures were taken before refunds and reconciliation existed and describe authorize, capture and void only. No benchmark exercises a refund or a reconciliation report, so nothing is claimed about either. The historical artifacts remain historical.

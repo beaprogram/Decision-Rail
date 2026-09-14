@@ -197,6 +197,183 @@ curl --fail-with-body --silent --show-error \
 
 Retry with the same body and key to observe replay. Change the body while retaining that key to observe `409`. Capture or void the returned payment using a separate key for that operation.
 
+## Walk through refunds, reversal, and reconciliation
+
+```bash
+./scripts/lifecycle-demo.sh
+```
+
+Twenty-six checks: partial refunds drawing down one budget, a refund above the remainder refused, a
+post-capture reversal, that reversal closed off once anything has been returned, an idempotent replay
+returning its own historical totals, the compensating journals and their link to the operations they
+record, the database refusing to edit the original capture journal, a reconciliation finding with its
+evidence, and the administrative boundary.
+
+It creates its own synthetic account and works only on that account, so it never consumes the seeded
+demo balances. It deliberately skews that account's balance to show a discrepancy being detected, then
+puts it back before exiting, so the database is left as it was found. Reconciliation itself never
+writes; the undo is the script undoing its own fixture.
+
+### Returning money by hand
+
+```bash
+set -a; source .env; set +a
+payment=<a captured payment id>
+
+# What may still be returned, and what already was.
+curl --fail-with-body --silent --user "demo-merchant:$MERCHANT_DEMO_PASSWORD" \
+  "http://localhost:8080/v1/payments/$payment/returns" | jq .
+
+# A partial refund. The amount is required and exact.
+curl --fail-with-body --silent --user "demo-merchant:$MERCHANT_DEMO_PASSWORD" \
+  --header 'Content-Type: application/json' \
+  --header "Idempotency-Key: manual-refund-001" \
+  --data '{"amountMinor":1500,"reason":"customer returned one item"}' \
+  "http://localhost:8080/v1/payments/$payment/refunds" | jq .
+```
+
+Reuse the same key and body to see the original receipt returned with `Idempotency-Replayed: true`.
+Change the amount under that key to see `409 IDEMPOTENCY_CONFLICT`.
+
+Three things are worth knowing before using these by hand:
+
+- **A refund names its amount.** There is no "refund whatever is left". The remainder changes as other
+  refunds commit, so one key could mean two amounts at two moments. Read `remainingRefundableMinor`
+  and send that number.
+- **A reversal states no amount** and is refused once anything has been returned. Return the remainder
+  as a refund instead.
+- **A void is not a return.** Releasing an authorization hold before capture moves no money and writes
+  no journal. Refund and reversal both apply only after a capture.
+
+### Reconciling
+
+```bash
+# Your own accounts.
+curl --fail-with-body --silent --user "demo-merchant:$MERCHANT_DEMO_PASSWORD" \
+  "http://localhost:8080/v1/reconciliation" | jq '{status, scope, findings}'
+
+# Any merchant, administrator only.
+curl --fail-with-body --silent --user "admin:$ADMIN_PASSWORD" \
+  "http://localhost:8080/v1/ops/reconciliation?merchantId=demo-merchant" | jq '{status, findings}'
+```
+
+Read `status` first, and read it precisely:
+
+| Status | What it means |
+| --- | --- |
+| `CLEAN` | Everything in scope was examined and agreed. |
+| `DISCREPANCIES_FOUND` | Everything in scope was examined; some of it disagreed. |
+| `INCOMPLETE` | A limit stopped the examination. **Nothing found is not nothing wrong.** |
+| `INCOMPLETE_WITH_DISCREPANCIES` | A limit stopped it, and what was examined already disagreed. |
+
+`scope.incompleteReason` names the limit; narrow with `accountId` or raise `paymentLimit`.
+`scope.checks` lists what was compared, so a check that is absent is visible rather than assumed to
+have passed, and `limitations` states what the report cannot establish at all.
+
+This report never writes. It will not repair a balance, rewrite a journal, or create a refund, and
+there is no endpoint that does. A discrepancy is corrected by a new compensating operation with its
+own evidence, or it is investigated; it is never edited away.
+
+## Recovery: what committed, what is only awaiting delivery, and what to do
+
+Three questions, in order. Answering them out of order is how a committed refund gets issued twice.
+
+### 1. Did the command commit?
+
+The authority is the idempotency record, not a log line and not the dashboard.
+
+```bash
+set -a; source .env; set +a
+key=<the idempotency key the caller used>
+docker compose exec -T database psql -U decisionrail -d decisionrail -c \
+  "SELECT response_kind, http_status, response_body FROM idempotency_records
+   WHERE merchant_id = 'demo-merchant' AND idempotency_key = '$key'"
+```
+
+| What you see | What it means | What to do |
+| --- | --- | --- |
+| No row at all | Nothing was ever claimed under this key. | Safe to send the command. |
+| A row with `response_body` **null** | A transaction claimed the key and did not complete. It rolled back with everything it had written. | **Resend the same key and the same body.** Never mint a new one. |
+| A row with a `response_body` | The command committed. That body is the answer the caller should have had. | **Resend the same key** to receive it, or read it here. Do not send a second command. |
+
+The middle row is the case that matters. An unknown outcome is not a failure, and a fresh key for work
+that may already exist is how a payment is made twice. Resending the identical key and body is always
+safe: it either performs the work once or returns what it already did.
+
+One caveat this project states rather than hides: an absent idempotency record proves no **durable
+result was committed** under that key. It does not by itself prove the request never arrived — a
+request that reached the application and failed before commit leaves exactly the same absence. For the
+purpose of deciding what to do next the two are the same: nothing committed, so resending the same key
+is correct either way.
+
+### 2. Did the money move?
+
+The ledger, not the payment row, is the record of money.
+
+```bash
+payment=<payment id>
+docker compose exec -T database psql -U decisionrail -d decisionrail -c \
+  "SELECT j.journal_kind, j.source_return_id, e.ledger_account, e.side, e.amount_minor
+     FROM ledger_journals j JOIN ledger_entries e ON e.journal_id = j.id
+    WHERE j.payment_id = '$payment' ORDER BY j.created_at, e.side"
+```
+
+A capture debits `wallet:<account>` and credits `merchant-clearing:<merchant>`. A return does the
+exact reverse and names the return operation it records. Then reconcile that account: if the balance
+agrees with these entries, the money is where the evidence says it should be.
+
+### 3. Is the event only awaiting delivery?
+
+A committed financial effect and an undelivered event are **different situations with different
+actions**. Money that moved has moved; a projection that has not caught up is delivery lag.
+
+```bash
+docker compose exec -T database psql -U decisionrail -d decisionrail -c \
+  "SELECT event_type, aggregate_sequence, status, attempts, published_at, last_error
+     FROM outbox_events WHERE aggregate_id = '$payment' ORDER BY aggregate_sequence"
+```
+
+| `status` | Meaning | Action |
+| --- | --- | --- |
+| `PENDING` / `CLAIMED` | Committed intent, not yet acknowledged by the broker. | Wait. Check `/actuator/health/async` and the broker. |
+| `PUBLISHED` | The broker acknowledged it. Consumers may still be behind. | Check `consumed_events` per group. |
+| `FAILED` | The retry budget is exhausted. It blocks **only this payment's** stream. | Redrive it; see "Handling a stalled delivery stream". |
+
+Nothing here is a reason to re-issue a financial command. The money is committed either way, and the
+event carries the identity it was committed with: a redrive delivers the original event, not a new one.
+
+### Supported actions, and what is not one
+
+| Situation | Supported action |
+| --- | --- |
+| Outcome unknown, nothing committed | Resend the same key and body. |
+| Outcome unknown, already committed | Resend the same key; you get the original response. |
+| Money returned in error | Nothing. A return is immutable. There is no un-return; the payment can be authorized again as new work. |
+| Wrong amount refunded (too little) | Refund the difference, as a further refund. |
+| Wrong amount refunded (too much) | Not possible: the budget is capped, and the database refuses it. |
+| Balance disagrees with the ledger | Investigate. Do not adjust the balance; there is no endpoint that does, and doing it by hand destroys the evidence. |
+| Event terminally failed | Redrive. |
+
+Not supported, deliberately: editing a journal, deleting a return, setting a balance, or minting a new
+idempotency key for work that may exist. The first three are rejected by the database; the fourth is
+rejected by arithmetic, eventually.
+
+### Database and broker loss
+
+Stated plainly, because the alternative is implying something that was never tested.
+
+- **No backup or restore procedure has been demonstrated in this project.** There is no tested
+  recovery from a lost PostgreSQL volume, and no recovery-point or recovery-time objective is claimed.
+  Losing the database loses the payments, the ledger, the idempotency records and the outbox together.
+- **The local broker is a single node with replication factor 1.** A lost Kafka volume loses delivered
+  events. What survives is the outbox: committed intent stays in PostgreSQL until a broker
+  acknowledges it, so events not yet published are re-delivered after the broker returns. Events
+  already published and then lost from the broker are **not** recoverable by this system.
+- What *is* demonstrated: a refund committing during a broker outage, its intent surviving, and
+  delivery resuming in order with the original event identity once the broker is back — including
+  across a process boundary, where recovery comes from the outbox row and nothing the previous process
+  held in memory. See `docs/verification.md`.
+
 ## Walk through asynchronous delivery, replay, and shadow
 
 ```bash

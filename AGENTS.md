@@ -4,14 +4,17 @@ DecisionRail is an independent, synthetic payment decisioning portfolio project.
 
 ## Current delivery boundary
 
-Read docs/PROGRESS.md and docs/roadmap.md before continuing. Eight of ten checkpoints are complete: foundation, financial correctness, explainable versioned rules, Kafka event delivery, replay and shadow evaluation, resilience controls, the operator console, and correlated telemetry with measured performance. Refunds and reconciliation, Redis features, candidate policy promotion, and public deployment require later milestones. Do not represent planned capabilities as shipped.
+Read docs/PROGRESS.md and docs/roadmap.md before continuing. Nine of ten checkpoints are complete: foundation, financial correctness, explainable versioned rules, Kafka event delivery, replay and shadow evaluation, resilience controls, the operator console, correlated telemetry with measured performance, and the extended lifecycle with refunds, reversal, reconciliation and recovery procedures. Redis features, candidate policy promotion, and public deployment require later milestones. Do not represent planned capabilities as shipped.
 
 ## Invariants
 
 - Authorizations reserve integer currency minor units without exceeding available funds.
 - All mutations use a merchant-scoped idempotency key and a canonical operation fingerprint.
 - State, balances, journal, audit, outbox intent and successful idempotency result commit together.
-- Capture journals are balanced, tied to captured payment amount/currency, and sealed after commit.
+- Capture journals are balanced, tied to captured payment amount/currency, and sealed after commit. A payment keeps exactly one; every return adds its own compensating journal that reverses it and names the operation it records. Corrections are new entries, never edits.
+- Refunds and post-capture reversal share one capped return budget. A payment can never credit back more than it captured, and the database enforces that the payment's returned total equals the sum of its return operations. A return does not change the payment's status; the totals do.
+- A return credits the funding balance only. Holds belong to other authorizations and are never touched by one.
+- Reconciliation is read-only. It derives expectations from the ledger and the operations that wrote it, never repairs what it finds, and is never reported as clean for a partially examined population.
 - Merchant identity comes from authentication; every resource query enforces ownership.
 - Rules remain independent of Spring, HTTP and persistence; replay and shadow reuse the same pure evaluator.
 - Each event gets a durable per-payment sequence assigned inside the payment transaction, and only the lowest unpublished sequence for a payment is claimable. Timestamps, random ids, partition keys and SKIP LOCKED do not establish order.
@@ -38,7 +41,7 @@ Use Java 21 and ./mvnw verify against the dedicated disposable stack in compose.
 
 Prefer injected clocks, explicit failpoints and bounded polling over sleeps. A test named for a restart must leave the state a killed process leaves and recover through durable state, not call the same method twice. Scope assertions and fault injection to the payments a test created, because the suite shares one database.
 
-Run both demos for changes affecting runtime or API behavior: scripts/demo.sh and scripts/async-demo.sh. Changes touching the dashboard or the browser API also need the Playwright suite in frontend/, run against a running application with real infrastructure; ./mvnw verify already typechecks, lints, unit-tests and builds the frontend. Keep generated assets, node_modules, browser traces and screenshots untracked. Keep schema changes in new Flyway migrations after V9, never edit an applied one, and extend the migration upgrade check when a migration backfills anything. Maintain docs/openapi.yaml and document meaningful tradeoffs in an ADR.
+Run all three demos for changes affecting runtime or API behavior: scripts/demo.sh, scripts/lifecycle-demo.sh and scripts/async-demo.sh. Run the asynchronous one last: it stops the broker, so anything after it runs against an outage it caused. Changes touching the dashboard or the browser API also need the Playwright suite in frontend/, run against a running application with real infrastructure; ./mvnw verify already typechecks, lints, unit-tests and builds the frontend. Keep generated assets, node_modules, browser traces and screenshots untracked. Keep schema changes in new Flyway migrations after V11, never edit an applied one, and extend the migration upgrade check when a migration backfills anything. Maintain docs/openapi.yaml and document meaningful tradeoffs in an ADR.
 
 Commit only reviewed source and docs. Keep .env, .local, database files and build output untracked. An existing .env from an earlier milestone lacks ADMIN_PASSWORD; append one rather than regenerating the file, and never rotate existing credentials. Fault injection (app.events.fault-injection-enabled) stays false outside local and test configuration, and must never gain an HTTP surface.
 

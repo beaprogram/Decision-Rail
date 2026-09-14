@@ -1,6 +1,6 @@
 # Delivery plan and progress ledger
 
-Delivery is defined as **10 equally weighted scope checkpoints**; **8 are complete**. Calling that “approximately 80%” is planning shorthand, not a measurement of elapsed time, engineering effort, production readiness, or a guarantee that the remaining checkpoints are equally difficult.
+Delivery is defined as **10 equally weighted scope checkpoints**; **9 are complete**. Calling that “approximately 90%” is planning shorthand, not a measurement of elapsed time, engineering effort, production readiness, or a guarantee that the remaining checkpoints are equally difficult.
 
 A checkpoint is complete only when its implementation and relevant verification are present. Future milestones below are a delivery plan, not current capabilities.
 
@@ -14,7 +14,7 @@ A checkpoint is complete only when its implementation and relevant verification 
 | 6 | Resilience controls | Timeouts, bounded retries, dependency fault behavior, circuit-breaker behaviour, and explicit degradation policies. | Included |
 | 7 | Operator experience | Searchable payments and decisions, policy comparison views, lifecycle timelines, and an accessible operator UI. | Included |
 | 8 | Telemetry and measured performance | Correlated traces and structured logs, operational metrics, load tests, published methodology, and measured limits. | Included |
-| 9 | Extended lifecycle and recovery | Refunds/reversals, reconciliation, recovery procedures, and financial correction evidence. | Planned |
+| 9 | Extended lifecycle and recovery | Refunds/reversals, reconciliation, recovery procedures, and financial correction evidence. | Included |
 | 10 | Public demo and release | Free-budget hosting assessment, secure configuration, synthetic demo data, deployment validation, and a recorded walkthrough. | Planned |
 
 ## Definition of done for checkpoints 1 to 3
@@ -71,6 +71,13 @@ failure windows remain and why they are acceptable, how a read model stays consi
 redelivery, how a policy change can be evaluated against real history without touching it, and how a
 dependency failure is contained so it degrades one capability instead of the service.
 
+Checkpoint 9 adds the conversation a payments interview usually gets to eventually: what a second
+money movement does to a schema that assumed one, why a correction is a compensating entry rather than
+an edit, how a shared budget is capped when two refunds race, what "reversal" is allowed to mean once
+part of a capture has already come back, how an idempotent response stays historical when the thing it
+describes has moved on, and what a reconciliation report can honestly claim when every record it
+compares lives in the same database.
+
 Resume statements should identify this as a synthetic payment platform and mention only shipped
 features. Describe delivery as at-least-once with idempotent consumers, never as exactly-once.
 Throughput, latency, availability, and recovery claims should be added after repeatable measurements
@@ -91,6 +98,23 @@ Mastercard, a bank, or a payment network.
 - [x] Published measurements with environment, workload, sample counts, percentiles per run, the sustained rate, and the first failing level.
 - [x] Post-run correctness checks scoped to each run's own accounts, covering funds, journals, idempotency, event intent, ordering and duplicate effects.
 - [x] Backend, frontend, browser, demo and CI verification unchanged and passing.
+
+## Definition of done for checkpoint 9
+
+- [x] Partial refunds, repeatable until the capture is exhausted, and a refund of the remaining eligible amount.
+- [x] A post-capture reversal that returns the whole capture, refused once anything has been returned, with the rule documented and tested.
+- [x] Refunds and reversal share one capped budget; a payment can never credit back more than it captured, including when returns race.
+- [x] Every effect of a return commits together - operation, compensating journal, account credit, returned total, audit record, event intent, idempotent response - or none does.
+- [x] New migrations permit compensating journals while keeping exactly one capture journal per payment, one journal per return, correct amounts, currency, ownership, direction and operation links.
+- [x] The original authorization, capture amount and capture journal are unchanged by any return, and the journal stays sealed.
+- [x] An upgrade over pre-existing payments, journals, idempotency responses and outbox records backfills the return budget and response kind, and rewrites no historical event payload.
+- [x] Idempotency holds across two response shapes: historical payment responses still decode, and a receipt is never rebuilt from the payment's current state.
+- [x] Each return has its own event, ordered behind the capture it compensates, naming the operation it records, and never enqueuing shadow work.
+- [x] A refund commits during a broker outage and its event is delivered in order after recovery, including across a process boundary.
+- [x] Read-only reconciliation with a documented scope, a single snapshot, independently derived expectations, actionable findings, and explicit incompleteness.
+- [x] Reconciliation never repairs, rewrites, or mutates anything it finds, and is enforced merchant-scoped with a separately authorised administrator view.
+- [x] Merchants can see captured, returned and remaining amounts, refund and reverse where eligible, and are told why an action is unavailable.
+- [x] Backend, frontend, browser, demo, collector and CI verification all passing.
 
 ## Definition of done for checkpoint 7
 

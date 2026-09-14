@@ -54,6 +54,14 @@ security:
   - merchantBasic: []
 tags:
   - name: Payments
+  - name: Returns
+    description: |
+      Money going back after a capture. Refunds and post-capture reversal share one capped
+      budget; an authorization hold released before capture is a void, not a return.
+  - name: Reconciliation
+    description: |
+      Read-only checks that recorded money agrees with the evidence for it. Nothing here
+      writes; a discrepancy becomes a finding, never a mutation.
   - name: Accounts
   - name: Decisions
   - name: Events
@@ -169,6 +177,212 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /v1/payments/{id}/refunds:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      operationId: refundPayment
+      tags: [Returns]
+      summary: Return part or all of a captured payment
+      description: |
+        Returns captured funds to the funding account. The payment must be CAPTURED and
+        the amount must not exceed the remaining refundable amount, which is the captured
+        amount less everything already returned. Refunds and post-capture reversal share
+        that one budget, so a payment can never credit back more than it captured.
+
+        The amount is required and exact. There is no "refund whatever is left" form: the
+        remainder changes as other refunds commit, so one idempotency key could mean two
+        different amounts at two different moments. Read the remaining amount from
+        GET /v1/payments/{id}/returns and send that number.
+
+        A successful refund commits the return operation, a balanced compensating journal,
+        the credit to the account, the payment's new returned total, the audit record, the
+        durable event intent and the stored idempotent response together. Any failure rolls
+        back all of them. The payment stays CAPTURED; the original capture and its journal
+        are historical facts and are never altered.
+
+        Replaying the same key with the same request returns the original receipt, including
+        the totals as they stood when it committed - not the payment's current totals.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefundRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/ReturnCommandResult'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '422':
+          description: |
+            The payment cannot absorb this return. RETURN_EXCEEDS_REFUNDABLE means the
+            amount is above what remains; the message states how much is left.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /v1/payments/{id}/reversal:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      operationId: reverseCapture
+      tags: [Returns]
+      summary: Reverse a capture in full
+      description: |
+        Returns the entire captured amount in one operation. It states no amount: a
+        reversal is always the whole capture, and a request carrying an amount is refused
+        with INVALID_RETURN_INPUT.
+
+        Refused with PAYMENT_NOT_REVERSIBLE once anything has been returned. "Reverse the
+        capture" has no unambiguous meaning after a partial refund - it cannot return the
+        full amount without over-crediting, and returning the remainder would simply be a
+        refund. Refund the remaining amount instead; nothing is lost.
+
+        This is not an authorization reversal. Releasing a hold before capture is
+        POST /v1/payments/{id}/void, which moves no money and writes no journal.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReversalRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/ReturnCommandResult'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /v1/payments/{id}/returns:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    get:
+      operationId: getPaymentReturns
+      tags: [Returns]
+      summary: Read the return budget and every return so far
+      description: |
+        What was captured, what has been returned, what remains, and every return operation
+        with the journal that recorded it.
+
+        `refundable` and `reversible` are decided by the server. A client must not re-derive
+        them: that would put a second copy of a financial rule somewhere that cannot enforce
+        it. `unavailableReason` names why an action is closed off - NOT_CAPTURED,
+        FULLY_RETURNED, or PARTIALLY_RETURNED, the last of which closes reversal while
+        leaving refunds available.
+      responses:
+        '200':
+          description: The return budget and history for an owned payment
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentReturns'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
+  /v1/reconciliation:
+    get:
+      operationId: reconcile
+      tags: [Reconciliation]
+      summary: Check that recorded money agrees with the evidence for it
+      description: |
+        A read-only report scoped to the authenticated merchant. It derives expected state
+        from the ledger and the operations that wrote it, one link at a time, and reports
+        where records disagree. It never repairs a balance, writes a journal, or creates a
+        return.
+
+        The whole report is read in one REPEATABLE READ snapshot, so ordinary concurrent
+        financial activity cannot make a correct system look broken.
+
+        `status` is CLEAN only when the examined population was complete. A bounded run that
+        found nothing is INCOMPLETE, because "no findings" and "no discrepancies exist" are
+        different claims. Account balance and hold checks always cover an account's whole
+        history; per-payment and per-return checks stop at `paymentLimit`.
+
+        The activity projection is deliberately not read: it is built from delivered events
+        and is allowed to lag, so comparing it here would report delivery latency as missing
+        money.
+
+        There is no merchantId parameter. A broader view is GET /v1/ops/reconciliation,
+        restricted to ADMIN.
+      parameters:
+        - name: accountId
+          in: query
+          required: false
+          description: Restrict the report to one account. Omit to cover every account you own.
+          schema:
+            type: string
+            format: uuid
+        - name: accountLimit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 25
+        - name: paymentLimit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5000
+            default: 500
+      responses:
+        '200':
+          $ref: '#/components/responses/ReconciliationResult'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -811,6 +1025,46 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /v1/ops/reconciliation:
+    get:
+      operationId: reconcileAnyMerchant
+      tags: [Reconciliation]
+      summary: Reconcile a named merchant
+      description: |
+        The broader view, restricted to ADMIN by the security configuration and served by a
+        service method separate from the merchant-facing one. Sharing one method with an optional
+        merchant override would make the privileged case a parameter, and a parameter is what an
+        authorisation mistake turns into cross-tenant access. OPERATIONS cannot reach it.
+      parameters:
+        - name: merchantId
+          in: query
+          required: true
+          schema: { type: string }
+        - name: accountId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: accountLimit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: paymentLimit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 5000 }
+      responses:
+        '200':
+          $ref: '#/components/responses/ReconciliationResult'
+        '400':
+          $ref: '#/components/responses/InvalidRequest'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '503':
+          $ref: '#/components/responses/StorageUnavailable'
+        default:
+          $ref: '#/components/responses/UnexpectedError'
   /v1/ops/outbox/backlog:
     get:
       operationId: readOutboxBacklog
@@ -1195,6 +1449,144 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '403':
           $ref: '#/components/responses/Forbidden'
+  /ui/payments/{id}/returns:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    get:
+      operationId: readBrowserPaymentReturns
+      tags: [Browser session]
+      summary: The return budget and history, for the dashboard
+      description: |
+        The same service and the same merchant resolution as GET /v1/payments/{id}/returns.
+        There is no second implementation; only the security chain differs.
+      responses:
+        '200':
+          description: The return budget and history for an owned payment
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaymentReturns'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /ui/payments/{id}/refunds:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      operationId: browserRefundPayment
+      tags: [Browser session]
+      summary: Refund from the dashboard
+      description: |
+        Session-authenticated and CSRF-protected, unlike /v1 which is stateless Basic with CSRF
+        disabled. The two chains are separate on purpose: a session cookie buys nothing on /v1,
+        and a Basic header buys nothing here. Behaviour, validation and idempotency are identical
+        to POST /v1/payments/{id}/refunds because the same service method runs.
+
+        The dashboard generates one key per logical command and reuses it across retries, so a
+        refund retried after an unknown outcome returns the original receipt rather than returning
+        money twice.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefundRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/ReturnCommandResult'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /ui/payments/{id}/reversal:
+    parameters:
+      - $ref: '#/components/parameters/PaymentId'
+    post:
+      operationId: browserReverseCapture
+      tags: [Browser session]
+      summary: Reverse a capture from the dashboard
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReversalRequest'
+      responses:
+        '201':
+          $ref: '#/components/responses/ReturnCommandResult'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+  /ui/reconciliation:
+    get:
+      operationId: readBrowserReconciliation
+      tags: [Browser session]
+      summary: The merchant's own reconciliation report, for the dashboard
+      description: |
+        Scoped to the signed-in merchant, taken from the session and never from the request.
+        Read-only: there is no browser route that repairs a discrepancy, and the report itself
+        carries what it cannot establish.
+      parameters:
+        - name: accountId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+        - name: accountLimit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100 }
+        - name: paymentLimit
+          in: query
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 5000 }
+      responses:
+        '200':
+          $ref: '#/components/responses/ReconciliationResult'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+  /ui/ops/reconciliation:
+    get:
+      operationId: readBrowserAdministrativeReconciliation
+      tags: [Browser session]
+      summary: Reconcile any merchant, from the administrative workspace
+      description: |
+        Restricted to ADMIN on the browser chain, enforced on the server. A merchant session
+        receives 403 here even though the dashboard does not offer the control; hiding a control
+        is presentation, never authorisation. OPERATIONS remains metrics-only and cannot reach it.
+      parameters:
+        - name: merchantId
+          in: query
+          required: true
+          schema: { type: string }
+        - name: accountId
+          in: query
+          required: false
+          schema: { type: string, format: uuid }
+      responses:
+        '200':
+          $ref: '#/components/responses/ReconciliationResult'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
   /ui/payments/{id}/timeline:
     get:
       operationId: readBrowserPaymentTimeline
@@ -1407,6 +1799,35 @@ components:
         application/json:
           schema:
             $ref: '#/components/schemas/Payment'
+    ReturnCommandResult:
+      description: |
+        The receipt for a return, or its durable replay. Its totals are those at the moment
+        the return committed, not the payment's current totals: a replayed key keeps
+        describing its own operation.
+      headers:
+        Location:
+          description: The payment's returns resource, where the current budget can be read.
+          schema:
+            type: string
+        Idempotency-Replayed:
+          $ref: '#/components/headers/Replayed'
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReturnReceipt'
+    ReconciliationResult:
+      description: |
+        What was examined and what disagreed. A report is CLEAN only when the population was
+        complete; otherwise it is INCOMPLETE and says which limit stopped it.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ReconciliationReport'
     InvalidRequest:
       description: Missing/invalid header, malformed JSON, invalid field, invalid amount/currency, or an unexpected capture/void body
       headers:
@@ -1514,6 +1935,241 @@ components:
             code: REPLAY_JOB_NOT_FOUND
             detail: Replay job was not found.
   schemas:
+    RefundRequest:
+      type: object
+      additionalProperties: false
+      required: [amountMinor]
+      properties:
+        amountMinor:
+          type: integer
+          format: int64
+          minimum: 1
+          maximum: 1000000000000
+          description: |
+            Exact amount to return, in the payment's currency, in minor units. Required:
+            there is no form meaning "whatever is left", because the remainder changes as
+            other refunds commit and an idempotency key whose meaning drifts is worse than
+            no key. Part of the request fingerprint, so the same key with a different amount
+            is refused with IDEMPOTENCY_CONFLICT.
+        reason:
+          type: string
+          maxLength: 140
+          nullable: true
+          description: |
+            Optional provenance, kept on the return operation and never interpreted. Blank
+            and absent mean the same thing and fingerprint alike. Also part of the
+            fingerprint.
+    ReversalRequest:
+      type: object
+      additionalProperties: false
+      description: |
+        A reversal returns the whole captured amount, so it states no amount. The body may
+        be omitted entirely; sending amountMinor is refused with INVALID_RETURN_INPUT.
+      properties:
+        reason:
+          type: string
+          maxLength: 140
+          nullable: true
+    ReturnReceipt:
+      type: object
+      description: |
+        One committed return. The totals are those at the moment it committed; the payment's
+        current totals are on PaymentReturns.
+      required:
+        [returnId, paymentId, accountId, returnType, amountMinor, currency, sequenceNumber,
+         journalId, capturedAmountMinor, returnedAmountMinor, remainingRefundableMinor, createdAt]
+      properties:
+        returnId: { type: string, format: uuid }
+        paymentId: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        returnType:
+          type: string
+          enum: [REFUND, REVERSAL]
+        amountMinor: { type: integer, format: int64, minimum: 1 }
+        currency:
+          type: string
+          enum: [CAD, USD]
+        reason: { type: string, nullable: true }
+        sequenceNumber:
+          type: integer
+          minimum: 1
+          description: This return's position among the payment's returns. Not the event sequence.
+        journalId:
+          type: string
+          format: uuid
+          description: The balanced compensating journal this return created.
+        capturedAmountMinor: { type: integer, format: int64 }
+        returnedAmountMinor:
+          type: integer
+          format: int64
+          description: Total returned immediately after this return, not now.
+        remainingRefundableMinor:
+          type: integer
+          format: int64
+          description: What was left immediately after this return, not now.
+        createdAt: { type: string, format: date-time }
+    PaymentReturn:
+      type: object
+      required: [id, paymentId, accountId, returnType, amountMinor, currency, sequenceNumber, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        paymentId: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        returnType:
+          type: string
+          enum: [REFUND, REVERSAL]
+        amountMinor: { type: integer, format: int64, minimum: 1 }
+        currency:
+          type: string
+          enum: [CAD, USD]
+        reason: { type: string, nullable: true }
+        sequenceNumber: { type: integer, minimum: 1 }
+        journalId:
+          type: string
+          format: uuid
+          nullable: true
+          description: The journal recording this return.
+        createdAt: { type: string, format: date-time }
+    PaymentReturns:
+      type: object
+      required:
+        [paymentId, accountId, status, currency, returnedAmountMinor, remainingRefundableMinor,
+         refundable, reversible, returns]
+      properties:
+        paymentId: { type: string, format: uuid }
+        accountId: { type: string, format: uuid }
+        status:
+          type: string
+          enum: [AUTHORIZED, CAPTURED, VOIDED, DECLINED, REVIEW]
+          description: |
+            Unchanged by a return. A fully refunded payment is still CAPTURED: the capture
+            happened, and the amounts below are what record what came back.
+        currency:
+          type: string
+          enum: [CAD, USD]
+        capturedAmountMinor:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            What the capture moved, or null when this payment was never captured. Null and a
+            zero remaining amount are different states: the first can never be refunded, the
+            second has been refunded in full.
+        returnedAmountMinor: { type: integer, format: int64, minimum: 0 }
+        remainingRefundableMinor: { type: integer, format: int64, minimum: 0 }
+        refundable:
+          type: boolean
+          description: Whether a refund would be accepted now. Decided by the server; do not re-derive it.
+        reversible:
+          type: boolean
+          description: |
+            Whether a reversal would be accepted now. Goes false after the first refund even
+            though refunds remain possible.
+        unavailableReason:
+          type: string
+          nullable: true
+          enum: [NOT_CAPTURED, FULLY_RETURNED, PARTIALLY_RETURNED]
+        returns:
+          type: array
+          items:
+            $ref: '#/components/schemas/PaymentReturn'
+    ReconciliationFinding:
+      type: object
+      required: [type, severity, resourceType, resourceId, detail, references]
+      properties:
+        type:
+          type: string
+          description: |
+            Stable code, for example ACCOUNT_BALANCE_MISMATCH, ACCOUNT_HELD_MISMATCH,
+            RETURN_TOTAL_MISMATCH, CAPTURE_JOURNAL_AMOUNT_MISMATCH,
+            RETURN_JOURNAL_AMOUNT_MISMATCH, LEDGER_ENTRY_DIRECTION_WRONG,
+            RETURNED_ABOVE_CAPTURED, OWNERSHIP_MISMATCH.
+        severity:
+          type: string
+          enum: [CRITICAL, WARNING]
+        resourceType:
+          type: string
+          enum: [ACCOUNT, PAYMENT, RETURN]
+        resourceId: { type: string, format: uuid }
+        currency:
+          type: string
+          nullable: true
+          enum: [CAD, USD]
+        expectedMinor:
+          type: integer
+          format: int64
+          nullable: true
+          description: What the evidence says the value should be.
+        actualMinor:
+          type: integer
+          format: int64
+          nullable: true
+          description: What is actually recorded.
+        deltaMinor:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            actual minus expected, so positive means more money is recorded than the evidence
+            accounts for. Null where a difference is not a quantity; a missing journal is not
+            "off by" anything.
+        detail: { type: string }
+        references:
+          type: array
+          description: The operations and journals the expectation was derived from.
+          items:
+            type: object
+            required: [kind, id]
+            properties:
+              kind:
+                type: string
+                enum: [ACCOUNT, PAYMENT, RETURN, JOURNAL]
+              id: { type: string, format: uuid }
+    ReconciliationReport:
+      type: object
+      required: [merchantId, generatedAt, status, scope, findings, limitations]
+      properties:
+        merchantId: { type: string }
+        generatedAt: { type: string, format: date-time }
+        status:
+          type: string
+          enum: [CLEAN, DISCREPANCIES_FOUND, INCOMPLETE, INCOMPLETE_WITH_DISCREPANCIES]
+          description: |
+            CLEAN only when everything in scope was examined and agreed. A bounded run with
+            no findings is INCOMPLETE: an unexamined population has not been cleared.
+        scope:
+          type: object
+          required:
+            [accountLimit, paymentLimit, accountsExamined, paymentsExamined, returnsExamined,
+             currencies, snapshot, complete, checks]
+          properties:
+            accountFilter: { type: string, format: uuid, nullable: true }
+            accountLimit: { type: integer }
+            paymentLimit: { type: integer }
+            accountsExamined: { type: integer }
+            paymentsExamined: { type: integer }
+            returnsExamined: { type: integer }
+            currencies:
+              type: array
+              description: Never combined. Each account holds one currency and is reconciled in it.
+              items: { type: string, enum: [CAD, USD] }
+            snapshot:
+              type: string
+              description: The isolation the whole report was read under.
+            complete: { type: boolean }
+            incompleteReason: { type: string, nullable: true }
+            checks:
+              type: array
+              description: The comparisons performed, so an absent check is visible rather than assumed passing.
+              items: { type: string }
+        findings:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReconciliationFinding'
+        limitations:
+          type: array
+          description: What this report cannot establish, carried in the report itself.
+          items: { type: string }
     AuthorizationRequest:
       type: object
       additionalProperties: false

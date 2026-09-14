@@ -1,7 +1,7 @@
 # Current delivery and continuation
 
-The plan is ten equally weighted scope checkpoints. Eight are now complete: **approximately 80% of
-planned scope**, not 80% of effort or production readiness. Calling it that is planning shorthand, and
+The plan is ten equally weighted scope checkpoints. Nine are now complete: **approximately 90% of
+planned scope**, not 90% of effort or production readiness. Calling it that is planning shorthand, and
 the checkpoints are not equally difficult. The detailed scope and completion criteria are in
 [roadmap.md](roadmap.md).
 
@@ -35,7 +35,59 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
    provisioned in source control, and a repeatable load harness on isolated infrastructure whose
    results, limits and correctness checks are published in [performance.md](performance.md).
 
+9. The extended payment lifecycle and recovery: partial and full refunds and a post-capture reversal
+   sharing one capped return budget, each recorded as its own operation with its own balanced
+   compensating journal that the database checks against the operation it records, an idempotency layer
+   that carries two response shapes without breaking historical ones, return events ordered behind the
+   capture they compensate, a read-only reconciliation report that derives expected state from the
+   ledger and never repairs what it finds, and an operator recovery procedure for establishing what
+   committed, what is merely awaiting delivery, and which action is appropriate. The lifecycle and
+   accounting decisions are in [ADR 0007](adr/0007-returns-reconciliation-and-recovery.md).
+
 ## Verification record
+
+Local evidence recorded **2026-09-14 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
+**3.9.1**.
+
+- Pinned-wrapper build and suite: **281 backend tests passed**, with **0 failures, 0 errors, and
+  0 skipped**, up from 213 at checkpoint 8.
+- Dashboard: **41 frontend unit tests** and **53 browser end-to-end tests** with retries disabled, up
+  from 44.
+- Demos: **12 checks** (transactional), **26 checks** (lifecycle and reconciliation, new), and
+  **27 checks** (asynchronous), all against the running application with real PostgreSQL and Kafka.
+- Benchmark collector check, k6 attribution check and the harness smoke run all passed, the last
+  exercising the correctness queries updated for the new operation types.
+- V10 and V11 were applied to the local development database, which carried **346 payments, 65
+  accounts, 55 journals and 439 stored idempotent responses** accumulated across checkpoints 1 to 8.
+  All 55 captured payments received a return budget, no uncaptured payment received one, all 439
+  responses were typed, and no historical event payload was rewritten.
+
+Three first-attempt failures are recorded rather than absorbed, all of them mine and none an
+application defect:
+
+- The browser suite failed **every** test on its first run because I did not load `.env`, so the
+  credential lookup threw. Loading it gave 50 of 53.
+- Of those three, two were **pre-existing** tests that my work genuinely broke, in the same way twice:
+  Playwright matches an accessible name as a substring, so `{ name: 'Capture' }` began matching the new
+  "Reverse the capture" button, and a page-wide `getByText('CREDIT')` began matching the returns
+  panel's confirmation copy. Both assertions were made precise — `exact: true`, and scoped to the
+  journal card — rather than relaxed.
+- The third was my own new test racing navigation against a same-named field on the page it was
+  leaving.
+
+Two further first-attempt failures happened during development and are worth recording because of what
+they revealed:
+
+- Adding a refund test to `BrokerOutageIntegrationTest` broke a neighbouring test that had been
+  passing. The dispatcher claims the oldest due events across the whole outbox, which that class shares
+  with its own other tests, so the breaker's failure budget was being spent on an unrelated backlog
+  before the test's own event was attempted. Rather than weaken the assertion, the new coverage moved
+  to its own context and topic and the original class was restored untouched.
+- Two existing tests used `payment.refunded.v1` as their example of an *unsupported* event type. It is
+  supported now, so both were updated to use a type this consumer genuinely does not know. That is a
+  real signal from the suite about a real contract change, not a test that needed loosening.
+
+### The checkpoint 8 record
 
 Local evidence recorded **2026-09-12 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
 **3.9.1**. The build compiles the dashboard with the Node it downloads and pins, **22.14.0**; the
@@ -78,8 +130,10 @@ than through the build.
     happens-before edge makes a guarantee rather than a smaller window.
   - The retry report said zero HTTP failures and described all 576 originals as replayed. The artifact
     shows 7 failed originals, 569 successful, and 1707 replays — 569 x 3. All seven failed at TCP
-    connection establishment with no idempotency record, so they never reached the application; why the
-    connection failed is not established by the retained evidence and is left unattributed.
+    connection establishment, which is the transport-level evidence that no request was sent; the
+    absent idempotency records establish only that nothing was durably committed for those keys, which
+    is a weaker and separate fact. Why the connection failed is not established by the retained
+    evidence and is left unattributed.
 - A further correction pass fixed two remaining benchmark defects. Checkpoint 8 remains complete and the
   checkpoint count is unchanged.
   - Dropped iterations were selected on a custom scenario tag, which k6 does not attach to
@@ -150,14 +204,18 @@ Record actual commands, test counts, failures, and meaningful limitations here a
 
 ### Open items
 
-- None outstanding from the checkpoint 8 correction passes. The `ShadowStaleWorkerTest` flake is
-  resolved: the cause was an ordering race in `DeliveryFaults.clear()`, which released gates before
-  disarming injected failures, and the earlier shared-database hypothesis is withdrawn. See
-  [verification.md](verification.md).
+- None outstanding. The three review cleanups requested alongside checkpoint 9 are done: the failpoint
+  test's wall-clock assertion is replaced by an interrupt-based check that distinguishes an armed delay
+  from a disarmed one rather than from a threshold, the benchmark summariser's population prose now
+  agrees with whether the scenario actually declared a warmup, and the claim that missing idempotency
+  records prove a request never arrived is corrected — those records establish only that nothing was
+  durably committed, and it is the dial-timeout evidence that carries the transport-level conclusion.
+  The cause of those seven connection failures remains unattributed.
+- The `ShadowStaleWorkerTest` flake stays resolved: an ordering race in `DeliveryFaults.clear()`, with
+  the earlier shared-database hypothesis withdrawn. See [verification.md](verification.md).
 
 ## Remaining checkpoints
 
-- [ ] 9. Refunds/reversals, reconciliation, financial corrections, and recovery procedures.
 - [ ] 10. Free-budget hosting assessment, secure public demo deployment, and release walkthrough.
 
 ## Material limitations to carry forward
@@ -206,14 +264,40 @@ These are known and deliberate, not oversights:
   a backend that closes traces on a fixed window will show such a trace in pieces.
 - **Traces are exported only when a collector is configured.** With none, spans are still created and
   their ids still reach logs, but nothing leaves the process.
-- **Still absent:** refunds, reconciliation, and any public deployment.
+- **A return does not change a payment's status.** A fully refunded payment is still CAPTURED, because
+  the capture happened and its journal is sealed evidence of it. What records the money coming back is
+  the returned total, not a status. A reader expecting a REFUNDED state will not find one.
+- **A post-capture reversal is refused after a partial refund**, rather than silently becoming a refund
+  of the remainder. Returning what is left is always available as a refund; see
+  [ADR 0007](adr/0007-returns-reconciliation-and-recovery.md) for why the alternative was rejected.
+- **Reconciliation compares records, not reality.** Everything it reads lives in one database, so it
+  detects independently maintained records disagreeing with each other and cannot detect a single
+  mistaken transaction that wrote the same wrong amount everywhere. The report carries this limitation
+  in its own response.
+- **Reconciliation's per-payment checks are bounded; its balance checks are not.** An account's expected
+  balance is derived over its whole history, because a partial derivation would be wrong rather than
+  incomplete. That makes the balance query's cost grow with an account's history.
+- **No backup or restore procedure has been demonstrated.** There is no tested recovery from a lost
+  PostgreSQL volume and no recovery-point or recovery-time objective is claimed. Losing the database
+  loses payments, ledger, idempotency records and outbox together.
+- **Return and reconciliation performance is unmeasured.** The figures in
+  [performance.md](performance.md) predate both and describe authorize, capture and void only. No
+  benchmark exercises a refund or a report, so nothing is claimed about either.
+- **No settlement rails, merchant liquidity accounts, chargebacks, or foreign exchange.** Returns move
+  money between the two synthetic accounts that already exist.
+- **Still absent:** candidate policy promotion and any public deployment.
 
 ## Guidance for the next implementation session
 
 Read [architecture.md](architecture.md), the [ADRs](adr/), and the [API contract](openapi.yaml) before
-extending this. Checkpoint 9 is refunds, reversals and reconciliation against the append-only ledger.
-Nothing in the ledger may be rewritten to support it: a correction is a new entry, and the sealed
-journal constraint is there to make that the only option.
+extending this. Checkpoint 10 is the free-budget hosting assessment, secure configuration, synthetic
+demo data, deployment validation, and a recorded walkthrough.
+
+Two things from checkpoint 9 are worth carrying into it. The hosting budget is zero, and the
+application now has a reconciliation endpoint whose balance derivation walks an account's whole
+history — it is bounded by account count, not by cost per account, so a public demo should seed
+accounts with short histories rather than one long one. And the local `.env` identities are still the
+only authentication there is; a public deployment needs that replaced, not merely put behind TLS.
 
 Start by confirming the current suite and both demos, with the test stack from `compose.test.yaml`.
 Integration tests install failure-injection triggers and create a throwaway database, so they must not

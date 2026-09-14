@@ -10,7 +10,11 @@ flowchart LR
     API --> Payments[Payment lifecycle]
     Payments --> Rules[Pure versioned rule evaluator]
     Payments --> Ledger[Balanced capture journal]
+    Payments --> Returns[Refund / post-capture reversal]
+    Returns --> Compensating[Compensating journal per return]
     Payments --> DB[(PostgreSQL)]
+    Compensating --> DB
+    DB --- Reconcile[Read-only reconciliation]
 
     DB --- Outbox[Outbox: committed intent + per-payment sequence]
     Outbox --> Dispatcher[Leased dispatcher]
@@ -28,7 +32,9 @@ flowchart LR
     Replay --> Rules
 ```
 
-Everything in the diagram is implemented. Note what the diagram does **not** show: no arrow runs from the broker, the shadow worker, or a replay job back into the payment lifecycle or the ledger. That absence is the central property of this phase, and architecture tests assert it rather than leaving it to review.
+Everything in the diagram is implemented. Note what the diagram does **not** show: no arrow runs from the broker, the shadow worker, a replay job, or reconciliation back into the payment lifecycle or the ledger. That absence is the central property of this phase, and architecture tests assert it rather than leaving it to review — including that reconciliation cannot reach the payment service or either store, so a detected discrepancy has no path to becoming a financial mutation.
+
+Returns are the one genuinely new arrow. A refund or a post-capture reversal moves money in the opposite direction to a capture, and it does so by **adding** evidence: a return operation, and a compensating journal that names it. Nothing an earlier operation wrote is altered, which is why the arrow from `Returns` goes to a new journal rather than back into the capture journal. [ADR 0007](adr/0007-returns-reconciliation-and-recovery.md) explains the lifecycle, the shared capped budget, and why a reversal is refused after a partial refund rather than silently becoming a refund of the remainder.
 
 A browser is now a first-class client. The compiled dashboard is served by the same application from `/dashboard/`, and it calls a session-authenticated API at `/ui/**` that delegates to the same services the scripted `/v1/**` API uses. The two APIs have separate security chains on purpose, which [ADR 0005](adr/0005-browser-session-authentication.md) explains: a session cookie is attached automatically by the browser, so an endpoint a cookie authenticates can be forged from another origin, while a request carrying an `Authorization` header cannot. Keeping them apart means a session cookie buys nothing on `/v1/**`, Basic credentials are not accepted on `/ui/**`, and neither chain can silently borrow the other's protections.
 
@@ -125,11 +131,13 @@ A payment mutation joins the following work in one database transaction:
 2. Claim or load the merchant-scoped idempotency key and compare the request fingerprint.
 3. Lock the relevant account/payment state before a conflicting mutation can change it.
 4. Evaluate or validate the payment transition and update the balance/hold state.
-5. Persist the decision evidence and, for capture, the balanced journal entries.
+5. Persist the decision evidence and, for capture, the balanced journal entries. For a return: the
+   return operation, its balanced compensating journal, the credit back to the account, and the
+   payment's new returned total.
 6. Write the outbox record and durable HTTP result.
 7. Commit before acknowledging the result to the caller.
 
-A rolled-back transaction must not leave a successful payment without its journal, an isolated event, or a saved success response. See the implementation and integration tests for the exact order and storage details.
+A rolled-back transaction must not leave a successful payment without its journal, an isolated event, a return without its compensating journal, or a saved success response. See the implementation and integration tests for the exact order and storage details.
 
 ## Invariants that matter
 
@@ -140,7 +148,11 @@ A rolled-back transaction must not leave a successful payment without its journa
 | Key conflict | Reusing a key for a different operation or body is rejected. | Silent reuse could return a result for the wrong payment. |
 | Available funds | Concurrent authorizations cannot reserve more than the available balance. | Correctness must hold under races, not only sequential demos. |
 | Lifecycle | An authorization can reach a valid terminal state only once. | Competing capture/void requests must not both succeed. |
-| Ledger | Each captured payment has a balanced journal in a single currency. | Money movement needs a durable accounting explanation. |
+| Ledger | Each captured payment has exactly one balanced capture journal in a single currency, and each return operation exactly one compensating journal that matches it on amount, currency, merchant, payment and the two ledger accounts in the correct direction. | Money movement needs a durable accounting explanation, and a balanced journal can still record the wrong amount or move value the wrong way. |
+| Return budget | Refunds and post-capture reversal share one capped budget: a payment can never credit back more than it captured, including when returns race. | A cap enforced only in application code is a cap that a second code path can miss. |
+| Return evidence | A payment's returned total must equal the sum of its return operations, checked by the database at commit. | A denormalised total and the rows it summarises can only disagree if something wrote one without the other, which is the corruption reconciliation must be able to see. |
+| Compensation only | Journals, entries, audit records and return operations reject UPDATE and DELETE. | A correction is a new operation with its own evidence, never an edit to history. |
+| Reconciliation | Read-only, in one snapshot, deriving expectations from the ledger and the operations that wrote it rather than from the field being checked. | A report that repaired what it found would destroy the evidence, using the code whose output is in doubt. |
 | Decision evidence | A stored result records the policy version and matched reasons. | A later rule change must not rewrite what happened. |
 | Event durability | Outbox state commits with the payment mutation. | A dispatcher can retry delivery without losing committed events. |
 | Event ordering | A durable per-payment sequence is assigned under the payment row lock, and only the lowest unpublished sequence is claimable. | A later lifecycle event must not overtake an unfinished earlier one. |
@@ -164,7 +176,11 @@ A rolled-back transaction must not leave a successful payment without its journa
 - Replay and shadow reports contain no fraud accuracy metrics. No labelled outcome data exists for synthetic traffic, so precision, recall, and false-positive rates would be invented.
 - Replay timings are observed values for a single run with no warmup control. They are not a benchmark.
 - The operator console is a locally-scoped interface over synthetic data. Sessions are in memory, so a restart signs everyone out and more than one instance would need shared session storage. Credentials are the four environment-configured accounts; there is no user management and no rate limiting on sign-in.
-- There is no refund lifecycle, reconciliation, distributed tracing, measured performance limit, failover system, or public hosted environment yet.
+- Returns move money between the two synthetic accounts that already exist: a wallet balance and a per-merchant clearing account. There is no settlement rail, merchant liquidity account, chargeback, foreign exchange, or payment-network integration, and none is implied by the word "reversal".
+- A return does not change a payment's status. A fully refunded payment is still CAPTURED, because the capture happened; the returned totals are what record what came back.
+- Reconciliation compares records that are maintained separately. All of them live in one database, so a single mistaken transaction that wrote the same wrong amount to the payment, its journal and the balance would reconcile perfectly. The report states this limitation itself.
+- No backup or restore procedure has been demonstrated. There is no tested recovery from a lost PostgreSQL volume and no recovery-point or recovery-time objective is claimed.
+- There is no candidate policy promotion workflow or public hosted environment yet.
 
 ## What telemetry is allowed to do
 

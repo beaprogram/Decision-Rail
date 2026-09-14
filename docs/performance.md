@@ -28,6 +28,12 @@ Nothing here is estimated, extrapolated, or carried over from a previous run.
 One *iteration* is a full business operation: an authorization, then a capture or a void. Each is two
 HTTP requests, so 25 iterations/s is 50 requests/s.
 
+> **Nothing here describes refunds or reconciliation.** Every measurement in this document was taken
+> before checkpoint 9 existed, against a workload of authorize, capture and void only. No scenario
+> issues a refund and none requests a reconciliation report, so the sustained rate below says nothing
+> about either path. These artifacts are historical and are kept as they were measured; a figure for
+> the new operations would need its own runs, and none have been taken.
+
 Every figure comes from the measured scenario. Rates are `count ÷ 60s`, the declared window. Dropped
 iterations are attributed by the built-in `scenario` tag and reconciled against the aggregate.
 

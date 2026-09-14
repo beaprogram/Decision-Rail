@@ -157,10 +157,19 @@ describe the measured phase; financial correctness covers everything the run did
 ## Correctness after load
 
 `benchmark/verify.sql` asserts, scoped to the accounts the run created: available funds never exceeded;
-balances and holds reconcile to the operations performed; one balanced journal per captured payment;
-voids release without a journal; one payment per idempotency key; every committed payment has durable
-event intent; per-payment event sequences are dense from 1; the projection caught up in order with one
-effect per event; no duplicate consumer effect; nothing quarantined; nothing left undelivered.
+balances and holds reconcile to the operations performed, **including anything returned**; each
+payment's returned total agrees with its return operations *and* with the journals those wrote, and
+never exceeds what was captured; exactly one balanced **capture** journal per captured payment and
+exactly one journal per return operation; voids release without a journal of either kind and no
+uncaptured payment carries a return; one payment per idempotency key; every committed payment has
+durable event intent; the lifecycle event count matches two plus one per return; per-payment event
+sequences are dense from 1; the projection caught up in order with one effect per event; no duplicate
+consumer effect; nothing quarantined; nothing left undelivered.
+
+The return terms were added in checkpoint 9 and are zero in every workload measured so far, because
+none of these scenarios issues a refund. They are written explicitly rather than omitted for exactly
+that reason: left out, the balance check would silently pass for an account credited back money the run
+never accounted for, and it would start failing the moment a future workload did issue one.
 
 Any row it returns is a failure and fails the run. The historical integration suite is necessary but
 does not substitute for this: it proves these properties about constructed scenarios, not about the
