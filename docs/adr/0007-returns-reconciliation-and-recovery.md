@@ -209,6 +209,56 @@ Merchants see their own accounts, with the merchant taken from authentication an
 query. A broader view is a separate method reachable only from `/v1/ops` and `/ui/ops`, both restricted
 to ADMIN. OPERATIONS remains metrics-only.
 
+## Recovery
+
+The operator procedure is in the operator guide; what belongs here is the decision behind it.
+
+**The idempotency record is the authority on what committed**, not a log line and not the dashboard.
+Three states, and the middle one is the one that matters:
+
+| State | Means | Action |
+| --- | --- | --- |
+| No row | Nothing was claimed under this key | Safe to send |
+| A row with no response body | A transaction claimed the key and did not complete; it rolled back with everything it wrote | Resend the same key and body |
+| A row with a response body | It committed; that body is the answer | Resend the same key to receive it |
+
+An unknown outcome is not a failure, and a fresh key for work that may already exist is how a payment
+is made twice. Resending an identical key and body is always safe: it either performs the work once or
+returns what it already did.
+
+One thing this deliberately does not claim: an absent idempotency record proves no durable result was
+committed under that key, not that the request never arrived. A request that reached the application
+and failed before commit leaves the same absence. For deciding what to do next the two are the same,
+which is why the procedure is written on the state rather than on a diagnosis.
+
+**A committed financial effect and an undelivered event are different situations.** Money that moved
+has moved. A projection that has not caught up is delivery lag, and neither a PENDING outbox row nor a
+terminally failed one is a reason to reissue a financial command — a redrive delivers the original
+event, with the identity it was committed with.
+
+### What recovery this project actually demonstrates
+
+- A refund commits while the broker is unreachable, keeps its money, and its event is delivered in
+  order once the broker returns.
+- That event is deliverable from its outbox row alone, with every piece of the dispatcher's in-process
+  state — lease, claim, breaker — discarded first.
+- A committed command whose response was lost is recovered by resending its key.
+- A failure after the financial writes rolls back all of them, and frees the key.
+
+### What it does not
+
+- **Not a demonstrated restart.** The JVM does not restart in any of the above. A genuine process
+  boundary for an *undelivered* refund event was attempted and abandoned: restarting while the broker
+  is unreachable does not boot, because the Kafka listener builds its consumer eagerly and an
+  unresolvable `bootstrap.servers` fails the context; and holding the event by hand loses a race
+  against the dispatcher's 250ms poll. Both are recorded in the progress ledger. The claim is withdrawn
+  rather than approximated.
+- **No backup or restore.** There is no tested recovery from a lost PostgreSQL volume and no
+  recovery-point or recovery-time objective anywhere. Losing the database loses payments, ledger,
+  idempotency records and outbox together.
+- **A single-node broker.** Replication factor 1. Events already published and then lost from the
+  broker are not recoverable by this system; the outbox only covers what has not been acknowledged.
+
 ## What is deliberately absent
 
 No settlement rails, merchant liquidity accounts, chargebacks, foreign exchange, or payment-network
