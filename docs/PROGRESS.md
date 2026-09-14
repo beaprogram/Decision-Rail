@@ -280,6 +280,21 @@ These are known and deliberate, not oversights:
 - **No backup or restore procedure has been demonstrated.** There is no tested recovery from a lost
   PostgreSQL volume and no recovery-point or recovery-time objective is claimed. Losing the database
   loses payments, ledger, idempotency records and outbox together.
+- **The application does not start while the broker is unreachable.** Found while building the
+  checkpoint 9 recovery demo, which originally restarted the application during a broker outage. A
+  *running* process is unaffected by an outage - that is tested, and payments keep committing - but on
+  startup the Kafka listener container constructs its consumer eagerly, and an unresolvable
+  `bootstrap.servers` throws `ConfigException: No resolvable bootstrap urls given in bootstrap.servers`
+  out of `DefaultLifecycleProcessor`, failing the context. A restart during an outage is therefore an
+  outage of the payment API too, which is exactly what readiness excluding the broker was meant to
+  avoid. This is **not fixed here**: the fix belongs to the resilience checkpoint's listener lifecycle,
+  not to the return lifecycle, and it needs its own tests.
+- **Recovery of an undelivered event across a real process boundary is not demonstrated.** What is
+  demonstrated is that the outbox row alone suffices: every piece of the dispatcher's in-process state
+  is discarded and delivery still happens with the committed identity. A genuine restart was attempted
+  for the checkpoint 9 demo and abandoned, because the two ways to stage it both fail - restarting
+  during a broker outage does not boot (above), and holding the event by hand loses a race against the
+  dispatcher's own 250ms poll on every attempt. The claim is withdrawn rather than approximated.
 - **Return and reconciliation performance is unmeasured.** The figures in
   [performance.md](performance.md) predate both and describe authorize, capture and void only. No
   benchmark exercises a refund or a report, so nothing is claimed about either.

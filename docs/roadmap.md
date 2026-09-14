@@ -110,7 +110,7 @@ Mastercard, a bank, or a payment network.
 - [x] An upgrade over pre-existing payments, journals, idempotency responses and outbox records backfills the return budget and response kind, and rewrites no historical event payload.
 - [x] Idempotency holds across two response shapes: historical payment responses still decode, and a receipt is never rebuilt from the payment's current state.
 - [x] Each return has its own event, ordered behind the capture it compensates, naming the operation it records, and never enqueuing shadow work.
-- [x] A refund commits during a broker outage and its event is delivered in order after recovery, including across a process boundary.
+- [x] A refund commits during a broker outage and its event is delivered in order after recovery, from the durable outbox row with no in-process dispatcher state to help. A genuine process boundary is **not** claimed; see the limitations in [PROGRESS.md](PROGRESS.md).
 - [x] Read-only reconciliation with a documented scope, a single snapshot, independently derived expectations, actionable findings, and explicit incompleteness.
 - [x] Reconciliation never repairs, rewrites, or mutates anything it finds, and is enforced merchant-scoped with a separately authorised administrator view.
 - [x] Merchants can see captured, returned and remaining amounts, refund and reverse where eligible, and are told why an action is unavailable.

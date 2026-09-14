@@ -90,6 +90,7 @@ captured_payment() {
 
 balance() { psql_value "SELECT balance_minor FROM accounts WHERE id = '$account_id'"; }
 
+
 printf 'DecisionRail lifecycle and reconciliation demo: %s\n' "$base_url"
 merchant_call GET /actuator/health 200
 pass 'application is healthy'
@@ -251,10 +252,16 @@ pass 'the discrepancy is reported with expected, actual, delta, currency and ref
 jq '.findings[0] | {type, resourceType, resourceId, expectedMinor, actualMinor, deltaMinor, currency, detail}' "$work_dir/body"
 
 # Reading the report twice changes nothing: this capability reports, it does not repair.
+returns_before_report=$(psql_value "SELECT count(*) FROM payment_returns WHERE account_id = '$account_id'")
+journals_before_report=$(psql_value "SELECT count(*) FROM ledger_journals j JOIN payments p ON p.id = j.payment_id WHERE p.account_id = '$account_id'")
 merchant_call GET "/v1/reconciliation?accountId=$account_id" 200
 [[ "$(balance)" == "$((before_skew - 250))" ]] || fail 'reconciliation changed the balance'
-[[ "$(psql_value "SELECT count(*) FROM payment_returns WHERE account_id = '$account_id'")" == 5 ]] \
+# Counted rather than hard-coded, so adding a step to this demo cannot quietly turn this into an
+# assertion about a number nobody maintains.
+[[ "$(psql_value "SELECT count(*) FROM payment_returns WHERE account_id = '$account_id'")" == "$returns_before_report" ]] \
   || fail 'reconciliation created or removed a return'
+[[ "$(psql_value "SELECT count(*) FROM ledger_journals j JOIN payments p ON p.id = j.payment_id WHERE p.account_id = '$account_id'")" == "$journals_before_report" ]] \
+  || fail 'reconciliation created or removed a journal'
 pass 'running the report again repairs nothing and creates nothing'
 
 psql_value "UPDATE accounts SET balance_minor = balance_minor + 250 WHERE id = '$account_id'" >/dev/null

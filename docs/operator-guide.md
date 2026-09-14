@@ -370,9 +370,14 @@ Stated plainly, because the alternative is implying something that was never tes
   acknowledges it, so events not yet published are re-delivered after the broker returns. Events
   already published and then lost from the broker are **not** recoverable by this system.
 - What *is* demonstrated: a refund committing during a broker outage, its intent surviving, and
-  delivery resuming in order with the original event identity once the broker is back — including
-  across a process boundary, where recovery comes from the outbox row and nothing the previous process
-  held in memory. See `docs/verification.md`.
+  delivery resuming in order with the original event identity once the broker is back, with every
+  piece of the dispatcher's in-process state discarded first so the outbox row alone is what carries
+  it. What is **not** demonstrated is that same recovery across a real process boundary — see the
+  limitation below and in `docs/PROGRESS.md`.
+- **The application does not start while the broker is unreachable.** A running process tolerates an
+  outage and keeps committing payments; a restarting one fails, because the Kafka listener container
+  builds its consumer eagerly and an unresolvable `bootstrap.servers` fails the whole context. Plan a
+  restart for after the broker is back.
 
 ## Walk through asynchronous delivery, replay, and shadow
 

@@ -137,17 +137,31 @@ class RefundDeliveryIntegrationTest {
         assertThat(deliveredIds).contains(refundEvent.toString());
     }
 
+    /**
+     * Recovery from the outbox row alone, with every piece of in-process delivery state discarded.
+     *
+     * <p>Deliberately not named for a restart. The JVM does not restart here: what this establishes is
+     * that nothing the dispatcher held in memory - its lease, its breaker state, its claim - is needed
+     * to deliver a committed refund, because the row alone is sufficient. That is the property the
+     * outbox exists to provide, and it is what a restart would depend on.
+     *
+     * <p>A genuine process boundary for an <em>undelivered</em> refund event is not demonstrated
+     * anywhere in this project. Staging one means keeping the event undelivered across the restart,
+     * and the natural way to do that - restarting while the broker is unreachable - currently fails to
+     * boot; see the limitation recorded in docs/PROGRESS.md. Holding the event by other means loses a
+     * race against the dispatcher's own poll. The claim is therefore not made.
+     */
     @Test
-    void aRefundsEventIntentSurvivesARestartOfEverythingHoldingIt() throws Exception {
+    void aRefundIsDeliveredFromItsOutboxRowWithNoInProcessStateToHelp() throws Exception {
         UUID payment = authorize(5_000);
         capture(payment);
         UUID refundId = refund(payment, 1_500);
         UUID refundEvent = eventOfType(payment, "payment.refunded.v1");
 
         // Everything in memory is discarded: the dispatcher's breaker, its lease bookkeeping and any
-        // claim it held. A killed process leaves exactly this - a row in the database and nothing
-        // else - and the point is that recovery comes from that row rather than from anything the
-        // previous process was keeping.
+        // claim it held. A killed process leaves exactly this state behind - a row in the database and
+        // nothing else - and the point is that delivery comes from that row rather than from anything
+        // the previous process was keeping. It is not a restart, and is not described as one.
         jdbc.update("""
                 UPDATE outbox_events SET status = 'PENDING', lease_owner = NULL, lease_token = NULL,
                        lease_expires_at = NULL, next_attempt_at = now()
