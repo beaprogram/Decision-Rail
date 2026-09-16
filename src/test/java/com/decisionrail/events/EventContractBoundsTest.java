@@ -176,6 +176,38 @@ class EventContractBoundsTest {
     }
 
     @Test
+    void theEventTypeAndTheOperationTypeMustAgree() {
+        // The operation type was checked only against the set of known types, never against the event
+        // carrying it. A partial refund could therefore arrive labelled as a reversal, and the
+        // full-capture rule was skipped because that rule keyed off the nested type rather than the
+        // event's - so the very check that would have caught it was the one being evaded.
+        assertRejected("MALFORMED", "must match the event type",
+                envelope(Map.of("eventType", "\"payment.reversed.v1\"",
+                        "payment", capturedPaymentObject("", "", 1_000),
+                        "returnOperation", returnObject("\"type\":\"REFUND\""))));
+        assertRejected("MALFORMED", "must match the event type",
+                refundEvent(Map.of("payment", capturedPaymentObject("", "", 2_500),
+                        "returnOperation", returnObject("\"type\":\"REVERSAL\"", "\"amountMinor\":2500"))));
+    }
+
+    @Test
+    void validReturnsOfEachShapeAreStillAccepted() {
+        // A partial refund, a refund of the whole capture, and a reversal. All three must survive the
+        // correspondence rule; it exists to reject disagreement, not to narrow what is legal.
+        assertThatCode(() -> contract.parse(refundEvent(Map.of()))).doesNotThrowAnyException();
+        assertThatCode(() -> contract.parse(refundEvent(Map.of(
+                "payment", capturedPaymentObject("", "", 2_500),
+                "returnOperation", returnObject("\"amountMinor\":2500")))))
+                .doesNotThrowAnyException();
+        assertThatCode(() -> contract.parse(envelope(Map.of(
+                "eventType", "\"payment.reversed.v1\"",
+                "aggregateSequence", "3",
+                "payment", capturedPaymentObject("", "", 2_500),
+                "returnOperation", returnObject("\"type\":\"REVERSAL\"", "\"amountMinor\":2500")))))
+                .doesNotThrowAnyException();
+    }
+
+    @Test
     void aReversalThatDoesNotReturnTheWholeCaptureIsRejected() {
         // A partial "reversal" is a refund wearing the wrong name, and the two have different meanings
         // for what may happen next.
@@ -236,7 +268,7 @@ class EventContractBoundsTest {
         return render(payment);
     }
 
-    private String returnObject(String override) {
+    private String returnObject(String... overrides) {
         java.util.LinkedHashMap<String, String> operation = new java.util.LinkedHashMap<>();
         operation.put("id", "\"cccccccc-dddd-eeee-ffff-111111111111\"");
         operation.put("type", "\"REFUND\"");
@@ -245,7 +277,10 @@ class EventContractBoundsTest {
         operation.put("reason", "\"customer returned an item\"");
         operation.put("sequenceNumber", "1");
         operation.put("occurredAt", "\"2026-09-10T12:05:00Z\"");
-        applyOverride(operation, override);
+        // Varargs because a fixture often has to change two fields at once - a reversal names both its
+        // type and the full captured amount - and applying only the first silently produced an event
+        // that was invalid for a different reason than the test intended.
+        for (String override : overrides) applyOverride(operation, override);
         return render(operation);
     }
 

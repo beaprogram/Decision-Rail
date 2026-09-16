@@ -193,6 +193,61 @@ class EventDeliveryIntegrationTest {
     }
 
     @Test
+    void aReturnEventWhoseTypesDisagreeIsQuarantinedAndDoesNotBlockTheRecordBehindIt() throws Exception {
+        UUID payment = authorize(accountId, 4_000);
+        capture(payment);
+        refund(payment, 1_000);
+        deliver(payment);
+        Waits.until("the genuine refund is projected", BUDGET, () -> {
+            Map<String, Object> activity = activityRow(payment);
+            return activity != null && ((Number) activity.get("return_event_count")).intValue() == 1;
+        });
+        long quarantinedBefore = inbox.quarantineCount(GROUP);
+        int appliedBefore = ((Number) activityRow(payment).get("applied_event_count")).intValue();
+        long returnedBefore = ((Number) activityRow(payment).get("returned_amount_minor")).longValue();
+
+        String genuineRefund = jdbc.queryForObject("""
+                SELECT payload::text FROM outbox_events
+                WHERE aggregate_id = ? AND event_type = 'payment.refunded.v1'
+                """, String.class, payment);
+
+        // A partial refund wearing a reversal's event type. Before the correspondence rule this parsed
+        // cleanly: the full-capture check keyed off the nested operation type, so calling it a REFUND
+        // was enough to opt out of the one rule that would have rejected it.
+        BrokerProbe.publishRaw(TOPIC, payment.toString(), mutate(genuineRefund, node -> {
+            node.put("eventType", "payment.reversed.v1");
+            node.put("eventId", UUID.randomUUID().toString());
+        }));
+        // And the mirror: a reversal's operation inside a refund event.
+        BrokerProbe.publishRaw(TOPIC, payment.toString(), mutate(genuineRefund, node -> {
+            ((ObjectNode) node.get("returnOperation")).put("type", "REVERSAL");
+            node.put("eventId", UUID.randomUUID().toString());
+        }));
+
+        Waits.until("both mismatched records are quarantined", BUDGET,
+                () -> inbox.quarantineCount(GROUP) >= quarantinedBefore + 2);
+        assertThat(jdbc.queryForList("""
+                SELECT reason FROM consumer_quarantine WHERE consumer_group = ? ORDER BY quarantined_at DESC LIMIT 2
+                """, String.class, GROUP)).containsOnly("MALFORMED");
+
+        // Neither touched the read model: no phantom reversal, no inflated returned total.
+        Map<String, Object> activity = activityRow(payment);
+        assertThat(((Number) activity.get("applied_event_count")).intValue()).isEqualTo(appliedBefore);
+        assertThat(((Number) activity.get("returned_amount_minor")).longValue()).isEqualTo(returnedBefore);
+        assertThat(((Number) activity.get("return_event_count")).intValue()).isEqualTo(1);
+
+        // A quarantine is not a stall. The next valid record on the same partition still gets applied,
+        // which is what distinguishes refusing a record from blocking the stream behind it.
+        refund(payment, 500);
+        deliver(payment);
+        Waits.until("the record behind the quarantined ones is applied", BUDGET, () -> {
+            Map<String, Object> current = activityRow(payment);
+            return ((Number) current.get("return_event_count")).intValue() == 2
+                    && ((Number) current.get("returned_amount_minor")).longValue() == 1_500;
+        });
+    }
+
+    @Test
     void duplicateDeliveryOfTheSameEventProducesOneProjectionEffect() throws Exception {
         UUID payment = authorize(accountId, 3_100);
         deliver(payment);

@@ -36,6 +36,16 @@ public class EventContract {
     public static final Set<String> SUPPORTED_TYPES =
             Set.copyOf(Stream.concat(LIFECYCLE_TYPES.stream(), RETURN_TYPES.stream()).toList());
     private static final Set<String> RETURN_OPERATION_TYPES = Set.of("REFUND", "REVERSAL");
+    /**
+     * Which operation type each return event is allowed to carry.
+     *
+     * <p>One-to-one on purpose. An event type and the operation inside it are two statements about the
+     * same thing, so a consumer that accepts them disagreeing has to pick one to believe, and either
+     * choice is a guess about money.
+     */
+    private static final java.util.Map<String, String> OPERATION_TYPE_FOR_EVENT = java.util.Map.of(
+            "payment.refunded.v1", "REFUND",
+            "payment.reversed.v1", "REVERSAL");
     /** Mirrors payment_returns.reason varchar(140). */
     private static final int MAX_RETURN_REASON = 140;
     private static final Set<String> RISK_OUTCOMES = Set.of("APPROVE", "REVIEW", "DECLINE");
@@ -166,6 +176,14 @@ public class EventContract {
         require(operation.id() != null, "return id is required");
         require(operation.type() != null && RETURN_OPERATION_TYPES.contains(operation.type()),
                 "return type must be one of " + RETURN_OPERATION_TYPES.stream().sorted().toList());
+        // The event type and the operation type are two statements about the same thing, and this is
+        // where they are required to agree. Checking the operation type only against the set of known
+        // values let a partial refund arrive labelled payment.reversed.v1 - and because the
+        // full-capture rule below keyed off the nested type, that mislabelling also skipped the one
+        // check that would have caught it.
+        require(OPERATION_TYPE_FOR_EVENT.get(envelope.eventType()).equals(operation.type()),
+                "return type " + operation.type() + " must match the event type " + envelope.eventType()
+                        + ", which carries " + OPERATION_TYPE_FOR_EVENT.get(envelope.eventType()));
         require(operation.amountMinor() > 0 && operation.amountMinor() <= MAX_AMOUNT_MINOR,
                 "return amountMinor is out of range");
         require(operation.currency() != null && CURRENCIES.contains(operation.currency()),
@@ -186,7 +204,10 @@ public class EventContract {
         require("CAPTURED".equals(payment.status()), "a return event must carry a captured payment");
         require(payment.capturedAmountMinor() != null, "a return event must state the captured amount");
         // REVERSAL means the whole capture came back. Anything less is a refund wearing the wrong name.
-        require(!"REVERSAL".equals(operation.type())
+        // Keyed off the event type, which the correspondence above has already tied to the operation
+        // type: reading the nested type here is what let a mislabelled event decide for itself whether
+        // this rule applied to it.
+        require(!"payment.reversed.v1".equals(envelope.eventType())
                         || operation.amountMinor() == payment.capturedAmountMinor(),
                 "a reversal must return the full captured amount");
     }
