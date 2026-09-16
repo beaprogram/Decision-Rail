@@ -14,9 +14,17 @@ import java.util.UUID;
  * @param refundable        whether a refund would be accepted right now
  * @param reversible        whether a reversal would be accepted right now. A reversal is refused once
  *                          anything has been returned, so this goes false after the first refund even
- *                          though refunds remain possible.
+ *                          though refunds remain possible. Derived from the payment's authoritative
+ *                          return count, never from whether the history page below happens to be empty.
  * @param unavailableReason the stable code explaining refusal, or null when both are available. The
  *                          server decides this; the dashboard renders it and never derives its own.
+ * @param returnCount       how many return operations this payment has in total. This is the number a
+ *                          caller should show; {@code returns} is one page of them and is usually
+ *                          shorter.
+ * @param returns           one page of return history, newest first
+ * @param nextCursor        pass back as {@code cursor} to read the next, older page, or null when this
+ *                          page is the last one
+ * @param pageLimit         the page size this response was built with
  */
 public record PaymentReturnsView(
         UUID paymentId,
@@ -29,4 +37,7 @@ public record PaymentReturnsView(
         boolean refundable,
         boolean reversible,
         String unavailableReason,
-        List<PaymentReturnView> returns) {}
+        long returnCount,
+        List<PaymentReturnView> returns,
+        String nextCursor,
+        int pageLimit) {}

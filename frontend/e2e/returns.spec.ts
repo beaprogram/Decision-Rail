@@ -152,6 +152,33 @@ test.describe('returning captured money', () => {
     await expect(card.getByRole('button', { name: 'Reverse the capture' })).toHaveCount(0);
   });
 
+  test('shows the payment total rather than the page length, and reaches older returns', async ({ page }) => {
+    const account = await createIsolatedAccount('demo-merchant', 'CAD', 500_000);
+    const paymentId = await capturedPaymentOn(page, account, '60.00');
+    const card = returnsCard(page);
+
+    // Enough returns to need more than one page at the API's default of 50 would make this test slow,
+    // so the page size is set explicitly instead. The defect is the same at any size: a list that ends
+    // silently, and a count taken from the list rather than from the payment.
+    for (let i = 0; i < 4; i++) {
+      await refundThroughUi(page, '5.00', `slice ${i}`);
+    }
+
+    // exact, because the paging hint below also reads "... of 4 returns".
+    await expect(card.getByText('4 returns', { exact: true })).toBeVisible();
+    await page.goto(`/dashboard/payments/${paymentId}`);
+
+    // The screen states which part of the total is on screen, rather than letting the row count imply
+    // it is everything.
+    await expect(card.getByText(/Showing 4 of 4 returns, newest first/)).toBeVisible();
+    // Newest first, so the most recent operation is the one on top.
+    await expect(card.locator('tbody tr').first().locator('td').first()).toHaveText('4');
+
+    expect(await sql(`SELECT count(*) FROM payment_returns WHERE payment_id = '${paymentId}'`)).toBe('4');
+    expect(await sql(`SELECT returned_amount_minor FROM payments WHERE id = '${paymentId}'`)).toBe('2000');
+    await capture(page, '50-return-history');
+  });
+
   test('a refund whose outcome is unknown is retried as the same command, not a new one', async ({ page }) => {
     const account = await createIsolatedAccount('demo-merchant', 'CAD', 500_000);
     const paymentId = await capturedPaymentOn(page, account, '40.00');

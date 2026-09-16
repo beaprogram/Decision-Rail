@@ -47,9 +47,13 @@ export function PaymentDetailPage() {
     queryFn: ({ signal }) => merchantApi.ledger(paymentId, signal),
     enabled: payment.data?.status === 'CAPTURED',
   });
+  // One page of return history at a time. The cursor is component state rather than part of the query
+  // key's identity being reset on every refresh: a new return must bring the reader back to the newest
+  // page, because that is where it landed.
+  const [returnsCursor, setReturnsCursor] = useState<string | null>(null);
   const returns = useQuery({
-    queryKey: ['payment', paymentId, 'returns'],
-    queryFn: ({ signal }) => merchantApi.returns(paymentId, signal),
+    queryKey: ['payment', paymentId, 'returns', returnsCursor],
+    queryFn: ({ signal }) => merchantApi.returns(paymentId, returnsCursor, signal),
   });
   const timeline = useQuery({
     queryKey: ['payment', paymentId, 'timeline'],
@@ -126,6 +130,9 @@ export function PaymentDetailPage() {
     try {
       await run();
     } finally {
+      // A new return is the newest entry, so recovery from any attempt returns to the first page
+      // rather than leaving the reader on a stale continuation that predates it.
+      setReturnsCursor(null);
       // Whether it succeeded, was refused, or conflicted, the authoritative state is re-read rather
       // than inferred from the response.
       refreshEverything();
@@ -336,6 +343,8 @@ export function PaymentDetailPage() {
           blocked={refundCommand.unresolved || reverseCommand.unresolved}
           onRefund={(amountMinor, reason) => void runReturn('refund', amountMinor, reason)}
           onReverse={(reason) => void runReturn('reverse', null, reason)}
+          onPage={setReturnsCursor}
+          paged={returnsCursor !== null}
         />
 
         <LifecycleTimeline query={timeline} />
@@ -447,6 +456,8 @@ function ReturnsPanel({
   blocked,
   onRefund,
   onReverse,
+  onPage,
+  paged,
 }: {
   query: { isPending: boolean; error: unknown; data: PaymentReturns | undefined };
   canCommand: boolean;
@@ -455,6 +466,10 @@ function ReturnsPanel({
   blocked: boolean;
   onRefund: (amountMinor: number, reason: string) => void;
   onReverse: (reason: string) => void;
+  /** Moves to the page continuing from this cursor, or back to the newest page when null. */
+  onPage: (cursor: string | null) => void;
+  /** True while showing a continuation page rather than the newest one. */
+  paged: boolean;
 }) {
   const [amountText, setAmountText] = useState('');
   const [reason, setReason] = useState('');
@@ -514,7 +529,9 @@ function ReturnsPanel({
           <Stat
             label="Returned"
             value={<Money minorUnits={summary.returnedAmountMinor} currency={summary.currency} />}
-            note={`${summary.returns.length} return${summary.returns.length === 1 ? '' : 's'}`}
+            /* The payment's total, not the page's length. Showing the page length here reported 200
+               returns for a payment that had 201, while the amount beside it counted all of them. */
+            note={`${summary.returnCount} return${summary.returnCount === 1 ? '' : 's'}`}
           />
           <Stat
             label="Remaining refundable"
@@ -591,7 +608,7 @@ function ReturnsPanel({
           </div>
         )}
 
-        {summary.returns.length === 0 ? (
+        {summary.returnCount === 0 ? (
           <EmptyState title="No returns on this payment" />
         ) : (
           <TableScroll>
@@ -624,6 +641,29 @@ function ReturnsPanel({
               </tbody>
             </table>
           </TableScroll>
+        )}
+
+        {summary.returnCount > 0 && (
+          <div className="row between">
+            {/* Which of the total is on screen, stated rather than implied by the row count. */}
+            <span className="field-hint">
+              Showing {summary.returns.length} of {summary.returnCount} return
+              {summary.returnCount === 1 ? '' : 's'}, newest first.
+              {summary.nextCursor === null && !paged ? '' : ' Older operations continue below.'}
+            </span>
+            <div className="row">
+              {paged && (
+                <button type="button" onClick={() => onPage(null)}>
+                  Newest
+                </button>
+              )}
+              {summary.nextCursor !== null && (
+                <button type="button" onClick={() => onPage(summary.nextCursor)}>
+                  Older returns
+                </button>
+              )}
+            </div>
+          </div>
         )}
       </Card>
 

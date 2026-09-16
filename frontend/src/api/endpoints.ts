@@ -74,9 +74,14 @@ export const merchantApi = {
   timeline: (id: string, signal?: AbortSignal) =>
     apiFetch<PaymentTimeline>(`/ui/payments/${id}/timeline`, { signal }),
 
-  /** What was captured, what has been returned, what is left, and every return so far. */
-  returns: (id: string, signal?: AbortSignal) =>
-    apiFetch<PaymentReturns>(`/ui/payments/${id}/returns`, { signal }),
+  /**
+   * What was captured, what has been returned, what is left, and one page of return history.
+   *
+   * History is newest first and keyset paged, so a return committing while someone reads lands ahead of
+   * the pages already fetched. `returnCount` is the payment's total; `returns` is the page.
+   */
+  returns: (id: string, cursor?: string | null, signal?: AbortSignal) =>
+    apiFetch<PaymentReturns>(`/ui/payments/${id}/returns${queryString({ cursor })}`, { signal }),
 
   /**
    * The merchant's own reconciliation report. Read-only: this endpoint reports discrepancies and has

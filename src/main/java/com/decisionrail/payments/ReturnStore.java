@@ -22,8 +22,16 @@ import org.springframework.stereotype.Repository;
  */
 @Repository
 public class ReturnStore {
-    /** Bounded so a payment with an unusual amount of return history cannot produce an unbounded response. */
-    public static final int MAX_RETURNS_LISTED = 200;
+    /**
+     * Page size bounds for return history.
+     *
+     * <p>Still bounded, because one payment's history must never produce an unbounded response. What
+     * changed is that the bound is now a page rather than a ceiling: everything past it was previously
+     * unreachable, so a payment with 201 returns had a newest operation that no caller could see while
+     * its totals counted it.
+     */
+    public static final int DEFAULT_PAGE = 50;
+    public static final int MAX_PAGE = 200;
 
     private final JdbcTemplate jdbc;
 
@@ -97,18 +105,40 @@ public class ReturnStore {
                 returnedAmountMinor, Timestamp.from(updatedAt), paymentId);
     }
 
-    /** One payment's returns, oldest first, each with the journal that recorded it. */
-    public List<PaymentReturnView> forPayment(String merchant, UUID paymentId, int limit) {
-        return jdbc.query("""
+    /**
+     * One page of a payment's returns, newest first, each with the journal that recorded it.
+     *
+     * <p>Newest first so the most recent operation is always on the first page, and keyset paged on the
+     * sequence number so the rest stays reachable. Ownership is in the query rather than applied to the
+     * result: the merchant comes from authentication, so a return belonging to anyone else is never
+     * selected instead of being filtered out afterwards.
+     *
+     * <p>One row beyond the page size is read to decide whether another page exists, which avoids a
+     * second query and avoids reporting a next page that turns out to be empty.
+     */
+    public Page forPayment(String merchant, UUID paymentId, ReturnCursor cursor, int limit) {
+        List<PaymentReturnView> rows = jdbc.query("""
                 SELECT r.id, r.payment_id, r.account_id, r.return_type, r.amount_minor, r.currency,
                        r.reason, r.sequence_number, j.id AS journal_id, r.created_at
                 FROM payment_returns r
                 LEFT JOIN ledger_journals j ON j.source_return_id = r.id
-                WHERE r.merchant_id = ? AND r.payment_id = ?
-                ORDER BY r.sequence_number
+                WHERE r.merchant_id = ? AND r.payment_id = ? AND (? = 0 OR r.sequence_number < ?)
+                ORDER BY r.sequence_number DESC
                 LIMIT ?
-                """, ReturnStore::map, merchant, paymentId, limit);
+                """, ReturnStore::map, merchant, paymentId,
+                cursor == null ? 0 : cursor.sequenceNumber(),
+                cursor == null ? 0 : cursor.sequenceNumber(),
+                limit + 1);
+        boolean more = rows.size() > limit;
+        List<PaymentReturnView> page = more ? List.copyOf(rows.subList(0, limit)) : List.copyOf(rows);
+        String next = more
+                ? new ReturnCursor(paymentId, page.getLast().sequenceNumber()).encode()
+                : null;
+        return new Page(page, next);
     }
+
+    /** One page of return history, and where to continue from. */
+    public record Page(List<PaymentReturnView> returns, String nextCursor) {}
 
     private static PaymentReturnView map(ResultSet rs, int n) throws SQLException {
         return new PaymentReturnView(rs.getObject("id", UUID.class), rs.getObject("payment_id", UUID.class),

@@ -78,10 +78,19 @@ public class PaymentController {
                 new ReturnCommand(id, ReturnType.REVERSAL, null, reason)));
     }
 
-    /** What was captured, what has been returned, what is left, and every return operation so far. */
+    /**
+     * What was captured, what has been returned, what is left, and a page of return operations.
+     *
+     * <p>History is newest first and keyset paged on the per-payment sequence number, so a return
+     * committing while someone reads appears ahead of the pages already fetched rather than shifting a
+     * boundary in the middle of them. {@code returnCount} is the payment's total; {@code returns} is
+     * one page. Follow {@code nextCursor} for older operations.
+     */
     @GetMapping("/payments/{id}/returns")
-    public PaymentReturnsView returns(Principal principal, @PathVariable UUID id) {
-        return payments.returns(principal.getName(), id);
+    public PaymentReturnsView returns(Principal principal, @PathVariable UUID id,
+            @RequestParam(required = false) String cursor,
+            @RequestParam(required = false) Integer limit) {
+        return payments.returns(principal.getName(), id, cursor, limit);
     }
 
     /**

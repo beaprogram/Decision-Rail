@@ -329,7 +329,13 @@ export interface PaymentReturns {
   refundable: boolean;
   reversible: boolean;
   unavailableReason: 'NOT_CAPTURED' | 'FULLY_RETURNED' | 'PARTIALLY_RETURNED' | null;
+  /** How many return operations this payment has in total. `returns` is one page and is usually shorter. */
+  returnCount: number;
+  /** One page of history, newest first. */
   returns: PaymentReturn[];
+  /** Pass back as `cursor` for the next, older page. Null when this page is the last. */
+  nextCursor: string | null;
+  pageLimit: number;
 }
 
 /**
