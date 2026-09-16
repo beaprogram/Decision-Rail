@@ -1,0 +1,80 @@
+# Disposable infrastructure for the restart-recovery demonstration in scripts/recovery-demo.sh.
+#
+# Its own project name, its own volumes and its own loopback ports, so it cannot collide with the
+# development stack or with compose.test.yaml. Everything here is created and destroyed by that
+# script; nothing in it is shared with anything else, and the credentials below are ephemeral values
+# for a database that exists for about a minute.
+#
+# The application is a service here on purpose. The scenario needs the broker's *name* to stop
+# resolving, which is what happens to a Compose service when its container stops - and that is the
+# condition that used to prevent the application from starting at all.
+name: decisionrail-recovery
+services:
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: decisionrail_recovery
+      POSTGRES_USER: decisionrail
+      POSTGRES_PASSWORD: recovery-demo-only
+    ports:
+      - "127.0.0.1:${RECOVERY_DB_PORT:-55436}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U decisionrail -d decisionrail_recovery"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql/data
+
+  broker:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://broker:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      # One partition, so broker offsets across a payment's events are the order they were sent in.
+      KAFKA_NUM_PARTITIONS: "1"
+      CLUSTER_ID: 5L6g3nShT-eMCtK--X86sw
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --list >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 10s
+      retries: 40
+
+  backend:
+    build: .
+    environment:
+      JDBC_URL: jdbc:postgresql://database:5432/decisionrail_recovery
+      JDBC_USERNAME: decisionrail
+      JDBC_PASSWORD: recovery-demo-only
+      # A Compose service name. When the broker container stops this stops resolving, which is the
+      # exact condition the application used to refuse to start under.
+      KAFKA_BOOTSTRAP_SERVERS: broker:9092
+      DEMO_ENABLED: "true"
+      PORT: "8080"
+      MERCHANT_DEMO_PASSWORD: recovery-demo-merchant-ephemeral
+      MERCHANT_OTHER_PASSWORD: recovery-other-merchant-ephemeral
+      OPERATIONS_PASSWORD: recovery-operations-ephemeral
+      ADMIN_PASSWORD: recovery-administrator-ephemeral
+    ports:
+      - "127.0.0.1:${RECOVERY_APP_PORT:-8084}:8080"
+    depends_on:
+      database:
+        condition: service_healthy
+    # Deliberately no dependency on the broker. Compose ordering would mask the behaviour under test:
+    # the application is supposed to start without it, and waiting for it here would prove only that
+    # Compose can wait.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/actuator/health >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 40

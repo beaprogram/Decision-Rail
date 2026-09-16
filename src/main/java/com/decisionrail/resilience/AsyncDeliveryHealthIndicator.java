@@ -33,13 +33,16 @@ public class AsyncDeliveryHealthIndicator implements HealthIndicator {
     private final CircuitBreaker breaker;
     private final DeliveryProperties properties;
     private final Clock clock;
+    private final com.decisionrail.events.ListenerStarter listeners;
 
     public AsyncDeliveryHealthIndicator(OutboxStore outbox, CircuitBreaker brokerBreaker,
-                                        DeliveryProperties properties, Clock clock) {
+                                        DeliveryProperties properties, Clock clock,
+                                        com.decisionrail.events.ListenerStarter listeners) {
         this.outbox = outbox;
         this.breaker = brokerBreaker;
         this.properties = properties;
         this.clock = clock;
+        this.listeners = listeners;
     }
 
     @Override
@@ -68,9 +71,15 @@ public class AsyncDeliveryHealthIndicator implements HealthIndicator {
         boolean brokerImpaired = breakerState != CircuitBreaker.State.CLOSED;
         boolean backlogStale = ageSeconds > properties.backlog().degradedAge().toSeconds();
         boolean backlogLarge = pending > properties.backlog().degradedCount();
-        boolean degraded = brokerImpaired || backlogStale || backlogLarge || failed > 0;
+        // A process whose consumers have not started is degraded in a way the backlog cannot show:
+        // events may be publishing perfectly while nothing on this instance is consuming them. Since
+        // listeners now start off the startup path and retry, that state is reachable and has to be
+        // reported rather than inferred.
+        boolean consumersStopped = !listeners.allListenersRunning();
+        boolean degraded = brokerImpaired || backlogStale || backlogLarge || failed > 0 || consumersStopped;
 
         return Health.status(degraded ? DEGRADED : Status.UP)
+                .withDetail("consumersRunning", !consumersStopped)
                 .withDetail("brokerBreaker", breakerState.name())
                 .withDetail("undeliveredEvents", pending)
                 .withDetail("oldestUndeliveredAgeSeconds", ageSeconds)

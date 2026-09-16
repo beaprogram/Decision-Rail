@@ -84,6 +84,14 @@ jobs:
       # Browser verification runs against that same packaged container and the same real PostgreSQL
       # and Kafka. It is not a smoke test with mocked responses: it signs in, authorizes, captures,
       # replays a candidate policy, and stops the broker to see delivery degrade.
+      # A real process boundary on its own disposable stack: a refund commits with the broker stopped,
+      # the application is killed, a new process starts while the broker's name still does not resolve,
+      # serves payments, and delivers the pending event in order once the broker returns. It builds and
+      # destroys its own database, broker and application container, so it shares nothing with the steps
+      # around it.
+      - name: Demonstrate restart recovery with an unavailable broker
+        run: ./scripts/recovery-demo.sh
+
       - name: Install browser
         run: npm ci --no-audit --no-fund && npx playwright install --with-deps chromium
         working-directory: frontend

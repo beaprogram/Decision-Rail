@@ -129,11 +129,15 @@ public class EventsConfiguration {
 
     @Bean
     ConcurrentKafkaListenerContainerFactory<String, String> paymentEventListenerFactory(
-            ConsumerFactory<String, String> paymentEventConsumerFactory,
-            @Value("${spring.kafka.listener.auto-startup:true}") boolean autoStartup) {
+            ConsumerFactory<String, String> paymentEventConsumerFactory) {
         var factory = new ConcurrentKafkaListenerContainerFactory<String, String>();
         factory.setConsumerFactory(paymentEventConsumerFactory);
-        factory.setAutoStartup(autoStartup);
+        // Never started by the context lifecycle, whatever auto-startup says. Building a consumer
+        // resolves bootstrap.servers, and an unresolvable name throws out of the lifecycle processor
+        // and fails the whole application - so a restart while the broker's name was gone took the
+        // payment API down with it. ListenerStarter starts them afterwards instead, honouring that
+        // same property, and retries until the broker is reachable.
+        factory.setAutoStartup(false);
         // One consumer thread keeps each partition's records strictly sequential.
         factory.setConcurrency(1);
         factory.getContainerProperties().setAckMode(ContainerProperties.AckMode.MANUAL_IMMEDIATE);
