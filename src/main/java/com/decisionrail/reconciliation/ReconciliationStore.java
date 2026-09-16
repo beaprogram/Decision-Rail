@@ -59,7 +59,20 @@ public class ReconciliationStore {
                        coalesce(w.captured_debits, 0)            AS captured_debits,
                        coalesce(w.returned_credits, 0)           AS returned_credits,
                        coalesce(w.reversed_direction_entries, 0) AS reversed_direction_entries,
-                       coalesce(h.outstanding_authorizations, 0) AS outstanding_authorizations
+                       coalesce(h.outstanding_authorizations, 0) AS outstanding_authorizations,
+                       -- Currency agreement across everything the sums above draw on. Without this the
+                       -- sums add minor units of one currency into an expectation denominated in
+                       -- another, which produces a number that looks like a balance and means nothing.
+                       (SELECT count(*) FROM payments p
+                         WHERE p.account_id = s.id AND p.currency <> s.currency)   AS payments_in_other_currency,
+                       (SELECT count(*) FROM payments p
+                          JOIN ledger_journals j ON j.payment_id = p.id
+                         WHERE p.account_id = s.id AND j.currency <> s.currency)   AS journals_in_other_currency,
+                       (SELECT count(*) FROM payment_returns r
+                         WHERE r.account_id = s.id AND r.currency <> s.currency)   AS returns_in_other_currency,
+                       (SELECT string_agg(DISTINCT trim(p.currency), ',' ORDER BY trim(p.currency))
+                          FROM payments p
+                         WHERE p.account_id = s.id AND p.currency <> s.currency)   AS conflicting_currencies
                 FROM scoped s
                 LEFT JOIN LATERAL (
                     SELECT coalesce(sum(e.amount_minor) FILTER (WHERE j.journal_kind = 'CAPTURE' AND e.side = 'DEBIT'), 0)  AS captured_debits,
@@ -94,6 +107,10 @@ public class ReconciliationStore {
         return jdbc.query("""
                 SELECT p.id, p.account_id, p.currency, p.status, p.amount_minor,
                        p.captured_amount_minor, p.returned_amount_minor,
+                       -- The account boundary, which the per-payment checks did not cross. Journals and
+                       -- returns are already compared against the payment; the payment was compared
+                       -- against nothing above it.
+                       (SELECT trim(a.currency) FROM accounts a WHERE a.id = p.account_id) AS account_currency,
                        (SELECT count(*) FROM ledger_journals j
                          WHERE j.payment_id = p.id AND j.journal_kind = 'CAPTURE')            AS capture_journals,
                        (SELECT coalesce(sum(e.amount_minor), 0)
@@ -148,12 +165,15 @@ public class ReconciliationStore {
         return new AccountRow(rs.getObject("id", UUID.class), rs.getString("currency").trim(),
                 rs.getLong("opening_balance_minor"), rs.getLong("balance_minor"), rs.getLong("held_minor"),
                 rs.getLong("captured_debits"), rs.getLong("returned_credits"),
-                rs.getLong("reversed_direction_entries"), rs.getLong("outstanding_authorizations"));
+                rs.getLong("reversed_direction_entries"), rs.getLong("outstanding_authorizations"),
+                rs.getLong("payments_in_other_currency"), rs.getLong("journals_in_other_currency"),
+                rs.getLong("returns_in_other_currency"), rs.getString("conflicting_currencies"));
     }
 
     private static PaymentRow mapPayment(ResultSet rs, int row) throws SQLException {
         return new PaymentRow(rs.getObject("id", UUID.class), rs.getObject("account_id", UUID.class),
-                rs.getString("currency").trim(), rs.getString("status"), rs.getLong("amount_minor"),
+                rs.getString("currency").trim(), rs.getString("account_currency"),
+                rs.getString("status"), rs.getLong("amount_minor"),
                 rs.getObject("captured_amount_minor", Long.class), rs.getLong("returned_amount_minor"),
                 rs.getLong("capture_journals"), rs.getLong("capture_debit_total"),
                 rs.getLong("journal_ownership_mismatches"), rs.getLong("return_operations"),
@@ -168,12 +188,25 @@ public class ReconciliationStore {
                 rs.getLong("journal_debit_total"));
     }
 
-    /** @param reversedDirectionEntries wallet entries on the wrong side for their journal's kind. */
+    /**
+     * @param reversedDirectionEntries wallet entries on the wrong side for their journal's kind
+     * @param conflictingCurrencies    the distinct currencies found on this account's payments that are
+     *                                 not the account's own, or null when there are none
+     */
     public record AccountRow(UUID id, String currency, long openingBalanceMinor, long balanceMinor,
                              long heldMinor, long capturedDebits, long returnedCredits,
-                             long reversedDirectionEntries, long outstandingAuthorizations) {}
+                             long reversedDirectionEntries, long outstandingAuthorizations,
+                             long paymentsInOtherCurrency, long journalsInOtherCurrency,
+                             long returnsInOtherCurrency, String conflictingCurrencies) {
 
-    public record PaymentRow(UUID id, UUID accountId, String currency, String status, long amountMinor,
+        /** True when the sums above draw on records denominated in more than one currency. */
+        boolean hasCurrencyConflict() {
+            return paymentsInOtherCurrency > 0 || journalsInOtherCurrency > 0 || returnsInOtherCurrency > 0;
+        }
+    }
+
+    public record PaymentRow(UUID id, UUID accountId, String currency, String accountCurrency,
+                             String status, long amountMinor,
                              Long capturedAmountMinor, long returnedAmountMinor, long captureJournals,
                              long captureDebitTotal, long journalOwnershipMismatches, long returnOperations,
                              long returnOperationsTotal, long returnJournals, long returnJournalTotal,

@@ -130,6 +130,67 @@ class ReconciliationIntegrationTest {
     }
 
     @Test
+    void anAccountWhoseCurrencyDisagreesWithItsPaymentsIsNotReportedClean() {
+        UUID payment = authorize(2_000);
+
+        // The account's currency is changed and nothing else. The application refuses this at
+        // authorization time - the currencies must match - but the schema does not, so this is exactly
+        // the kind of inconsistency between separately maintained records that reconciliation exists to
+        // notice. Scoped to an account this test created.
+        jdbc.update("UPDATE accounts SET currency = 'USD' WHERE id = ?", accountId);
+
+        ReconciliationReport report = report();
+        assertThat(report.status())
+                .as("evidence in disagreeing currencies is not a clean result")
+                .isEqualTo(ReconciliationReport.Status.DISCREPANCIES_FOUND);
+        assertThat(report.findings()).extracting(ReconciliationFinding::type)
+                .contains("ACCOUNT_CURRENCY_MISMATCH");
+
+        ReconciliationFinding mismatch = report.findings().stream()
+                .filter(f -> f.type().equals("ACCOUNT_CURRENCY_MISMATCH")).findFirst().orElseThrow();
+        assertThat(mismatch.severity()).isEqualTo(ReconciliationFinding.Severity.CRITICAL);
+        assertThat(mismatch.resourceId()).isEqualTo(accountId);
+        assertThat(mismatch.currency()).isEqualTo("USD");
+        assertThat(mismatch.detail()).contains("CAD").contains("USD");
+        assertThat(mismatch.references()).contains(new ReconciliationFinding.Reference("ACCOUNT", accountId));
+
+        // And the arithmetic is refused rather than performed across currencies: no CAD minor units are
+        // added into a USD expectation, and no balance figure is presented as reconciled.
+        assertThat(report.findings()).extracting(ReconciliationFinding::type)
+                .contains("ACCOUNT_TOTALS_NOT_DERIVABLE")
+                .doesNotContain("ACCOUNT_BALANCE_MISMATCH", "ACCOUNT_HELD_MISMATCH");
+        ReconciliationFinding refused = report.findings().stream()
+                .filter(f -> f.type().equals("ACCOUNT_TOTALS_NOT_DERIVABLE")).findFirst().orElseThrow();
+        assertThat(refused.expectedMinor()).as("no expectation can be stated").isNull();
+        assertThat(refused.actualMinor()).isNull();
+        assertThat(payment).isNotNull();
+    }
+
+    @Test
+    void separateCadAndUsdAccountsStillReconcileIndependently() {
+        UUID usdAccount = UUID.randomUUID();
+        jdbc.update("INSERT INTO accounts (id,merchant_id,currency,opening_balance_minor,balance_minor) VALUES (?,?,'USD',?,?)",
+                usdAccount, "demo-merchant", 60_000, 60_000);
+        payments.capture("demo-merchant", key(), payments.authorize("demo-merchant", key(),
+                new AuthorizationCommand(usdAccount, 4_000, "USD", "US")).body().id());
+        UUID cadCaptured = capture(authorize(3_000));
+        refund(cadCaptured, 1_000);
+
+        // Each account is reconciled in its own currency, and neither is combined with the other.
+        ReconciliationReport cad = reconciliation.forMerchant("demo-merchant",
+                new ReconciliationRequest(accountId, 25, 500));
+        assertThat(cad.findings()).isEmpty();
+        assertThat(cad.status()).isEqualTo(ReconciliationReport.Status.CLEAN);
+        assertThat(cad.scope().currencies()).containsExactly("CAD");
+
+        ReconciliationReport usd = reconciliation.forMerchant("demo-merchant",
+                new ReconciliationRequest(usdAccount, 25, 500));
+        assertThat(usd.findings()).isEmpty();
+        assertThat(usd.status()).isEqualTo(ReconciliationReport.Status.CLEAN);
+        assertThat(usd.scope().currencies()).containsExactly("USD");
+    }
+
+    @Test
     void aBoundedReportIsNeverDescribedAsClean() {
         authorize(100);
         authorize(100);

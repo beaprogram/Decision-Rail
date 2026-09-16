@@ -44,6 +44,8 @@ public class ReconciliationService {
             "CAPTURE_JOURNAL: exactly one per captured payment, for the amount the capture recorded",
             "RETURN_TOTAL: the payment's returned total against its return operations and their journals",
             "RETURN_JOURNAL: one balanced journal per return, for that return's amount",
+            "CURRENCY: the account, its payments, their journals and their returns all denominated alike",
+            "CURRENCY: totals refused rather than summed across currencies that disagree",
             "RETURN_BUDGET: returned never above captured",
             "OWNERSHIP: every journal and return carrying the payment's own merchant, currency and account");
 
@@ -56,7 +58,10 @@ public class ReconciliationService {
                     + "delivery lag, not missing money, and is out of scope here by design.",
             "Balances and holds are derived over an account's whole history; per-payment and per-return "
                     + "checks stop at the requested limit, and the report is marked incomplete when they do.",
-            "Currencies are never combined. Each account holds one currency and is reconciled in it.");
+            "Currencies are never combined. Each account holds one currency and is reconciled in it. "
+                    + "Where an account's evidence spans more than one, the disagreement is reported and "
+                    + "its balance and held totals are left unreconciled rather than summed across "
+                    + "currencies, converted, or filtered down to whichever records happen to agree.");
 
     private final ReconciliationStore store;
     private final Clock clock;
@@ -148,6 +153,30 @@ public class ReconciliationService {
      * status columns, which the same transactions wrote; the journals are the separate record.
      */
     private static void checkAccount(ReconciliationStore.AccountRow account, List<ReconciliationFinding> findings) {
+        if (account.hasCurrencyConflict()) {
+            // Reported, and then the arithmetic is refused rather than attempted. Adding one currency's
+            // minor units into another's expectation would produce a figure with the shape of a balance
+            // and no meaning, and quietly filtering the disagreeing records away would produce a clean
+            // result for evidence that does not agree with itself. Neither is an answer.
+            findings.add(ReconciliationFinding.of("ACCOUNT_CURRENCY_MISMATCH", Severity.CRITICAL,
+                    "ACCOUNT", account.id(), account.currency(), null, null,
+                    ("This %s account has %d payment(s), %d journal(s) and %d return(s) denominated in "
+                            + "%s. Money in different currencies cannot be summed, so the records "
+                            + "disagree about what this account holds.")
+                            .formatted(account.currency(), account.paymentsInOtherCurrency(),
+                                    account.journalsInOtherCurrency(), account.returnsInOtherCurrency(),
+                                    account.conflictingCurrencies() == null
+                                            ? "another currency" : account.conflictingCurrencies()),
+                    List.of(new Reference("ACCOUNT", account.id()))));
+            findings.add(ReconciliationFinding.of("ACCOUNT_TOTALS_NOT_DERIVABLE", Severity.WARNING,
+                    "ACCOUNT", account.id(), account.currency(), null, null,
+                    "Balance and held funds were not reconciled for this account. The evidence they "
+                            + "would be derived from spans more than one currency, so no expected total "
+                            + "can be stated without converting or discarding some of it, and this "
+                            + "report does neither. Resolve the currency disagreement, then reconcile.",
+                    List.of(new Reference("ACCOUNT", account.id()))));
+            return;
+        }
         long expectedBalance = account.openingBalanceMinor() - account.capturedDebits() + account.returnedCredits();
         if (expectedBalance != account.balanceMinor()) {
             findings.add(ReconciliationFinding.of("ACCOUNT_BALANCE_MISMATCH", Severity.CRITICAL,
@@ -176,6 +205,19 @@ public class ReconciliationService {
     private static void checkPayment(ReconciliationStore.PaymentRow payment, List<ReconciliationFinding> findings) {
         Reference self = new Reference("PAYMENT", payment.id());
         boolean captured = "CAPTURED".equals(payment.status());
+
+        // The account boundary. Journals and returns are checked against the payment below; the payment
+        // itself was checked against nothing above it, so a payment in a currency its account does not
+        // hold passed everything.
+        if (payment.accountCurrency() != null && !payment.accountCurrency().equals(payment.currency())) {
+            findings.add(ReconciliationFinding.of("PAYMENT_CURRENCY_MISMATCH", Severity.CRITICAL,
+                    "PAYMENT", payment.id(), payment.currency(), null, null,
+                    "This payment is denominated in %s but its account holds %s. The amounts cannot be "
+                            .formatted(payment.currency(), payment.accountCurrency())
+                            + "compared or combined, and this payment is not counted towards that "
+                            + "account's expected balance.",
+                    List.of(self, new Reference("ACCOUNT", payment.accountId()))));
+        }
 
         if (captured) {
             long expectedCapture = payment.capturedAmountMinor() == null ? 0L : payment.capturedAmountMinor();
