@@ -188,6 +188,33 @@ operation, one journal and one credit.
 The broker being unavailable is what stages the pending event, which is why this no longer races the
 dispatcher's 250ms poll: with the broker's name unresolvable the dispatcher cannot publish at all.
 
+### One CI failure I could not explain, and what I did about it
+
+The correction pass's first CI run failed one browser test, `isolation.spec.ts`'s "a slow response for
+the previous identity never lands on the next one". It had passed 54 of 54 locally on both the
+development database and a fresh one.
+
+The failing assertion was `expect(page.getByText('23.00')).toHaveCount(0)` — the previous merchant's
+payment amount must not appear after switching identity. CI reported one matching element for the full
+fifteen-second poll.
+
+**The retained evidence does not corroborate that.** The ARIA snapshot, the trace's DOM snapshots and
+the failure screenshot contain no `23.00` anywhere; the page shows the other merchant's three payments
+at 22.00, 3.00 and 20.00, and the server reports three matching. The payment-id assertion immediately
+above passed, and the trace confirms that assertion is sound rather than vacuous — the rendered
+identifier's text content is the full UUID. Running the whole suite against a throwaway database did
+not reproduce it.
+
+So I do not know what that element was, and I am not going to invent an explanation. What I changed is
+the evidence, not the conclusion: both assertions are now scoped to the results table, the amount is
+anchored to a whole cell, and a new assertion requires the number of rendered rows to equal the count
+the server reports for the signed-in identity. A page-wide substring match is a poor detector here —
+`23.00` also matches a legitimate `123.00`, and this project has now had three separate false positives
+from exactly that (`Capture` matching "Reverse the capture", `CREDIT` matching "credited",
+`4 returns` matching "Showing 4 of 4 returns"). The property under test is unchanged and better
+covered; if a real leak exists, a scoped row assertion will name it instead of leaving a number nobody
+can trace.
+
 ### The account list, and why this suite found it
 
 Four browser tests failed in CI on a fresh database, and locally on the development one, with

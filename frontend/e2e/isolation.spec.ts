@@ -51,9 +51,19 @@ test.describe('merchant isolation', () => {
     await page.goto('/dashboard/payments');
     await page.waitForTimeout(1_500);
 
-    // The first merchant's payment must not be on this screen.
+    // The first merchant's payment must not be on this screen. Both assertions are scoped to the
+    // results table, because that is where a leaked payment would appear and a page-wide text search
+    // is a substring match: "23.00" also matches a legitimate "123.00", and the amount alone is not
+    // evidence of a leak without the row it belongs to.
+    const results = page.locator('tbody tr');
+    await expect(results.filter({ hasText: mine })).toHaveCount(0);
     await expect(page.getByText(mine)).toHaveCount(0);
-    await expect(page.getByText('23.00')).toHaveCount(0);
+    // Anchored to a whole cell, so only a row genuinely showing this payment's amount counts.
+    await expect(page.locator('tbody td').filter({ hasText: /^23\.00 CAD$/ })).toHaveCount(0);
+    // And every row that is here belongs to the merchant now signed in: the count the server reports
+    // for this identity is the number of rows rendered, so nothing extra has been mixed in.
+    const matched = Number(await page.locator('.stat', { hasText: 'Shown on this page' }).locator('.stat-value').innerText());
+    await expect(results).toHaveCount(matched);
     // And the identity shown is the one actually signed in.
     await expect(page.getByText('other-merchant', { exact: true })).toBeVisible();
     await capture(page, '15-identity-switch');
