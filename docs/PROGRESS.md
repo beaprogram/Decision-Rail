@@ -49,12 +49,13 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 Local evidence recorded **2026-09-14 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
 **3.9.1**.
 
-- Pinned-wrapper build and suite: **282 backend tests passed**, with **0 failures, 0 errors, and
-  0 skipped**, up from 213 at checkpoint 8.
-- Dashboard: **41 frontend unit tests** and **53 browser end-to-end tests** with retries disabled, up
+- Pinned-wrapper build and suite: **302 backend tests passed**, with **0 failures, 0 errors, and
+  0 skipped**, up from 213 at checkpoint 8 and 282 before the correction pass.
+- Dashboard: **41 frontend unit tests** and **54 browser end-to-end tests** with retries disabled, up
   from 44.
-- Demos: **12 checks** (transactional), **26 checks** (lifecycle and reconciliation, new), and
-  **27 checks** (asynchronous), all against the running application with real PostgreSQL and Kafka.
+- Demos: **12 checks** (transactional), **26 checks** (lifecycle and reconciliation), **27 checks**
+  (asynchronous) and **16 checks** (restart recovery, on its own disposable stack), all against a
+  running application with real PostgreSQL and Kafka.
 - Benchmark collector check, k6 attribution check and the harness smoke run all passed, the last
   exercising the correctness queries updated for the new operation types.
 - V10 and V11 were applied to the local development database, which carried **346 payments, 65
@@ -280,15 +281,18 @@ These are known and deliberate, not oversights:
 - **No backup or restore procedure has been demonstrated.** There is no tested recovery from a lost
   PostgreSQL volume and no recovery-point or recovery-time objective is claimed. Losing the database
   loses payments, ledger, idempotency records and outbox together.
-- **The application does not start while the broker is unreachable.** Found while building the
-  checkpoint 9 recovery demo, which originally restarted the application during a broker outage. A
-  *running* process is unaffected by an outage - that is tested, and payments keep committing - but on
-  startup the Kafka listener container constructs its consumer eagerly, and an unresolvable
-  `bootstrap.servers` throws `ConfigException: No resolvable bootstrap urls given in bootstrap.servers`
-  out of `DefaultLifecycleProcessor`, failing the context. A restart during an outage is therefore an
-  outage of the payment API too, which is exactly what readiness excluding the broker was meant to
-  avoid. This is **not fixed here**: the fix belongs to the resilience checkpoint's listener lifecycle,
-  not to the return lifecycle, and it needs its own tests.
+- ~~The application does not start while the broker is unreachable.~~ **Fixed in the correction pass.**
+  Listener containers no longer auto-start; `ListenerStarter` starts them after the context is up and
+  retries while the broker is unreachable, so the payment API starts and serves with the broker's name
+  unresolvable, and delivery resumes on its own without another restart. Covered by
+  `UnresolvableBrokerStartupTest`, which starts a real context against a `.invalid` hostname, and end
+  to end by `scripts/recovery-demo.sh`. Note the distinction that was previously blurred: a resolvable
+  address with a closed port always constructed a consumer fine and was never affected; the failure was
+  specifically name resolution.
+- ~~Recovery of an undelivered event across a real process boundary is not demonstrated.~~ **Fixed in
+  the correction pass.** `scripts/recovery-demo.sh` kills the application with a refund's event still
+  pending and starts a new process against the same database with the broker still stopped. The broker
+  being unavailable is what stages the pending event, so nothing races the dispatcher's 250ms poll.
 - **The dashboard's account list is still bounded at 100 and still unpaged**, though it no longer hides
   the wrong end. It listed the 100 *oldest* accounts, ascending, with nothing said about truncation, so
   a merchant with more than 100 could not see or authorize against the account they had just created.

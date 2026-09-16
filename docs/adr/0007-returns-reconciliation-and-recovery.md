@@ -74,9 +74,24 @@ enforced in three independent places.
 3. **A deferred constraint trigger** on `payment_returns` refuses a commit where the sum of return
    operations exceeds the capture, *or* where the payment's recorded total disagrees with that sum.
 
-The third is the one that matters most for reconciliation. A denormalised total and the rows it
-summarises can only disagree if something wrote one without the other, which is exactly the corruption
-an independent check has to be able to see — so the database refuses to let it commit at all.
+### What the third one actually covers, precisely
+
+It fires **when a return is written**, because that is the event it is attached to. So a return whose
+amount would leave the payment's total disagreeing with the sum of its operations is refused, and the
+two cannot be driven apart by adding a return.
+
+It does **not** fire on an update that touches only the payment. Within the row-level cap — which does
+apply to every write — `returned_amount_minor` can be moved to a value the return rows do not sum to.
+The guarantee is therefore "checked whenever a return is recorded", not "true of every row at every
+moment", and this document previously claimed the latter.
+
+That narrower guarantee is deliberate rather than an omission. Widening it to a trigger on `payments`
+was considered and rejected: reconciliation exists precisely to catch separately maintained records
+disagreeing with each other, and a schema that made this particular disagreement impossible would also
+make that detection impossible to exercise — leaving a check nothing could ever demonstrate. The
+constraint that prevents *loss* (never more returned than captured) is enforced on every write; the
+constraint that detects *drift* is left to the layer built to report it. Both halves are covered by
+tests that assert what fires and what does not.
 
 Concurrency is handled by the payment row lock, not by the trigger: two refunds on one payment
 serialise, and eight concurrent 300-unit refunds against a 1000-unit capture commit exactly three.
@@ -192,6 +207,57 @@ Findings carry the resource, the expected and actual values, the delta, the curr
 operations and journals the expectation came from. Currencies are never combined; each account holds
 one and is reconciled in it.
 
+### Currencies that disagree
+
+Every amount above is an integer count of minor units, and minor units of different currencies are not
+the same quantity. The account query originally summed capture debits and return credits without
+checking that the account, its payments and their journals were denominated alike, so an account whose
+currency disagreed with its payments reconciled **clean**: the arithmetic worked perfectly on numbers
+that should never have been added together.
+
+Three things now happen instead, in this order:
+
+1. **The disagreement is reported.** `ACCOUNT_CURRENCY_MISMATCH` names the account's currency, the
+   currencies found on its payments, and how many payments, journals and returns disagree.
+   `PAYMENT_CURRENCY_MISMATCH` names a payment denominated differently from its account.
+2. **The arithmetic is refused.** Balance and held funds are not reconciled for that account at all,
+   and `ACCOUNT_TOTALS_NOT_DERIVABLE` says so with no expected or actual value, because there is no
+   honest number to put there.
+3. **Nothing is converted, discarded, or repaired.** Summing across currencies would invent a figure;
+   filtering the disagreeing records away would produce a clean result for evidence that is not; and
+   converting would require a rate this system has no business holding.
+
+So the report can still conclude "these records disagree about what currency this account holds". It
+explicitly **cannot** conclude anything about that account's monetary totals until they agree, and it
+says which of the two it is doing.
+
+The application already prevents this at authorization time — a payment's currency must match its
+account's. The schema does not, which is exactly why reconciliation checks it: a constraint was
+considered and deliberately not added, for the same reason as the returned-total equality above. A
+foreign key tying `payments(account_id, currency)` to `accounts(id, currency)` would make the
+corruption impossible and the detection undemonstrable, and the layer whose job is noticing that
+records disagree should not be the layer that can never be tested.
+
+### Return history is paged, not truncated
+
+History was capped at the 200 oldest returns with no pagination and no metadata. Past that cap the
+newest operation and its journal were unreachable, while the payment's totals still counted them — so
+a payment with 201 returns reported 201 in its amounts and showed 200 in its list.
+
+It is now keyset paged on the per-payment sequence number, newest first, with `returnCount` stating the
+payment's total separately from the page. Keyset rather than offset for the reason payment search
+already uses one: a return committing mid-paging would shift an offset and make the next page skip an
+operation. Because the ordering key is assigned inside the financial transaction and only ever
+increases, a new return lands ahead of the pages already read rather than inside them.
+
+Two things that are deliberately not the fix: the cap was not removed, because one payment's history
+must never produce an unbounded response; and it was not merely raised, because any cap without
+pagination has the same defect one order of magnitude further out.
+
+Eligibility does not consult the page. `reversible` comes from the payment's return count, not from
+whether the current page is empty — a caller who pages past the end must not be offered a reversal on
+a capture that has already been returned.
+
 ### What it will not do
 
 - **It never writes.** No repair, no journal, no refund. An automatic "correction" would destroy the
@@ -245,14 +311,46 @@ event, with the identity it was committed with.
 - A committed command whose response was lost is recovered by resending its key.
 - A failure after the financial writes rolls back all of them, and frees the key.
 
-### What it does not
+- A committed refund surviving the process that committed it: the application is killed with the event
+  still undelivered, a new process starts against the same database **with the broker still
+  unavailable**, serves payments, and delivers that event in order with its original identity once the
+  broker returns. `scripts/recovery-demo.sh`, on its own disposable stack.
 
-- **Not a demonstrated restart.** The JVM does not restart in any of the above. A genuine process
-  boundary for an *undelivered* refund event was attempted and abandoned: restarting while the broker
-  is unreachable does not boot, because the Kafka listener builds its consumer eagerly and an
-  unresolvable `bootstrap.servers` fails the context; and holding the event by hand loses a race
-  against the dispatcher's 250ms poll. Both are recorded in the progress ledger. The claim is withdrawn
-  rather than approximated.
+### Starting without a broker
+
+The application used to refuse to start whenever the broker's *name* did not resolve. A listener
+container builds its consumer as it starts, the client resolves `bootstrap.servers` there and then, and
+an unresolvable name throws `ConfigException: No resolvable bootstrap urls given in bootstrap.servers`
+out of Spring's lifecycle processor, failing the whole context. A restart during a broker outage was
+therefore a payment outage too — the precise thing that keeping the broker out of readiness, and
+putting event intent in an outbox, exist to prevent.
+
+Two distinctions matter and were previously blurred:
+
+- **A resolvable address with a closed port was never affected.** The consumer constructs fine and
+  discovers the problem later. Describing every connection failure as equivalent to this one was wrong.
+- **A stopped container's name stops resolving.** Under Compose that is the ordinary case, which is why
+  this surfaced there rather than against a closed port.
+
+Listener containers no longer auto-start. `ListenerStarter` starts them after the context is up, off
+the startup path, and retries on a fixed interval while the broker is unreachable — so delivery resumes
+when the broker returns, without another restart. One daemon thread, one attempt per interval, and it
+stops scheduling once every container is running.
+
+Three things it deliberately does not do. It does not leave listeners permanently disabled: it retries
+until they run. It does not report delivery healthy while consumers are stopped: the asynchronous
+health indicator reports `consumersRunning` and goes DEGRADED, while readiness — which is about the
+payment path — stays UP. And it does not swallow configuration errors: the cause chain is unwrapped,
+and a `ConfigException` that is *not* the unresolvable-bootstrap one is logged and abandoned rather than
+retried forever, because waiting will not fix a value that is simply wrong.
+
+One implementation note worth recording, because it was wrong first. A container whose start throws can
+still answer `isRunning()` with true — a concurrent container marks itself running while bringing its
+children up, and a failure part way through leaves that flag set with no consumer behind it. Trusting
+it reported healthy consumers for a process that had none, and made the retry a no-op. The starter
+therefore keeps its own record of what it actually started, and stops a container before retrying it.
+
+### What it does not
 - **No backup or restore.** There is no tested recovery from a lost PostgreSQL volume and no
   recovery-point or recovery-time objective anywhere. Losing the database loses payments, ledger,
   idempotency records and outbox together.

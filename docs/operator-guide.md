@@ -369,15 +369,36 @@ Stated plainly, because the alternative is implying something that was never tes
   events. What survives is the outbox: committed intent stays in PostgreSQL until a broker
   acknowledges it, so events not yet published are re-delivered after the broker returns. Events
   already published and then lost from the broker are **not** recoverable by this system.
-- What *is* demonstrated: a refund committing during a broker outage, its intent surviving, and
-  delivery resuming in order with the original event identity once the broker is back, with every
-  piece of the dispatcher's in-process state discarded first so the outbox row alone is what carries
-  it. What is **not** demonstrated is that same recovery across a real process boundary — see the
-  limitation below and in `docs/PROGRESS.md`.
-- **The application does not start while the broker is unreachable.** A running process tolerates an
-  outage and keeps committing payments; a restarting one fails, because the Kafka listener container
-  builds its consumer eagerly and an unresolvable `bootstrap.servers` fails the whole context. Plan a
-  restart for after the broker is back.
+- What *is* demonstrated, across a real process boundary: a refund commits with the broker stopped,
+  the application process is killed with that event still undelivered, a new process starts against the
+  same database **while the broker is still unavailable**, serves payments, and delivers the pending
+  event in order with its original identity once the broker returns — with one consumer effect, one
+  return operation, one journal and one credit, and the original receipt still replaying under its key.
+
+  ```bash
+  ./scripts/recovery-demo.sh    # 16 checks on its own disposable stack, ~2 minutes
+  ```
+
+  It builds and destroys its own database, broker and application container. The development stack and
+  the shared test stack are not touched.
+
+### Restarting during a broker outage
+
+This is safe, and was not always. The application starts and serves payments with the broker
+unreachable, including when its **name does not resolve** — a stopped container under Compose, which is
+the ordinary case. Readiness stays UP because it is about the payment path; `/actuator/health/async`
+reports DEGRADED with `consumersRunning: false` so the impairment is visible rather than implied.
+
+Consumers start on their own once the broker returns. Nothing needs restarting a second time, and
+nothing needs starting by hand:
+
+```bash
+curl --silent http://localhost:8080/actuator/health/async | jq '.components.asyncDelivery.details'
+# consumersRunning goes true on its own once the broker is reachable
+```
+
+A resolvable address whose port is merely closed always worked and is a different case; the two are not
+interchangeable.
 
 ## Walk through asynchronous delivery, replay, and shadow
 

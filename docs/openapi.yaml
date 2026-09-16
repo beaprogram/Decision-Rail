@@ -293,16 +293,47 @@ paths:
     get:
       operationId: getPaymentReturns
       tags: [Returns]
-      summary: Read the return budget and every return so far
+      summary: Read the return budget and a page of return history
       description: |
-        What was captured, what has been returned, what remains, and every return operation
-        with the journal that recorded it.
+        What was captured, what has been returned, what remains, and one page of return
+        operations with the journal that recorded each.
 
-        `refundable` and `reversible` are decided by the server. A client must not re-derive
-        them: that would put a second copy of a financial rule somewhere that cannot enforce
-        it. `unavailableReason` names why an action is closed off - NOT_CAPTURED,
-        FULLY_RETURNED, or PARTIALLY_RETURNED, the last of which closes reversal while
-        leaving refunds available.
+        **Ordering and continuation.** History is newest first, ordered by the per-payment
+        return sequence number, which is assigned inside the financial transaction and is
+        dense. Paging is keyset, not offset: pass `nextCursor` back as `cursor` to read the
+        next, older page. A return committing while someone pages therefore appears ahead of
+        the pages already fetched rather than shifting a boundary inside them, so no entry is
+        duplicated or skipped. `nextCursor` is null on the last page.
+
+        **Totals versus the page.** `returnedAmountMinor`, `remainingRefundableMinor` and
+        `returnCount` describe the payment. `returns` is one page and is usually shorter than
+        `returnCount`; a caller showing "N returns" must use `returnCount`.
+
+        **Bounds.** `limit` defaults to 50 and may not exceed 200. A value outside that range
+        is refused rather than silently clamped. Cursors are opaque, name the payment they
+        were minted for, and are rejected if presented against a different one.
+
+        `refundable` and `reversible` are decided by the server from the payment's
+        authoritative financial state, never from whether a history page happens to be empty.
+        A client must not re-derive them: that would put a second copy of a financial rule
+        somewhere that cannot enforce it. `unavailableReason` names why an action is closed
+        off - NOT_CAPTURED, FULLY_RETURNED, or PARTIALLY_RETURNED, the last of which closes
+        reversal while leaving refunds available.
+      parameters:
+        - name: cursor
+          in: query
+          required: false
+          description: Continue from a previous page's `nextCursor`. Omit for the newest page.
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 50
       responses:
         '200':
           description: The return budget and history for an owned payment
@@ -2069,10 +2100,27 @@ components:
           type: string
           nullable: true
           enum: [NOT_CAPTURED, FULLY_RETURNED, PARTIALLY_RETURNED]
+        returnCount:
+          type: integer
+          format: int64
+          minimum: 0
+          description: |
+            How many return operations this payment has in total. This is the number to show;
+            `returns` below is one page of them.
         returns:
           type: array
+          description: One page of return history, newest first.
           items:
             $ref: '#/components/schemas/PaymentReturn'
+        nextCursor:
+          type: string
+          nullable: true
+          description: |
+            Opaque. Pass back as `cursor` for the next, older page. Null when this page is the
+            last. It names the payment it belongs to and is refused against any other.
+        pageLimit:
+          type: integer
+          description: The page size this response was built with.
     ReconciliationFinding:
       type: object
       required: [type, severity, resourceType, resourceId, detail, references]
@@ -2083,7 +2131,14 @@ components:
             Stable code, for example ACCOUNT_BALANCE_MISMATCH, ACCOUNT_HELD_MISMATCH,
             RETURN_TOTAL_MISMATCH, CAPTURE_JOURNAL_AMOUNT_MISMATCH,
             RETURN_JOURNAL_AMOUNT_MISMATCH, LEDGER_ENTRY_DIRECTION_WRONG,
-            RETURNED_ABOVE_CAPTURED, OWNERSHIP_MISMATCH.
+            RETURNED_ABOVE_CAPTURED, OWNERSHIP_MISMATCH, ACCOUNT_CURRENCY_MISMATCH,
+            PAYMENT_CURRENCY_MISMATCH, ACCOUNT_TOTALS_NOT_DERIVABLE.
+
+            ACCOUNT_TOTALS_NOT_DERIVABLE carries no expected or actual value on purpose. It
+            reports that a comparison was *not* made, because the evidence it would be derived
+            from spans more than one currency - and this report will not sum across currencies,
+            convert between them, or discard the records that disagree in order to produce a
+            number.
         severity:
           type: string
           enum: [CRITICAL, WARNING]

@@ -68,12 +68,12 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 ## Recorded local result
 
-Recorded **2026-09-14 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
+Recorded **2026-09-16 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw clean verify` passed **282 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
-**41 frontend unit tests** and **53 browser end-to-end tests** with retries disabled. The table below is
+`./mvnw clean verify` passed **302 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
+**41 frontend unit tests** and **54 browser end-to-end tests** with retries disabled. The table below is
 the checkpoint 8 record, kept because it is what the group breakdown was counted against; the checkpoint
-9 additions are listed in the section that follows it. The **282** figure is the current total and the
+9 additions are listed in the section that follows it. The **302** figure is the current total and the
 **213** figure is a historical record of an earlier revision — they are not two counts of the same thing.
 
 ### The earlier recorded result (checkpoint 8)
@@ -129,6 +129,64 @@ Backend tests went from 213 (checkpoint 8's recorded figure) to **282**, and bro
 | Reconciliation as a mutation | Three consecutive reports over a known-broken account change no balance, no return, no journal | A report that repairs what it finds, destroying the evidence |
 | The administrative view | ADMIN 200; merchant, other merchant and operations all 403 | A broader view reachable by adding a query parameter |
 | Migration over existing records | Captured payments get their budget, uncaptured ones do not, stored responses are typed PAYMENT with unchanged bytes, historical event payloads gain no new fields, and a return works against a V1-era capture whose journal stays sealed | An upgrade that strands history or rewrites delivered events |
+
+## The checkpoint 9 correction pass
+
+Six defects found by review against `42fa608`, which had passed its whole suite. Each was reproduced
+first, and the reproduction is kept as the regression.
+
+| Defect | Reproduced as | Correction |
+| --- | --- | --- |
+| Return fingerprints concatenated a nullable reason, so a null reference rendered as `"null"` and an absent reason shared one identity with the literal text | `refund(payment, 1000, null, key)` then the same key with reason `"null"` returned **201 replaying the original receipt** instead of 409, on both refund and reversal | The reason is length-prefixed: absent is `-`, present is `<length>:<value>`. Only the return fingerprints changed; authorize, capture and void contain no optional free text and were never ambiguous, so rewriting them would break every stored key for nothing |
+| A return event's operation type was checked against the set of known types but never against the event carrying it, and the full-capture rule keyed off the nested type — so mislabelling also skipped the check that would have caught it | A `payment.reversed.v1` carrying a 1000-unit `REFUND` against a 2500 capture parsed cleanly | One-to-one correspondence required, and the full-capture rule now keys off the event type |
+| Reconciliation summed capture debits and return credits without comparing currencies, so an account whose currency disagreed with its payments reported **CLEAN** | Changing only `accounts.currency` to USD on a CAD account with a valid CAD authorization | The disagreement is reported, and the arithmetic is refused rather than performed across currencies |
+| Return history loaded the 200 oldest returns with no pagination and no metadata, while the dashboard showed the list length as the count | 201 refunds: totals counted 201, history contained 200, the newest operation and its journal were unreachable | Keyset paged newest first on the per-payment sequence number, with `returnCount` separate from the page |
+| The wrong-amount and wrong-direction journal tests inserted a second journal for a return that already had one, so uniqueness rejected them before the rule they named | Both assertions passed for the wrong reason | Fixtures now build a return with no journal yet, each case asserts the specific constraint or trigger message, and a positive control proves the fixture reaches the validation |
+| The application would not start when the broker's name did not resolve | A context pointed at a `.invalid` hostname failed to load | Listeners start off the startup path and retry |
+
+### Idempotency compatibility
+
+Changing a fingerprint changes the hash stored against every key written before it, so a legitimate
+retry of a return that already committed would have started failing as a conflict. The old fingerprint
+is still computed and compared as a fallback — but only when the **stored receipt** confirms the reason
+really was the one being sent now.
+
+That second condition is what stops the fallback carrying the defect forward. The ambiguity was between
+an absent reason and the literal `"null"`, and the receipt records which of the two committed, so a
+request carrying one can never replay a receipt written for the other whichever encoding produced the
+stored hash. A key claimed but never completed has no receipt to confirm anything and nothing committed
+under it either, so it is refused like any other mismatch.
+
+No migration was needed: the discriminator is data the rows already carry. Tests cover a retry of a
+pre-fix key replaying its receipt, a genuinely different request against that same legacy key being
+refused, and the literal `"null"` being refused against a legacy absent-reason receipt.
+
+### What the currency checks can and cannot conclude
+
+They can conclude that records disagree about what currency an account holds, and they name the
+account, the currencies, and how many payments, journals and returns disagree. They **cannot** conclude
+anything about that account's monetary totals while the disagreement stands, and the report says so
+with `ACCOUNT_TOTALS_NOT_DERIVABLE` carrying no expected or actual value. Nothing is summed across
+currencies, converted, filtered away, or repaired.
+
+The application already prevents this at authorization time; the schema does not. A foreign key tying
+`payments(account_id, currency)` to `accounts(id, currency)` was considered and deliberately not added,
+for the same reason as the returned-total equality: it would make the corruption impossible and the
+detection impossible to demonstrate, leaving a check nothing could exercise. See
+[ADR 0007](adr/0007-returns-reconciliation-and-recovery.md).
+
+### Restart recovery across a real process boundary
+
+`scripts/recovery-demo.sh`, 16 checks on a stack it creates and destroys. A refund commits with the
+broker stopped; the application is killed with SIGKILL, leaving what a crash leaves; a new process
+starts against the same database **while the broker is still unavailable**, reports readiness UP and
+asynchronous delivery DEGRADED with `consumersRunning: false`, and takes payments. The broker returns,
+the pending event publishes in per-payment order with the identity committed before the restart, the
+consumers restart themselves, and the original receipt still replays under its key with one return
+operation, one journal and one credit.
+
+The broker being unavailable is what stages the pending event, which is why this no longer races the
+dispatcher's 250ms poll: with the broker's name unresolvable the dispatcher cannot publish at all.
 
 ### The account list, and why this suite found it
 
@@ -454,6 +512,7 @@ With the backend running:
 ```bash
 ./scripts/demo.sh          # 12 checks: the transactional lifecycle
 ./scripts/lifecycle-demo.sh # 26 checks: refunds, reversal, compensating journals, reconciliation
+./scripts/recovery-demo.sh  # 16 checks: restart recovery, on a stack it creates and destroys
 ./scripts/async-demo.sh    # 27 checks: delivery, outage, replay, shadow. Run last: it stops the broker.
 ```
 
@@ -475,10 +534,6 @@ Specific to this phase:
 - **No fraud accuracy metrics.** No labelled outcome data exists for synthetic traffic, so precision, recall, and false-positive rates are not computed anywhere.
 - **Replay timings are observations, not benchmarks.** `timingMethod` in every report states exactly what was measured: in-process evaluation only, single JVM, no warmup control or repetition.
 - **Breaker and backoff defaults are not tuned from measurement.** They are reasonable values for a development stack. The retry budget is documented so it can be reasoned about, not because it was derived from observed production behaviour.
-- **The application does not start while the broker is unreachable.** A running process tolerates an
-  outage; a restarting one does not, because the Kafka listener container constructs its consumer
-  eagerly and an unresolvable `bootstrap.servers` fails the context. Found while building the recovery
-  demo. Not fixed in this checkpoint, and recorded in [PROGRESS.md](PROGRESS.md).
-- **No backup or restore has been demonstrated.** There is no tested recovery from a lost PostgreSQL volume, and no recovery-point or recovery-time objective is claimed anywhere. Losing the database loses payments, ledger, idempotency records and outbox together. What *is* demonstrated is much narrower: an undelivered event is recoverable from its durable outbox row with no in-process state to help. That is not the same as a demonstrated restart, and is not described as one.
+- **No backup or restore has been demonstrated.** There is no tested recovery from a lost PostgreSQL volume, and no recovery-point or recovery-time objective is claimed anywhere. Losing the database loses payments, ledger, idempotency records and outbox together. What *is* demonstrated is recovery across a real process boundary: a refund committed with the broker stopped survives the application being killed, and a new process started while the broker is still unavailable delivers it in order with its original identity. That is `scripts/recovery-demo.sh`, on its own disposable stack. It is still not a backup-and-restore claim: the database itself is never lost in that scenario.
 - **Reconciliation compares records, not reality.** Every record it reads lives in one database. It detects independently maintained records disagreeing with each other; it cannot detect a single mistaken transaction that wrote the same wrong amount to the payment, its journal and the balance together. The report states this in its own `limitations` field rather than leaving it to documentation.
 - **Return performance is unmeasured.** The published throughput figures were taken before refunds and reconciliation existed and describe authorize, capture and void only. No benchmark exercises a refund or a reconciliation report, so nothing is claimed about either. The historical artifacts remain historical.
