@@ -59,7 +59,7 @@ public class PaymentService {
         String currency = input.currency();
         String country = input.country();
         String fingerprint = "AUTHORIZE|" + command.accountId() + "|" + command.amountMinor() + "|" + currency + "|" + country;
-        return idempotent(merchant, key, fingerprint, StoredResponseKind.PAYMENT, () -> {
+        return idempotent(merchant, key, fingerprint, StoredResponseKind.PAYMENT, null, () -> {
             AccountView account = store.account(merchant, command.accountId(), true);
             if (!account.currency().equals(currency)) throw new PaymentException("CURRENCY_MISMATCH", 422, "Payment currency must match the account currency.");
             // Timed at the calling boundary. The evaluator itself stays free of Micrometer, Spring and
@@ -87,13 +87,16 @@ public class PaymentService {
 
     @Transactional(timeout = 15)
     public CommandResult<PaymentView> capture(String merchant, String key, UUID paymentId) {
-        return idempotent(merchant, key, "CAPTURE|" + paymentId, StoredResponseKind.PAYMENT,
+        // No legacy fingerprint: this encoding is unchanged. Capture, void and authorize fingerprints
+        // contain no optional free text, so they were never ambiguous and rewriting them would break
+        // every key already stored against them for no benefit.
+        return idempotent(merchant, key, "CAPTURE|" + paymentId, StoredResponseKind.PAYMENT, null,
                 () -> transition(merchant, paymentId, PaymentStatus.CAPTURED));
     }
 
     @Transactional(timeout = 15)
     public CommandResult<PaymentView> voidPayment(String merchant, String key, UUID paymentId) {
-        return idempotent(merchant, key, "VOID|" + paymentId, StoredResponseKind.PAYMENT,
+        return idempotent(merchant, key, "VOID|" + paymentId, StoredResponseKind.PAYMENT, null,
                 () -> transition(merchant, paymentId, PaymentStatus.VOIDED));
     }
 
@@ -121,10 +124,15 @@ public class PaymentService {
         // The amount is part of the identity of a refund, so two refunds of different amounts can never
         // collapse onto one key. A reversal names no amount because it always returns the whole
         // capture; including one would invent a distinction the operation does not have.
+        //
+        // The reason is length-prefixed rather than concatenated. Concatenation renders a null
+        // reference as the four characters "null", so "no reason given" and "the reason is the word
+        // null" produced one identity and each could replay the other's receipt.
         String fingerprint = command.type() == ReturnType.REFUND
-                ? "REFUND|" + command.paymentId() + "|" + command.amountMinor() + "|" + reason
-                : "REVERSAL|" + command.paymentId() + "|" + reason;
+                ? "REFUND|" + command.paymentId() + "|" + command.amountMinor() + "|" + canonical(reason)
+                : "REVERSAL|" + command.paymentId() + "|" + canonical(reason);
         return idempotent(merchant, key, fingerprint, StoredResponseKind.RETURN,
+                legacyReturnFingerprint(command, reason),
                 () -> performReturn(merchant, command, reason));
     }
 
@@ -224,12 +232,64 @@ public class PaymentService {
         }
     }
 
-    /** Blank and absent mean the same thing, and both are stored as absent so they fingerprint alike. */
+    /**
+     * Blank and absent mean the same thing, and both are stored as absent so they fingerprint alike.
+     *
+     * <p>Surrounding whitespace is stripped, so {@code " refund "} and {@code "refund"} are one reason.
+     * A reason that is entirely whitespace, or an empty string, becomes absent. Everything else is kept
+     * exactly as typed, including a reason that happens to read {@code "null"}.
+     */
     private static String normaliseReason(String reason) {
         if (reason == null) return null;
         String stripped = reason.strip();
         return stripped.isEmpty() ? null : stripped;
     }
+
+    /**
+     * One unambiguous encoding of an optional free-text field.
+     *
+     * <p>Absent is a distinct token that no present value can produce, and a present value carries its
+     * own length, so no value can be mistaken for a different one by borrowing the separator. Hashing
+     * this is what makes the fingerprint an identity; hashing a concatenation would still be hashing an
+     * ambiguous string, however good the hash.
+     */
+    private static String canonical(String value) {
+        return value == null ? "-" : value.length() + ":" + value;
+    }
+
+    /**
+     * How a return key written before the canonical encoding is still recognised as the same command.
+     *
+     * <p>Changing the fingerprint changes the hash stored against every key that came before it, and a
+     * legitimate retry of a return that already committed must not start failing as a conflict. The old
+     * fingerprint is therefore still computed and compared, but only as a fallback, and only when the
+     * stored receipt confirms that the reason really was the one being sent now.
+     *
+     * <p>That second condition is what stops the fallback reintroducing the defect. The ambiguity was
+     * between an absent reason and the literal text "null", and the receipt records which of the two
+     * actually committed - so a request carrying one can never replay a receipt written for the other,
+     * whichever encoding produced the stored hash.
+     */
+    private LegacyFingerprint legacyReturnFingerprint(ReturnCommand command, String reason) {
+        String legacy = command.type() == ReturnType.REFUND
+                ? "REFUND|" + command.paymentId() + "|" + command.amountMinor() + "|" + reason
+                : "REVERSAL|" + command.paymentId() + "|" + reason;
+        return new LegacyFingerprint(sha256(legacy), stored -> {
+            if (!(stored instanceof ReturnReceiptView receipt)) return false;
+            return java.util.Objects.equals(receipt.reason(), reason);
+        });
+    }
+
+    /**
+     * A superseded fingerprint, and the test that decides whether a key carrying it is really this
+     * command.
+     *
+     * @param hash           the hash the previous encoding would have produced for this request
+     * @param confirmedBy    applied to the decoded stored response; must agree before the older hash is
+     *                       accepted, so a hash collision between two genuinely different requests
+     *                       under the old encoding cannot become a replay
+     */
+    private record LegacyFingerprint(String hash, java.util.function.Predicate<Object> confirmedBy) {}
 
     @Transactional(readOnly = true)
     public PaymentView payment(String merchant, UUID id) { return store.payment(merchant, id, false); }
@@ -242,27 +302,43 @@ public class PaymentService {
      * would be a second implementation of a financial rule, and the two would drift.
      */
     @Transactional(readOnly = true)
-    public PaymentReturnsView returns(String merchant, UUID paymentId) {
+    public PaymentReturnsView returns(String merchant, UUID paymentId, String cursor, Integer limit) {
         PaymentView payment = store.payment(merchant, paymentId, false);
         Long captured = store.capturedAmount(paymentId);
-        List<PaymentReturnView> history = returns.forPayment(merchant, paymentId, ReturnStore.MAX_RETURNS_LISTED);
-        long returned = payment.status() == PaymentStatus.CAPTURED
-                ? returns.totals(paymentId).returnedMinor() : 0L;
+        int page = boundedPage(limit);
+        ReturnStore.Page history = returns.forPayment(merchant, paymentId,
+                ReturnCursor.decode(cursor, paymentId), page);
+        ReturnStore.Totals totals = returns.totals(paymentId);
+        long returned = payment.status() == PaymentStatus.CAPTURED ? totals.returnedMinor() : 0L;
         long remaining = captured == null ? 0L : captured - returned;
         boolean refundable = captured != null && remaining > 0;
-        boolean reversible = captured != null && history.isEmpty();
+        // From the payment's own return count, not from the page. A history page can be empty because
+        // the caller paged past the end, and deciding eligibility from that would offer a reversal on a
+        // capture that has already been returned.
+        boolean reversible = captured != null && totals.count() == 0;
         String unavailableReason = null;
         if (captured == null) {
             unavailableReason = "NOT_CAPTURED";
         } else if (remaining == 0) {
             unavailableReason = "FULLY_RETURNED";
-        } else if (!history.isEmpty()) {
+        } else if (totals.count() > 0) {
             // Refunds remain possible; only the reversal is closed off. Named separately so the
             // dashboard can explain which control is gone and why.
             unavailableReason = "PARTIALLY_RETURNED";
         }
         return new PaymentReturnsView(payment.id(), payment.accountId(), payment.status(), payment.currency(),
-                captured, returned, remaining, refundable, reversible, unavailableReason, history);
+                captured, returned, remaining, refundable, reversible, unavailableReason,
+                totals.count(), history.returns(), history.nextCursor(), page);
+    }
+
+    /** Page size, defaulted and capped. An out-of-range request is refused rather than quietly clamped. */
+    private static int boundedPage(Integer limit) {
+        if (limit == null) return ReturnStore.DEFAULT_PAGE;
+        if (limit < 1 || limit > ReturnStore.MAX_PAGE) {
+            throw new PaymentException("INVALID_RETURN_INPUT", 400,
+                    "limit must be between 1 and " + ReturnStore.MAX_PAGE + ".");
+        }
+        return limit;
     }
 
     @Transactional(readOnly = true)
@@ -313,13 +389,14 @@ public class PaymentService {
      * reconciling against.
      */
     private <T> CommandResult<T> idempotent(String merchant, String key, String fingerprint,
-                                            StoredResponseKind kind, Supplier<CommandResult<T>> action) {
+                                            StoredResponseKind kind, LegacyFingerprint legacy,
+                                            Supplier<CommandResult<T>> action) {
         if (key == null || !key.matches("[A-Za-z0-9._:-]{8,128}")) {
             throw new PaymentException("INVALID_IDEMPOTENCY_KEY", 400, "Idempotency-Key must contain 8-128 letters, digits, dots, underscores, colons or hyphens.");
         }
         String hash = sha256(fingerprint);
         PaymentStore.IdempotencyRecord record = store.claimKey(merchant, key, hash);
-        if (!record.requestHash().equals(hash)) {
+        if (!record.requestHash().equals(hash) && !matchesSupersededFingerprint(record, kind, legacy)) {
             metrics.counter("decisionrail.idempotency.conflicts").increment();
             throw new PaymentException("IDEMPOTENCY_CONFLICT", 409, "This Idempotency-Key was already used for a different request.");
         }
@@ -337,6 +414,27 @@ public class PaymentService {
         CommandResult<T> result = action.get();
         store.completeKey(merchant, key, kind, result);
         return result;
+    }
+
+    /**
+     * Whether a key stored under a previous fingerprint encoding is this same command.
+     *
+     * <p>Only consulted when the current fingerprint does not match, so a key written since the change
+     * takes this path never. It requires both the older hash and the stored response to agree: the hash
+     * alone is what was ambiguous, and accepting it alone would carry the old defect forward for every
+     * key that predates the fix.
+     *
+     * <p>A key that was claimed but never completed has no stored response to confirm anything, and
+     * nothing committed under it either, so there is no replay to protect and it is refused as a
+     * conflict like any other mismatch.
+     */
+    private boolean matchesSupersededFingerprint(PaymentStore.IdempotencyRecord record,
+                                                 StoredResponseKind kind, LegacyFingerprint legacy) {
+        if (legacy == null || record.responseBody() == null) return false;
+        if (!legacy.hash().equals(record.requestHash())) return false;
+        StoredResponseKind stored = record.responseKind() == null ? StoredResponseKind.PAYMENT : record.responseKind();
+        if (stored != kind) return false;
+        return legacy.confirmedBy().test(store.decodeResponse(record, kind));
     }
 
     /**

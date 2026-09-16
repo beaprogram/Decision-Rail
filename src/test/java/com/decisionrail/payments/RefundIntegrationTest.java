@@ -244,6 +244,129 @@ class RefundIntegrationTest {
     }
 
     @Test
+    void anAbsentReasonAndTheLiteralTextNullAreDifferentRequests() throws Exception {
+        // Java renders a null reference as the four characters "null" when concatenated, so a
+        // fingerprint built by concatenation cannot tell "no reason was given" from "the reason is the
+        // word null". Two different requests then share one identity.
+        UUID payment = captured(5_000);
+        String key = key();
+        Reply absent = refund(payment, 1_000, null, key, DEMO);
+        assertThat(absent.status()).isEqualTo(201);
+
+        Reply literal = refund(payment, 1_000, "null", key, DEMO);
+        assertThat(literal.status())
+                .as("a reason of \"null\" is not the same request as no reason at all")
+                .isEqualTo(409);
+        assertThat(literal.body().path("code").asText()).isEqualTo("IDEMPOTENCY_CONFLICT");
+
+        // And in the other direction, on a key that first carried the literal text.
+        UUID other = captured(5_000);
+        String otherKey = key();
+        assertThat(refund(other, 1_000, "null", otherKey, DEMO).status()).isEqualTo(201);
+        assertThat(refund(other, 1_000, null, otherKey, DEMO).status())
+                .as("no reason at all is not the same request as a reason of \"null\"")
+                .isEqualTo(409);
+
+        // Neither attempt may have moved money a second time.
+        assertThat(returnCount(payment)).isEqualTo(1);
+        assertThat(returnCount(other)).isEqualTo(1);
+    }
+
+    @Test
+    void aReversalTellsAnAbsentReasonFromTheLiteralTextNullToo() throws Exception {
+        UUID payment = captured(3_000);
+        String key = key();
+        assertThat(reverse(payment, null, key, DEMO).status()).isEqualTo(201);
+        assertThat(reverse(payment, "null", key, DEMO).status()).isEqualTo(409);
+        assertThat(returnCount(payment)).isEqualTo(1);
+    }
+
+    @Test
+    void aKeyStoredUnderTheOldFingerprintStillReplaysItsReceipt() throws Exception {
+        // A return that committed before the encoding changed carries the old hash. Retrying it must
+        // still return its receipt: a fingerprint change that turns legitimate retries into conflicts
+        // would strand exactly the commands idempotency exists to protect.
+        UUID payment = captured(5_000);
+        String key = key();
+        Reply original = refund(payment, 1_200, "customer asked", key, DEMO);
+        assertThat(original.status()).isEqualTo(201);
+        rewriteStoredHashToTheOldEncoding(key, "REFUND|" + payment + "|1200|customer asked");
+
+        Reply retried = refund(payment, 1_200, "customer asked", key, DEMO);
+        assertThat(retried.status()).isEqualTo(201);
+        assertThat(retried.body()).isEqualTo(original.body());
+        assertThat(returnCount(payment)).as("a replay creates no second return").isEqualTo(1);
+        assertThat(returnJournalCount(payment)).isEqualTo(1);
+        assertThat(outboxCount(payment)).as("and no second event").isEqualTo(3);
+        assertFunds(accountId, 100_000 - 5_000 + 1_200, 0);
+
+        // A genuinely different request against that same legacy key is still refused.
+        assertThat(refund(payment, 1_300, "customer asked", key, DEMO).status()).isEqualTo(409);
+    }
+
+    @Test
+    void theOldFingerprintFallbackDoesNotCarryTheAmbiguityForward() throws Exception {
+        // The old hash cannot tell an absent reason from the literal text "null", so accepting it on
+        // its own would reintroduce the defect for every key that predates the fix. The stored receipt
+        // records which of the two actually committed, and that is what decides.
+        UUID payment = captured(5_000);
+        String key = key();
+        assertThat(refund(payment, 1_000, null, key, DEMO).status()).isEqualTo(201);
+        rewriteStoredHashToTheOldEncoding(key, "REFUND|" + payment + "|1000|null");
+
+        Reply literal = refund(payment, 1_000, "null", key, DEMO);
+        assertThat(literal.status())
+                .as("the old hash matches, but the receipt says the reason was absent")
+                .isEqualTo(409);
+        assertThat(returnCount(payment)).isEqualTo(1);
+
+        // The command that really did commit under that legacy hash still replays.
+        assertThat(refund(payment, 1_000, null, key, DEMO).status()).isEqualTo(201);
+        assertThat(returnCount(payment)).isEqualTo(1);
+    }
+
+    @Test
+    void aBlankReasonIsTheSameRequestAsNoReasonAndWhitespaceIsStripped() throws Exception {
+        UUID payment = captured(5_000);
+        String key = key();
+        Reply blank = refund(payment, 900, "   ", key, DEMO);
+        assertThat(blank.status()).isEqualTo(201);
+        assertThat(blank.body().path("reason").isNull()).as("blank is stored as absent").isTrue();
+        // Absent, empty and whitespace-only are one request.
+        assertThat(refund(payment, 900, null, key, DEMO).status()).isEqualTo(201);
+        assertThat(refund(payment, 900, "", key, DEMO).status()).isEqualTo(201);
+
+        // Surrounding whitespace is stripped, so these are one reason rather than two.
+        UUID other = captured(5_000);
+        String otherKey = key();
+        Reply padded = refund(other, 800, "  duplicate charge  ", otherKey, DEMO);
+        assertThat(padded.body().path("reason").asText()).isEqualTo("duplicate charge");
+        assertThat(refund(other, 800, "duplicate charge", otherKey, DEMO).status()).isEqualTo(201);
+        assertThat(returnCount(other)).isEqualTo(1);
+
+        // A different ordinary reason is still a different request.
+        assertThat(refund(other, 800, "customer returned it", otherKey, DEMO).status()).isEqualTo(409);
+    }
+
+    /** Puts a committed key back into the shape the previous concatenating encoding would have left. */
+    private void rewriteStoredHashToTheOldEncoding(String key, String legacyFingerprint) {
+        String hash = java.util.HexFormat.of().formatHex(sha256(legacyFingerprint));
+        int updated = jdbc.update(
+                "UPDATE idempotency_records SET request_hash = ? WHERE merchant_id = 'demo-merchant' AND idempotency_key = ?",
+                hash, key);
+        assertThat(updated).as("the key to rewrite must exist").isEqualTo(1);
+    }
+
+    private static byte[] sha256(String input) {
+        try {
+            return java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (java.security.NoSuchAlgorithmException impossible) {
+            throw new IllegalStateException(impossible);
+        }
+    }
+
+    @Test
     void theSameKeyTextIsIsolatedBetweenMerchants() throws Exception {
         UUID mine = captured(2_000);
         UUID theirs = capturedFor("other-merchant", newAccount("other-merchant", 50_000), 2_000);
@@ -312,6 +435,110 @@ class RefundIntegrationTest {
         assertThat(recovered.body().path("returnId").asText()).isEqualTo(committed.returnId().toString());
         assertThat(returnCount(payment)).as("recovery must not refund twice").isEqualTo(1);
         assertFunds(accountId, 96_250, 0);
+    }
+
+    // ----- return history -----
+
+    @Test
+    void everyReturnIsReachableThroughHistoryEvenPastTheOldCap() throws Exception {
+        // 201 returns: one more than the number the old implementation would load at all. Its newest
+        // operation and that operation's journal were unreachable through the history, while the
+        // payment's totals counted them - so the screen showed 200 returns for a payment that had 201.
+        UUID payment = captured(20_100);
+        for (int i = 0; i < 201; i++) {
+            assertThat(refund(payment, 100, "return " + i, key(), DEMO).status()).isEqualTo(201);
+        }
+        assertThat(returnCount(payment)).isEqualTo(201);
+
+        Reply first = read("/v1/payments/" + payment + "/returns", DEMO);
+        assertThat(first.status()).isEqualTo(200);
+        // The total describes the payment; the page describes the page. They are different numbers and
+        // both are stated.
+        assertThat(first.body().path("returnCount").asLong()).isEqualTo(201);
+        assertThat(first.body().path("returns")).hasSize(50);
+        assertThat(first.body().path("pageLimit").asInt()).isEqualTo(50);
+        assertThat(first.body().path("returnedAmountMinor").asLong()).isEqualTo(20_100);
+        assertThat(first.body().path("remainingRefundableMinor").asLong()).isZero();
+
+        // Newest first, so the most recent operation is on the first page rather than past the end.
+        assertThat(first.body().path("returns").get(0).path("sequenceNumber").asInt()).isEqualTo(201);
+        assertThat(first.body().path("returns").get(0).path("journalId").isNull()).isFalse();
+
+        // Walk the whole history. Every sequence number must appear exactly once.
+        List<Integer> seen = new ArrayList<>();
+        JsonNode page = first.body();
+        int pages = 0;
+        while (true) {
+            page.path("returns").forEach(entry -> seen.add(entry.path("sequenceNumber").asInt()));
+            pages++;
+            String cursor = page.path("nextCursor").asText(null);
+            if (cursor == null || cursor.isBlank()) break;
+            assertThat(pages).as("paging must terminate").isLessThan(20);
+            Reply next = read("/v1/payments/" + payment + "/returns?cursor=" + cursor, DEMO);
+            assertThat(next.status()).isEqualTo(200);
+            page = next.body();
+        }
+        assertThat(seen).as("no entry is omitted or duplicated").hasSize(201).doesNotHaveDuplicates();
+        assertThat(seen).containsExactlyElementsOf(
+                java.util.stream.IntStream.rangeClosed(1, 201).boxed().sorted(java.util.Comparator.reverseOrder()).toList());
+    }
+
+    @Test
+    void aReturnCommittedWhilePagingDoesNotDisturbThePagesAlreadyRead() throws Exception {
+        UUID payment = captured(5_000);
+        for (int i = 0; i < 6; i++) refund(payment, 100, "before " + i, key(), DEMO);
+
+        Reply first = read("/v1/payments/" + payment + "/returns?limit=3", DEMO);
+        assertThat(first.body().path("returns")).hasSize(3);
+        String cursor = first.body().path("nextCursor").asText();
+
+        // A new return commits between pages. Keyset paging on the sequence number means it lands ahead
+        // of what has already been read rather than shifting a boundary inside it.
+        refund(payment, 100, "during paging", key(), DEMO);
+
+        Reply second = read("/v1/payments/" + payment + "/returns?limit=3&cursor=" + cursor, DEMO);
+        List<Integer> secondPage = new ArrayList<>();
+        second.body().path("returns").forEach(entry -> secondPage.add(entry.path("sequenceNumber").asInt()));
+        assertThat(secondPage).containsExactly(3, 2, 1);
+        assertThat(second.body().path("returnCount").asLong())
+                .as("the total is current even though the page is a continuation").isEqualTo(7);
+    }
+
+    @Test
+    void aReturnHistoryCursorIsScopedToItsOwnPayment() throws Exception {
+        UUID mine = captured(2_000);
+        UUID other = captured(2_000);
+        refund(mine, 100, null, key(), DEMO);
+        refund(mine, 100, null, key(), DEMO);
+        refund(other, 100, null, key(), DEMO);
+
+        String cursor = read("/v1/payments/" + mine + "/returns?limit=1", DEMO).body().path("nextCursor").asText();
+        // A cursor names the payment it was minted for, so it cannot silently reposition inside another.
+        Reply crossed = read("/v1/payments/" + other + "/returns?cursor=" + cursor, DEMO);
+        assertThat(crossed.status()).isEqualTo(400);
+        assertThat(crossed.body().path("code").asText()).isEqualTo("INVALID_RETURN_CURSOR");
+        assertThat(read("/v1/payments/" + mine + "/returns?cursor=not-a-cursor", DEMO).status()).isEqualTo(400);
+
+        // And another merchant cannot read this history at all, cursor or no cursor.
+        assertThat(read("/v1/payments/" + mine + "/returns", OTHER).status()).isEqualTo(404);
+        assertThat(read("/v1/payments/" + mine + "/returns?limit=0", DEMO).status()).isEqualTo(400);
+        assertThat(read("/v1/payments/" + mine + "/returns?limit=201", DEMO).status()).isEqualTo(400);
+    }
+
+    @Test
+    void eligibilityComesFromTheCountNotFromWhetherAPageIsEmpty() throws Exception {
+        UUID payment = captured(2_000);
+        refund(payment, 500, null, key(), DEMO);
+
+        // Paged past the end: the history page is empty, but the payment has been partly returned and
+        // must not be offered as reversible.
+        String cursor = new ReturnCursor(payment, 1).encode();
+        Reply pastTheEnd = read("/v1/payments/" + payment + "/returns?cursor=" + cursor, DEMO);
+        assertThat(pastTheEnd.body().path("returns")).isEmpty();
+        assertThat(pastTheEnd.body().path("returnCount").asLong()).isEqualTo(1);
+        assertThat(pastTheEnd.body().path("reversible").asBoolean()).isFalse();
+        assertThat(pastTheEnd.body().path("refundable").asBoolean()).isTrue();
+        assertThat(pastTheEnd.body().path("unavailableReason").asText()).isEqualTo("PARTIALLY_RETURNED");
     }
 
     // ----- atomicity -----
@@ -383,40 +610,150 @@ class RefundIntegrationTest {
     }
 
     @Test
-    void theDatabaseRefusesACompensatingJournalThatDoesNotMatchItsReturn() throws Exception {
+    void aSecondJournalForOneReturnIsRefused() throws Exception {
         UUID payment = captured(5_000);
         UUID returnId = UUID.fromString(refund(payment, 2_000, null, key(), DEMO).body().path("returnId").asText());
 
-        // A balanced pair is not enough. Each of these balances perfectly and is still wrong.
-        assertThatThrownBy(() -> writeReturnJournal(payment, returnId, 2_000, "wallet:" + accountId,
-                "merchant-clearing:demo-merchant"))
-                .as("one journal per return")
-                .isInstanceOf(DataAccessException.class);
-
-        UUID second = UUID.fromString(refund(payment, 1_000, null, key(), DEMO).body().path("returnId").asText());
-        assertThatThrownBy(() -> {
-            jdbc.update("DELETE FROM ledger_entries WHERE journal_id IN (SELECT id FROM ledger_journals WHERE source_return_id = ?)", second);
-        }).as("ledger history is append-only").isInstanceOf(DataAccessException.class);
-
-        UUID third = UUID.fromString(refund(payment, 500, null, key(), DEMO).body().path("returnId").asText());
-        jdbc.update("DELETE FROM ledger_journals WHERE 1 = 0");
-        // A journal claiming an amount the return never returned.
-        assertThatThrownBy(() -> writeReturnJournalFor(UUID.randomUUID(), payment, third, 400,
+        // This return already has its journal, so a second one is refused by uniqueness - which is what
+        // this test is for, and what the amount and direction tests below must not accidentally hit.
+        assertThatThrownBy(() -> writeReturnJournal(payment, returnId, 2_000,
                 "merchant-clearing:demo-merchant", "wallet:" + accountId))
-                .as("the amount must equal the return operation's amount")
-                .isInstanceOf(DataAccessException.class);
-        // A balanced journal moving the money the wrong way.
-        assertThatThrownBy(() -> writeReturnJournalFor(UUID.randomUUID(), payment, third, 500,
+                .as("one journal per return operation")
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("ledger_journals_one_per_return");
+        assertThat(returnJournalCount(payment)).isEqualTo(1);
+    }
+
+    @Test
+    void aCorrectlyFormedReturnJournalIsAccepted() throws Exception {
+        // The positive control. Without it the rejections below could be failing for a setup reason -
+        // a missing row, a foreign key, a trigger this fixture never satisfies - and would look
+        // identical to the protection they claim to demonstrate.
+        UUID payment = captured(5_000);
+        long journalsBefore = returnJournalCount(payment);
+
+        attemptReturnWithJournal(payment, 500, 500, "merchant-clearing:demo-merchant", "wallet:" + accountId);
+
+        assertThat(returnJournalCount(payment)).isEqualTo(journalsBefore + 1);
+        assertThat(recordedReturnedTotal(payment)).isEqualTo(500);
+        assertThat(returnedTotal(payment)).isEqualTo(500);
+    }
+
+    @Test
+    void aReturnJournalForTheWrongAmountIsRefused() throws Exception {
+        UUID payment = captured(5_000);
+
+        // A fresh return with no journal yet, so the amount rule is what this reaches. The journal
+        // balances perfectly at 400; it simply records an amount the return never returned.
+        assertThatThrownBy(() -> attemptReturnWithJournal(payment, 500, 400,
+                "merchant-clearing:demo-merchant", "wallet:" + accountId))
+                .as("the journal amount must equal the return operation's amount")
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("matching its RETURN operation");
+
+        // Rejected at commit, so the return row went with it.
+        assertThat(returnCount(payment)).isZero();
+        assertThat(recordedReturnedTotal(payment)).isZero();
+        assertFunds(accountId, 95_000, 0);
+    }
+
+    @Test
+    void aReturnJournalMovingMoneyTheWrongWayIsRefused() throws Exception {
+        UUID payment = captured(5_000);
+
+        // Balanced, correct amount, correct accounts - and the sides swapped, so it credits merchant
+        // clearing and debits the wallet. That is a capture wearing a return's name, and it would take
+        // money from the account the return was meant to pay back.
+        assertThatThrownBy(() -> attemptReturnWithJournal(payment, 500, 500,
                 "wallet:" + accountId, "merchant-clearing:demo-merchant"))
-                .as("a return must debit clearing and credit the wallet")
-                .isInstanceOf(DataAccessException.class);
-        // A second capture journal for a payment that already has one.
+                .as("a return must debit merchant clearing and credit the wallet")
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("matching its RETURN operation");
+
+        // And an entry naming an account belonging to neither side of this payment.
+        assertThatThrownBy(() -> attemptReturnWithJournal(payment, 500, 500,
+                "merchant-clearing:demo-merchant", "wallet:" + UUID.randomUUID()))
+                .as("a return must credit this payment's own wallet")
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("matching its RETURN operation");
+
+        assertThat(returnCount(payment)).isZero();
+        assertFunds(accountId, 95_000, 0);
+    }
+
+    @Test
+    void theCaptureJournalStaysSealedAndSingular() throws Exception {
+        UUID payment = captured(5_000);
+        refund(payment, 2_000, null, key(), DEMO);
+        UUID captureJournal = jdbc.queryForObject(
+                "SELECT id FROM ledger_journals WHERE payment_id = ? AND journal_kind = 'CAPTURE'", UUID.class, payment);
+
+        // Sealed: no entry may join it after its creating transaction, however well formed.
+        assertThatThrownBy(() -> jdbc.update("""
+                INSERT INTO ledger_entries (id, journal_id, ledger_account, side, amount_minor)
+                VALUES (?, ?, 'wallet:late', 'DEBIT', 1)
+                """, UUID.randomUUID(), captureJournal))
+                .as("a sealed journal takes no further entries")
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("sealed after its creating transaction");
+
+        // Immutable: entries cannot be edited or removed.
+        assertThatThrownBy(() -> jdbc.update("UPDATE ledger_entries SET amount_minor = 1 WHERE journal_id = ?", captureJournal))
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("append-only");
+        assertThatThrownBy(() -> jdbc.update("DELETE FROM ledger_entries WHERE journal_id = ?", captureJournal))
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("append-only");
+
+        // Singular: a payment keeps exactly one capture journal, whatever else it accumulates.
         assertThatThrownBy(() -> jdbc.update("""
                 INSERT INTO ledger_journals (id, payment_id, merchant_id, currency, journal_kind)
                 VALUES (?, ?, 'demo-merchant', 'CAD', 'CAPTURE')
                 """, UUID.randomUUID(), payment))
                 .as("exactly one capture journal per payment")
-                .isInstanceOf(DataAccessException.class);
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("ledger_journals_one_capture_per_payment");
+
+        // The original is exactly as the capture left it.
+        assertThat(jdbc.queryForObject(
+                "SELECT sum(amount_minor) FROM ledger_entries WHERE journal_id = ?", Long.class, captureJournal))
+                .isEqualTo(10_000);
+    }
+
+    /**
+     * Writes a return operation that has no journal, then one journal for it, in one transaction.
+     *
+     * <p>The journal-less return is the point. Attempting a wrong journal for a return the service has
+     * already journalled hits the one-journal-per-return index first, so the amount and direction rules
+     * are never reached and a test that claims to prove them proves uniqueness instead.
+     *
+     * <p>One transaction, because the deferred triggers are evaluated at commit: a rejection therefore
+     * takes the return row with it and leaves the payment exactly as it was.
+     */
+    private void attemptReturnWithJournal(UUID payment, long returnAmount, long journalAmount,
+                                          String debitAccount, String creditAccount) {
+        transactions.executeWithoutResult(status -> {
+            UUID returnId = UUID.randomUUID();
+            Integer nextSequence = jdbc.queryForObject(
+                    "SELECT coalesce(max(sequence_number), 0) + 1 FROM payment_returns WHERE payment_id = ?",
+                    Integer.class, payment);
+            jdbc.update("""
+                    INSERT INTO payment_returns (id, payment_id, merchant_id, account_id, return_type,
+                            amount_minor, currency, reason, sequence_number, created_at)
+                    VALUES (?, ?, 'demo-merchant', ?, 'REFUND', ?, 'CAD', 'journal fixture', ?, now())
+                    """, returnId, payment, accountId, returnAmount, nextSequence);
+            jdbc.update("UPDATE payments SET returned_amount_minor = returned_amount_minor + ? WHERE id = ?",
+                    returnAmount, payment);
+            UUID journal = UUID.randomUUID();
+            jdbc.update("""
+                    INSERT INTO ledger_journals (id, payment_id, merchant_id, currency, journal_kind, source_return_id)
+                    VALUES (?, ?, 'demo-merchant', 'CAD', 'RETURN', ?)
+                    """, journal, payment, returnId);
+            jdbc.update("INSERT INTO ledger_entries(id,journal_id,ledger_account,side,amount_minor) VALUES (?,?,?,'DEBIT',?)",
+                    UUID.randomUUID(), journal, debitAccount, journalAmount);
+            jdbc.update("INSERT INTO ledger_entries(id,journal_id,ledger_account,side,amount_minor) VALUES (?,?,?,'CREDIT',?)",
+                    UUID.randomUUID(), journal, creditAccount, journalAmount);
+        });
     }
 
     @Test
@@ -436,6 +773,43 @@ class RefundIntegrationTest {
                 """, UUID.randomUUID(), payment, accountId)))
                 .as("a return row must agree with the payment's recorded total")
                 .isInstanceOf(DataAccessException.class);
+    }
+
+    @Test
+    void theReturnedTotalEqualityIsCheckedWhenAReturnIsWrittenAndNotOnEveryUpdate() throws Exception {
+        UUID payment = captured(5_000);
+        refund(payment, 1_000, null, key(), DEMO);
+
+        // What the trigger does enforce: writing a return whose amount disagrees with the payment's
+        // recorded total is refused, so the two cannot be made to disagree by adding a return.
+        assertThatThrownBy(() -> transactions.executeWithoutResult(status -> jdbc.update("""
+                INSERT INTO payment_returns
+                    (id, payment_id, merchant_id, account_id, return_type, amount_minor, currency, sequence_number, created_at)
+                VALUES (?, ?, 'demo-merchant', ?, 'REFUND', 400, 'CAD', 9, now())
+                """, UUID.randomUUID(), payment, accountId)))
+                .as("a return must leave the payment's total equal to the sum of its returns")
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("return operations total");
+
+        // What it does not: the constraint trigger fires on inserting a return, so an update that
+        // touches only the payment is not checked against the return rows at all. The row-level cap
+        // still applies, so the total cannot exceed the capture - but within that cap it can be made
+        // to disagree with the operations it is supposed to summarise.
+        //
+        // This is the narrower guarantee the documentation now states. It is deliberately not widened
+        // by a trigger on payments: reconciliation is the layer that catches records disagreeing with
+        // each other, and a database that made this particular disagreement impossible would also make
+        // that detection impossible to demonstrate. See docs/adr/0007.
+        jdbc.update("UPDATE payments SET returned_amount_minor = 900 WHERE id = ?", payment);
+        assertThat(recordedReturnedTotal(payment)).isEqualTo(900);
+        assertThat(returnedTotal(payment)).as("the operations are unchanged and now disagree").isEqualTo(1_000);
+
+        // Above the capture is still refused, whatever writes it.
+        assertThatThrownBy(() -> jdbc.update("UPDATE payments SET returned_amount_minor = 5001 WHERE id = ?", payment))
+                .isInstanceOf(DataAccessException.class);
+
+        // Put it back so this test leaves its own payment reconciling.
+        jdbc.update("UPDATE payments SET returned_amount_minor = 1000 WHERE id = ?", payment);
     }
 
     // ----- events -----
