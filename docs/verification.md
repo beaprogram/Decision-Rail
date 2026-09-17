@@ -70,12 +70,12 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw clean verify` passed **359 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
+`./mvnw clean verify` passed **380 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
 **42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled. That is the
-checkpoint 10 release, recorded in full further down; the 329 figure it replaces belongs to
-`50a2761`, 318 to `fc6fa5c`, 310 to `fdc6d96`, and the 302/41 figures before that to `aa6de43`. The table below is
+checkpoint 10 corrective release, recorded in full further down; the 359 figure it replaces belongs
+to `1977084`, 329 to `50a2761`, 318 to `fc6fa5c`, 310 to `fdc6d96`, and 302/41 to `aa6de43`. The table below is
 the checkpoint 8 record, kept because it is what the group breakdown was counted against; the checkpoint
-9 additions are listed in the section that follows it. The **359** figure is the current total and the
+9 additions are listed in the section that follows it. The **380** figure is the current total and the
 **213** figure is a historical record of an earlier revision — they are not two counts of the same thing.
 
 ### The earlier recorded result (checkpoint 8)
@@ -1053,6 +1053,58 @@ machine had rebooted before the pass began, which took the container runtime dow
 runtime brought the development containers back exactly as the reboot had left them (image of
 2026-09-16, schema V11, "No migration necessary", 622 payments), and nothing here touched them
 afterwards.
+
+## Checkpoint 10 corrections (v0.10.1)
+
+Baseline `6d3ef63` (released code `1977084`, `v0.10.0`), whose CI passed. A review of the release
+configuration found eight findings; none concerns the financial core, and each is listed here with
+what was **observed** before the fix, what was only established from source, the correction, and the
+regression that now holds it.
+
+| # | Finding | Before the fix | Correction | Regression |
+| --- | --- | --- | --- | --- |
+| R1 | The authentication limiter cleared an address on any sub-400 response to a Basic-bearing request; the browser chain ignores Basic, so anonymous `GET /ui/identity` with a bogus header reset it | **Observed** in the real chains: two wrong administrator passwords, an anonymous reset, repeated - eight guesses, no refusal | Failures and successes come from Spring Security's authentication events on both chains; a success clears only that username's failures at that address | `PublicDemoIntegrationTest`: anonymous stray-header reset, visitor success not clearing administrator guesses, recovery after the window, both chains |
+| R2 | Caddy passed a client's `Forwarded` header through and the `framework` strategy honoured its `for=`, so the limiter's key was client-selectable | **Observed end to end** through the packaged v0.10.0 edge: twelve wrong passwords, each with a different `Forwarded: for=`, never refused; the right password then accepted | Caddy strips `Forwarded`, `X-Forwarded-Port/Prefix/Ssl` and authors `X-Forwarded-For/Proto/Host/Port` itself; the application uses Tomcat's native remote-ip valve (private-network peers only, `Forwarded` never read) | Rehearsed through the corrected edge: the same twelve, plus spoofed `X-Forwarded-*`, refused at the eleventh; cookies still `Secure`; HTTP→HTTPS redirect and `Location` unaffected |
+| R3 | Only the exact `/actuator/health/async` was protected; `/actuator/health/async/asyncDelivery` fell through to the public wildcard | **Observed** (review, isolated chains): anonymous 401 for the group, 200 with backlog and breaker details for the descendant | The group and its descendants need an operator; only `/actuator/health`, `/liveness` and `/readiness` are public; any other health path is an operator read | `PublicDemoIntegrationTest` (anonymous/visitor/operations/admin on both paths) and through the edge |
+| R4 | `HEAD` bypassed the reconciliation budget; Spring runs the `GET` handler and drops the body | **Observed** (review, real interceptor): GET 200, 200, 429, then four HEADs each running the handler | `HEAD` is charged like `GET` | `PublicDemoIntegrationTest`: after two reports, every further `GET` and `HEAD` on both chains is 429 and **the service is not invoked** (spy) |
+| R5 | The one-in-flight replay limit was a count in an interceptor before the controller created the job | **Observed** here, through HTTP, on the pre-fix code: eight concurrent requests against a limit of one created **three** PENDING jobs | Admission moved into the job-creation transaction under `SELECT … FOR UPDATE` on the visitor's merchant row; the hourly allowance is counted from the rows there too; a refusal rolls back with no job, membership or key | `VisitorReplayConcurrencyTest`: eight concurrent HTTP requests create exactly one; refused keys claim nothing; a same-key retry replays; capacity returns on COMPLETED or FAILED; the hourly control answers separately; the private merchant is unlimited |
+| R6 | The broker mounted a volume but set no `log.dirs`; the Apache image builds its configuration from the environment alone | **Observed**: effective configuration without `log.dirs`; `__cluster_metadata-0` and checkpoints in `/tmp/kafka-logs`; the mounted volume empty | `KAFKA_LOG_DIRS` and `KAFKA_METADATA_LOG_DIR` on the volume | Rehearsed: seeded activity, then the container **removed and recreated** with the volume kept - cluster id, topic id, log-end and committed offsets byte-identical; a new event afterwards published and consumed by both groups |
+| R7 | An online database snapshot uncoordinated with the broker's committed offsets; restore replaced the database and restarted the application with the broker's newer state | Source-derived; not reproduced as a loss. What was rehearsed instead is the corrected procedure's every branch | `backup.sh` stops the application and requires zero consumer lag (unknown lag refuses); `restore.sh` restores into a fresh database swapped in on success, resets the broker to empty, leaves the application stopped | Rehearsed: refusal with lag 4 (application restarted), refusal with the broker unreachable, a coherent backup, three payments published and consumed after it, restore back to identical financial fingerprint, projection count and receipt identities, broker empty, new event delivered exactly once afterwards, and a corrupt dump leaving the previous database, the broker and a stopped application intact |
+| R8 | `restore.sh` started the current image, so a cross-migration rollback could re-apply the newer migrations before the older image was selected | **Observed** (review, stub execution): restore of V14 ended in `start app` without selecting an image | `restore.sh` starts nothing; `rollback.sh <image> --restore <dump>` is the one workflow | Rehearsed with real images: V14 image deployed and backed up; V15 image upgraded; direct rollback refused with the application stopped; `--restore` rollback ended at V14 on the V14 image with **no V15 row ever re-applied**; forward again to V15 |
+| — | The image guard rejected three strings and accepted `stable` | **Observed** (review, stub execution) | Only `sha-<40-hex>` tags and `@sha256:` digests are accepted | `ImagePinGuardTest`: four accepted forms, ten refused including `stable`, `v0.10.0` and a short sha |
+| — | Release notes called the amd64 child digest the image's digest | Fact of the record | Index and per-architecture digests labelled separately, read fresh for the corrective image | — |
+
+### First-attempt failures in this pass
+
+| What failed | Why | What it means |
+| --- | --- | --- |
+| The five new regressions in `PublicDemoIntegrationTest` | Against the unfixed code | Intended: R1, R3 and R4 reproduced in the real context |
+| The R1 stray-header test after the fix, at its fourth guess | I had encoded the pre-fix observation (eight 401s); the fix refuses at the fourth | The assertion now states the intended behaviour |
+| The window-recovery test, `403` not `200` | My final check used an administrator credential on a merchant route | Test fixture |
+| The first replay "reproduction" | It called the service directly, bypassing the interceptor where the old limit lived - it showed no limit at that layer, not the race | Discarded; the reproduction was redone through HTTP, where three jobs were created |
+| The hourly replay test | It measured the hour on the application clock while `created_at` is stamped by the database | The policy counts on the database clock, and the test ages rows rather than the clock |
+| `replayIsBoundedToOneInFlightAndAnHourlyAllowance` | Another class leaves a PENDING visitor job in the shared database; then the command budget (4/min in that context) fired before the hourly check | The test starts from no in-flight jobs and advances the clock past the command window |
+| `recovery-demo.sh`, port `55436` in use | I started it a second time while my first, output-filtered, invocation was still tearing down | A clean run followed: 16 checks. My mistake, not the script's |
+
+### Recorded result for this pass
+
+Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka **3.9.1**, Caddy 2,
+Playwright **1.63**.
+
+- `./mvnw clean verify`: **380 backend tests**, 0 failures, 0 errors, 0 skipped, from an empty
+  database - 359 plus 21 added (3 limiter regressions, 1 HEAD-budget regression with a service spy,
+  3 replay concurrency, 14 image-pin guard)
+- **42 frontend unit tests**, lint clean; **54 browser end-to-end tests** first attempt, retries
+  disabled, against a standard-mode container built from this tree
+- `scripts/demo.sh` passed; `scripts/lifecycle-demo.sh` **26 checks**; `scripts/async-demo.sh`
+  **27 checks**; `scripts/recovery-demo.sh` **16 checks**
+- the rehearsal table above, on the `decisionrail-public` project on this machine with the corrected
+  image and a synthetic V14 image built from this tree without `V15`, all confirmed by name before
+  removal
+
+The development stack was not started, stopped, migrated or written to; its schema (V11), payment
+count (622) and broker start time were unchanged throughout. The public instance remains **not ready
+for exposure** until the live checks in `deploy/README.md` run on the actual host.
 
 ## Failure cases and rationale
 

@@ -60,6 +60,30 @@ confirm_destruction() {
   fi
 }
 
+# An image reference is accepted only in a form that names a revision: a `sha-<full commit>` tag, a
+# `@sha256:<digest>` digest, or both. Every other tag - `latest`, `main`, `stable`, a version name -
+# is mutable by construction, and a deployment pinned to one cannot be matched to a commit later.
+# The form is what this enforces; that a `sha-` tag really is that commit's build is the release
+# workflow's guarantee, and `GET /actuator/info` on the running instance is how it is checked.
+require_pinned_image() {
+  local image=$1
+  local name_part=${image%%@*}
+  local digest_part=""
+  [[ "$image" == *@* ]] && digest_part=${image#*@}
+  local tag_ok=0 digest_ok=0
+  if [[ "$name_part" =~ ^[a-z0-9._/-]+:sha-[0-9a-f]{40}$ ]]; then tag_ok=1; fi
+  if [[ -n "$digest_part" ]]; then
+    [[ "$digest_part" =~ ^sha256:[0-9a-f]{64}$ ]] && digest_ok=1
+    # With a digest the name may carry no tag at all, or a sha- tag; never a mutable one.
+    if [[ "$name_part" == *:* && $tag_ok -eq 0 ]]; then digest_ok=0; fi
+  fi
+  if (( tag_ok == 0 && digest_ok == 0 )); then
+    printf 'Refusing: image "%s" is not pinned to a revision. Use <repository>:sha-<40-hex commit>, <repository>@sha256:<digest>, or both.\n' "$image" >&2
+    return 1
+  fi
+  return 0
+}
+
 # Common argument handling: these scripts take no arguments beyond what each documents.
 reject_arguments() {
   local script=$1; shift

@@ -17,11 +17,7 @@ require_dependencies docker curl jq
 require_env_file
 assert_public_project
 
-case "$APP_IMAGE" in
-  *:latest|*REPLACE*|*:main)
-    printf 'Refusing: APP_IMAGE=%s does not name a revision. Pin a sha- tag or a digest.\n' "$APP_IMAGE" >&2
-    exit 1 ;;
-esac
+require_pinned_image "$APP_IMAGE" || exit 1
 case "$DEMO_HOST" in
   *REPLACE*|"") printf 'Refusing: DEMO_HOST is not set in %s.\n' "$env_file" >&2; exit 1 ;;
 esac

@@ -48,13 +48,9 @@ and completion criteria are in [roadmap.md](roadmap.md).
 ## Verification record
 
 Local evidence recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
-**3.9.1**, after the checkpoint 10 release work, and confirmed remotely by
-[CI run 35275604071](https://github.com/beaprogram/Decision-Rail/actions/runs/35275604071) on the
-delivered revision `1977084`, tagged `v0.10.0`. The release image is
-`ghcr.io/beaprogram/decision-rail:sha-19770842ab47837fbf0e035c0ae1964b840c4583` and the walkthrough
-recordings are attached to [the release](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.0).
+**3.9.1**, after the checkpoint 10 corrections (v0.10.1).
 
-- Pinned-wrapper build and suite: **359 backend tests passed**, with **0 failures, 0 errors, and
+- Pinned-wrapper build and suite: **380 backend tests passed**, with **0 failures, 0 errors, and
   0 skipped**, up from 213 at checkpoint 8. The 310 recorded for `fdc6d96` was correct; a 307 that
   appeared briefly in [verification.md](verification.md) was a counting mistake of mine, explained
   there.
@@ -336,6 +332,23 @@ verified; the record is in [verification.md](verification.md).
 
 The checkpoint's implementation is finished and the release is verified. It is not marked complete,
 because its last deliverable does not yet exist.
+
+### Corrections after review (v0.10.1)
+
+A review of `v0.10.0`'s release configuration found eight findings, none in the financial core; the
+corrective release fixes each with a regression, and the record is in
+[verification.md](verification.md). Observed before the fix, on disposable infrastructure: an
+anonymous request with a stray `Authorization` header resetting the authentication limiter; a
+client-supplied `Forwarded: for=` choosing the address the limiter keyed on, end to end through the
+packaged edge; `/actuator/health/async/asyncDelivery` public; `HEAD` bypassing the reconciliation
+budget; eight concurrent replay requests creating three jobs against a limit of one; the broker
+writing to `/tmp/kafka-logs` with an empty volume. Established from the scripts and then rehearsed:
+an online database snapshot uncoordinated with the broker's committed offsets, and a restore that
+started the newer image before an older one could be selected. Also corrected: an image guard that
+accepted `stable`, and release notes that called the amd64 child digest the image's digest.
+
+The public instance is **not ready for exposure** until the live checks in `deploy/README.md` have
+been run on the actual host; that remains pending on owner access and available free capacity.
 
 ## Material limitations to carry forward
 

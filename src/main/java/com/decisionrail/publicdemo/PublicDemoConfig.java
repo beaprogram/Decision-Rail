@@ -50,10 +50,17 @@ public class PublicDemoConfig {
     /** Marker bean: its existence means the guards above passed. */
     public static final class PublicDemoGuards {}
 
+    /** Replay limits for the visitor, decided inside the creating transaction. */
     @Bean
     @ConditionalOnProperty(name = "app.public-demo.enabled", havingValue = "true")
-    WebMvcConfigurer visitorBudgets(PublicDemoProperties properties, Clock clock, ObjectMapper mapper, JdbcTemplate jdbc) {
-        VisitorBudgetInterceptor interceptor = new VisitorBudgetInterceptor(properties, clock, mapper, jdbc);
+    com.decisionrail.replay.ReplayAdmissionPolicy visitorReplayAdmission(PublicDemoProperties properties, JdbcTemplate jdbc) {
+        return new VisitorReplayAdmission(properties, jdbc);
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "app.public-demo.enabled", havingValue = "true")
+    WebMvcConfigurer visitorBudgets(PublicDemoProperties properties, Clock clock, ObjectMapper mapper) {
+        VisitorBudgetInterceptor interceptor = new VisitorBudgetInterceptor(properties, clock, mapper);
         return new WebMvcConfigurer() {
             @Override
             public void addInterceptors(InterceptorRegistry registry) {
@@ -67,12 +74,20 @@ public class PublicDemoConfig {
      * address is refused before any credential is examined, and after the forwarded-header filter,
      * so the address it sees behind the proxy is the client's.
      */
+    /**
+     * The limiter is a bean in its own right so that Spring publishes authentication events to it;
+     * the registration below is what places it in the servlet chain.
+     */
     @Bean
     @ConditionalOnProperty(name = "app.public-demo.enabled", havingValue = "true")
-    FilterRegistrationBean<AuthenticationAttemptLimiter> authenticationAttemptLimiter(
-            PublicDemoProperties properties, Clock clock, ObjectMapper mapper) {
-        FilterRegistrationBean<AuthenticationAttemptLimiter> registration =
-                new FilterRegistrationBean<>(new AuthenticationAttemptLimiter(properties, clock, mapper));
+    AuthenticationAttemptLimiter authenticationAttemptLimiterBean(PublicDemoProperties properties, Clock clock, ObjectMapper mapper) {
+        return new AuthenticationAttemptLimiter(properties, clock, mapper);
+    }
+
+    @Bean
+    @ConditionalOnProperty(name = "app.public-demo.enabled", havingValue = "true")
+    FilterRegistrationBean<AuthenticationAttemptLimiter> authenticationAttemptLimiter(AuthenticationAttemptLimiter limiter) {
+        FilterRegistrationBean<AuthenticationAttemptLimiter> registration = new FilterRegistrationBean<>(limiter);
         registration.setOrder(-101);
         registration.addUrlPatterns("/ui/*", "/v1/*", "/actuator/*");
         return registration;

@@ -1,5 +1,6 @@
 package com.decisionrail.publicdemo;
 
+import com.decisionrail.reconciliation.ReconciliationService;
 import com.decisionrail.support.MutableClock;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -22,6 +23,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.mock.web.MockHttpSession;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.TestPropertySource;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -29,7 +31,14 @@ import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilde
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestBuilders.formLogin;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.head;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
 
@@ -93,6 +102,7 @@ class PublicDemoIntegrationTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired PublicDemoProperties properties;
     @Autowired MutableClock clock;
+    @MockitoSpyBean ReconciliationService reconciliation;
 
     private UUID visitorAccount;
     private UUID privateAccount;
@@ -226,6 +236,9 @@ class PublicDemoIntegrationTest {
 
     @Test
     void replayIsBoundedToOneInFlightAndAnHourlyAllowance() throws Exception {
+        // The suite shares one database and another class leaves visitor jobs behind; both limits
+        // are now counted from the rows, so start this test from none in flight and none this hour.
+        jdbc.update("UPDATE replay_jobs SET status = 'COMPLETED', created_at = created_at - interval '2 hours' WHERE merchant_id = 'visitor'");
         String candidate = "public-candidate-" + UUID.randomUUID().toString().substring(0, 8);
         assertThat(status(post("/v1/policies").header("Authorization", ADMIN)
                 .contentType(MediaType.APPLICATION_JSON)
@@ -239,8 +252,10 @@ class PublicDemoIntegrationTest {
         assertThat(json.readTree(second.getResponse().getContentAsString()).path("detail").asText())
                 .contains("already has a replay job running");
 
-        // Once nothing is in flight, the hourly allowance is what answers.
+        // Once nothing is in flight, the hourly allowance is what answers. (Every request above also
+        // spent a command; a minute on, that budget is out of the way and only the replay limits speak.)
         jdbc.update("UPDATE replay_jobs SET status = 'COMPLETED' WHERE merchant_id = 'visitor'");
+        clock.advance(Duration.ofMinutes(1));
         assertThat(startReplay(VISITOR, candidate).getResponse().getStatus()).isEqualTo(201);
         jdbc.update("UPDATE replay_jobs SET status = 'COMPLETED' WHERE merchant_id = 'visitor'");
         MvcResult third = startReplay(VISITOR, candidate);
@@ -259,6 +274,25 @@ class PublicDemoIntegrationTest {
         for (int i = 0; i < 4; i++) {
             assertThat(status(get("/v1/reconciliation").header("Authorization", DEMO))).isEqualTo(200);
         }
+    }
+
+    @Test
+    void aRefusedReconciliationNeverRunsTheReportWhicheverMethodAsksForIt() throws Exception {
+        // HEAD dispatches to the GET handler in Spring MVC; only the body is dropped, not the work.
+        // The budget is about the work, so it is charged whatever the method, on both chains.
+        MockHttpSession browser = signIn("visitor", "visitor-test-password-1234");
+        clearInvocations(reconciliation);
+        assertThat(status(get("/ui/reconciliation").session(browser))).isEqualTo(200);
+        assertThat(status(head("/v1/reconciliation").header("Authorization", VISITOR))).isEqualTo(200);
+        verify(reconciliation, times(2)).forMerchant(eq("visitor"), any());
+
+        for (int i = 0; i < 3; i++) {
+            assertThat(status(head("/v1/reconciliation").header("Authorization", VISITOR))).isEqualTo(429);
+            assertThat(status(head("/ui/reconciliation").session(browser))).isEqualTo(429);
+            assertThat(status(get("/ui/reconciliation").session(browser))).isEqualTo(429);
+        }
+        verify(reconciliation, times(2)).forMerchant(eq("visitor"), any());
+        verifyNoMoreInteractions(reconciliation);
     }
 
     // ----- authentication attempts -----
@@ -304,6 +338,67 @@ class PublicDemoIntegrationTest {
         assertThat(status(get("/v1/accounts/" + privateAccount).header("Authorization", DEMO).with(from(careless)))).isEqualTo(200);
     }
 
+    @Test
+    void anAnonymousRequestCarryingAStrayBasicHeaderDoesNotClearAnAddressesFailures() throws Exception {
+        // The browser chain ignores Basic on purpose, so an anonymous GET /ui/identity with any
+        // Authorization header is a 200 that authenticated nobody. It must not count as a success.
+        String guesser = "203.0.113.41";
+        assertThat(status(get("/v1/accounts/" + privateAccount)
+                .header("Authorization", basic("admin", "guess-1-aaaaaaaaaaaa")).with(from(guesser)))).isEqualTo(401);
+        assertThat(status(get("/v1/accounts/" + privateAccount)
+                .header("Authorization", basic("admin", "guess-2-aaaaaaaaaaaa")).with(from(guesser)))).isEqualTo(401);
+        // Under budget, the anonymous request goes through - and is a 200 that authenticated nobody.
+        assertThat(status(get("/ui/identity")
+                .header("Authorization", basic("admin", "not-even-checked-here")).with(from(guesser)))).isEqualTo(200);
+        // If that 200 had been taken for a success, this third guess would have been the first of a
+        // fresh budget. It is the third of the only one there is.
+        assertThat(status(get("/v1/accounts/" + privateAccount)
+                .header("Authorization", basic("admin", "guess-3-aaaaaaaaaaaa")).with(from(guesser)))).isEqualTo(401);
+        assertThat(status(get("/v1/accounts/" + privateAccount)
+                .header("Authorization", basic("admin", "guess-4-aaaaaaaaaaaa")).with(from(guesser))))
+                .as("a stray Basic header on an anonymous 200 is not a successful authentication").isEqualTo(429);
+        assertThat(status(get("/v1/accounts/" + privateAccount).header("Authorization", ADMIN).with(from(guesser)))).isEqualTo(429);
+        // A locked address may still ask the anonymous question without a credential; that is not an
+        // attempt. With a credential attached it is, and is refused like any other.
+        assertThat(status(get("/ui/identity").with(from(guesser)))).isEqualTo(200);
+        assertThat(status(get("/ui/identity")
+                .header("Authorization", basic("admin", "still-not-checked")).with(from(guesser)))).isEqualTo(429);
+    }
+
+    @Test
+    void thePublicVisitorSigningInDoesNotClearFailuresAgainstPrivateAccounts() throws Exception {
+        // The visitor's password is public. Authenticating as it proves nothing about who is guessing
+        // the administrator's password from the same address, so it must not reset that count.
+        String shared = "203.0.113.42";
+        assertThat(status(get("/v1/accounts/" + privateAccount)
+                .header("Authorization", basic("admin", "guess-1-xxxxxxxxxxxx")).with(from(shared)))).isEqualTo(401);
+        assertThat(status(get("/v1/accounts/" + privateAccount)
+                .header("Authorization", basic("admin", "guess-2-xxxxxxxxxxxx")).with(from(shared)))).isEqualTo(401);
+        // A genuine, successful visitor authentication on each chain.
+        assertThat(status(get("/v1/accounts/" + visitorAccount).header("Authorization", VISITOR).with(from(shared)))).isEqualTo(200);
+        assertThat(mvc.perform(post("/ui/session").with(csrf()).with(from(shared))
+                .contentType(MediaType.APPLICATION_FORM_URLENCODED)
+                .content("username=visitor&password=visitor-test-password-1234")).andReturn().getResponse().getStatus()).isEqualTo(200);
+        // One more wrong administrator password spends the budget of three.
+        assertThat(status(get("/v1/accounts/" + privateAccount)
+                .header("Authorization", basic("admin", "guess-3-xxxxxxxxxxxx")).with(from(shared)))).isEqualTo(401);
+        assertThat(status(get("/v1/accounts/" + privateAccount).header("Authorization", ADMIN).with(from(shared))))
+                .as("visitor successes do not launder administrator guesses").isEqualTo(429);
+    }
+
+    @Test
+    void aLockedAddressRecoversOnceTheWindowPasses() throws Exception {
+        String impatient = "203.0.113.43";
+        for (int i = 0; i < 3; i++) {
+            assertThat(status(get("/v1/accounts/" + privateAccount)
+                    .header("Authorization", basic("admin", "guess-" + i + "-yyyyyyyyyyyy")).with(from(impatient)))).isEqualTo(401);
+        }
+        assertThat(status(get("/v1/accounts/" + privateAccount).header("Authorization", ADMIN).with(from(impatient)))).isEqualTo(429);
+        clock.advance(properties.authFailureWindow());
+        assertThat(status(get("/v1/accounts/" + privateAccount).header("Authorization", DEMO).with(from(impatient))))
+                .as("the window passed; a right password from that address works again").isEqualTo(200);
+    }
+
     // ----- what the public can see of the instance -----
 
     @Test
@@ -314,12 +409,18 @@ class PublicDemoIntegrationTest {
         assertThat(mvc.perform(get("/actuator/health/readiness")).andReturn().getResponse().getContentAsString())
                 .doesNotContain("components", "db");
 
-        assertThat(status(get("/actuator/health/async"))).isEqualTo(401);
-        assertThat(status(get("/actuator/health/async").header("Authorization", VISITOR))).isEqualTo(403);
+        for (String path : new String[] {"/actuator/health/async", "/actuator/health/async/asyncDelivery"}) {
+            assertThat(status(get(path))).as("%s anonymous", path).isEqualTo(401);
+            assertThat(status(get(path).header("Authorization", VISITOR))).as("%s visitor", path).isEqualTo(403);
+            assertThat(status(get(path).header("Authorization", OPERATIONS))).as("%s operations", path).isEqualTo(200);
+            assertThat(status(get(path).header("Authorization", ADMIN))).as("%s admin", path).isEqualTo(200);
+        }
         String details = mvc.perform(get("/actuator/health/async").header("Authorization", OPERATIONS))
                 .andReturn().getResponse().getContentAsString();
         assertThat(details).contains("asyncDelivery");
-        assertThat(status(get("/actuator/health/async").header("Authorization", ADMIN))).isEqualTo(200);
+        // Nothing else under health is public either: only the two probes and the root.
+        assertThat(status(get("/actuator/health/db"))).isIn(401, 404);
+        assertThat(status(get("/actuator/health/readiness/db"))).isIn(401, 404);
     }
 
     @Test

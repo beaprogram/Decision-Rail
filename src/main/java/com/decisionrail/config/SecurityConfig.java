@@ -75,11 +75,20 @@ public class SecurityConfig {
                         // state, backlog, failed counts - which is operator information: on a public
                         // instance it is read with an operator credential, not by anyone who finds the
                         // path. Listed before the broad health rule so it cannot fall through to it.
-                        .requestMatchers(HttpMethod.GET, "/actuator/health/async")
+                        // The group and everything under it: Boot also serves a component at
+                        // /actuator/health/async/<indicator>, which the exact-path rule used to leave
+                        // to the wildcard below. Listed as the group plus its descendants.
+                        .requestMatchers(HttpMethod.GET, "/actuator/health/async", "/actuator/health/async/**")
                                 .access(publicDemo.enabled()
                                         ? org.springframework.security.authorization.AuthorityAuthorizationManager.hasAnyRole("OPERATIONS", "ADMIN")
                                         : (authentication, context) -> new org.springframework.security.authorization.AuthorizationDecision(true))
-                        .requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/health/**").permitAll()
+                        // Only the intended probes are public. Any other health path - a component
+                        // under readiness, an indicator by name - is not, on either kind of instance.
+                        .requestMatchers(HttpMethod.GET, "/actuator/health", "/actuator/health/liveness", "/actuator/health/readiness").permitAll()
+                        .requestMatchers(HttpMethod.GET, "/actuator/health/**")
+                                .access(publicDemo.enabled()
+                                        ? org.springframework.security.authorization.AuthorityAuthorizationManager.hasAnyRole("OPERATIONS", "ADMIN")
+                                        : (authentication, context) -> new org.springframework.security.authorization.AuthorizationDecision(true))
                         // Which commit and image this is. Public so a visitor can match what they see to
                         // the release; it carries no configuration.
                         .requestMatchers(HttpMethod.GET, "/actuator/info").permitAll()

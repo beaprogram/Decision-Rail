@@ -59,6 +59,15 @@ services:
       KAFKA_NUM_PARTITIONS: "3"
       # Bounded retention: the demo's history is small and the outbox is the durable record.
       KAFKA_LOG_RETENTION_HOURS: "168"
+      # Where the records and the KRaft metadata actually live. The Apache image builds the broker's
+      # configuration from these variables alone - it does not merge its bundled server.properties -
+      # so with no log directory given the broker used its compiled-in default, /tmp/kafka-logs, which
+      # is inside the container's writable layer and not on the volume mounted below. A stop/start
+      # kept it; a recreate lost it. This puts records and metadata on the volume. An installation
+      # that ran without this line holds its data in the old container's layer: see deploy/README.md
+      # before applying it there, because a recreated broker will start empty.
+      KAFKA_LOG_DIRS: /var/lib/kafka/data/logs
+      KAFKA_METADATA_LOG_DIR: /var/lib/kafka/data/metadata
       KAFKA_HEAP_OPTS: "-Xmx768m -Xms256m"
       CLUSTER_ID: ${KAFKA_CLUSTER_ID:?Run deploy/bin/prepare-env.sh first}
     volumes:
@@ -96,7 +105,12 @@ services:
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Run deploy/bin/prepare-env.sh first}
       # Served over HTTPS by Caddy, which is the only thing that can reach this port.
       SESSION_COOKIE_SECURE: "true"
-      FORWARD_HEADERS_STRATEGY: framework
+      # `native`: Tomcat's remote-ip handling, which reads X-Forwarded-For and X-Forwarded-Proto only
+      # when the immediate peer is a private-network address (Caddy, on the Compose network) and does
+      # not read the standardized `Forwarded` header at all. The `framework` filter used before had
+      # no notion of a trusted peer and did honour `Forwarded`, so a client could choose the address
+      # the application saw. Caddy also strips and re-authors every forwarding header (see Caddyfile).
+      FORWARD_HEADERS_STRATEGY: native
       SESSION_TIMEOUT: 30m
       # The seeded development accounts are not created here; the visitor's are (see PublicDemoFixtures).
       DEMO_ENABLED: "false"

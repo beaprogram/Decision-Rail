@@ -1,11 +1,58 @@
 # Release notes
 
+## v0.10.1 - Checkpoint 10 corrections
+
+Revision and image: recorded in [verification.md](verification.md) under the corrective release once
+published. Supersedes `v0.10.0`, whose tag, image and recordings are preserved unchanged; the
+recordings remain accurate because no visible behaviour changed.
+
+A review of the release configuration found eight findings, none in the financial core. Each was
+reproduced where it could be, corrected, and covered by a regression:
+
+- **Authentication limiter** - failures are now counted from Spring Security's own authentication
+  events on both chains, and a success clears only that username's failures at that address. Before,
+  any sub-400 response to a request carrying `Authorization` cleared the address, so an anonymous
+  `GET /ui/identity` with a bogus Basic header reset the count (observed: eight wrong administrator
+  passwords, no refusal), and a visitor sign-in would have laundered administrator guesses.
+- **Forwarding headers** - Caddy now strips every client-supplied `Forwarded`/`X-Forwarded-*` and
+  authors them itself; the application uses Tomcat's native remote-ip handling, which believes only a
+  private-network peer and never reads `Forwarded`. Observed through the packaged edge before the fix:
+  twelve wrong passwords with a different spoofed `Forwarded: for=` each, never refused.
+- **Async health** - the group *and every path under it* need an operator credential; nothing under
+  `/actuator/health/` other than the two probes is public. Before, `/actuator/health/async/asyncDelivery`
+  fell through to the public wildcard.
+- **HEAD** - reconciliation is budgeted for `HEAD` too; a refused request never runs the report
+  (asserted on the service, not the status).
+- **Replay concurrency** - the in-flight and hourly limits are decided inside the job-creation
+  transaction under a lock on the visitor's merchant row. Observed before the fix: eight concurrent
+  requests against a limit of one created three jobs.
+- **Broker storage** - `KAFKA_LOG_DIRS` and `KAFKA_METADATA_LOG_DIR` point at the volume. Observed
+  before: an empty volume and the cluster metadata in `/tmp/kafka-logs`. After: cluster id, topic id
+  and committed offsets identical across a container removal and recreation.
+- **Coherent backup and restore** - `backup.sh` stops the application and requires zero consumer lag
+  before dumping; `restore.sh` resets the broker to empty and leaves the application stopped. The
+  recovery point and what is discarded are stated in the manifest and the runbook.
+- **Rollback ordering** - `restore.sh` no longer starts anything; `rollback.sh --restore` is the one
+  workflow for a cross-migration rollback, rehearsed with real V14 and V15 images.
+- **Image pin guard** - only `sha-<full commit>` tags or `@sha256:` digests are accepted, with negative
+  tests; `stable` and `v0.10.x` are refused.
+- **Digest labelling** - the multi-platform *index* digest and the per-architecture child digests are
+  now recorded separately; v0.10.0's notes had presented the amd64 child as "the" digest.
+
+Public deployment remains pending on owner actions and available free capacity, and remains
+**not ready for public exposure** until the live checks in `deploy/README.md` have been run on the
+actual host.
+
 ## v0.10.0 - Public demo and release (Checkpoint 10)
 
-Revision `1977084`, tag `v0.10.0`, image `ghcr.io/beaprogram/decision-rail:sha-19770842ab47837fbf0e035c0ae1964b840c4583`
-(digest `sha256:ea621b6c…`, `linux/arm64` and `linux/amd64`). `GET /actuator/info` on a running
-instance reports the same commit. Recordings are attached to
-[the release](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.0).
+Revision `1977084`, tag `v0.10.0`, image `ghcr.io/beaprogram/decision-rail:sha-19770842ab47837fbf0e035c0ae1964b840c4583`.
+The tag resolves to the multi-platform **index** `sha256:bfc7f868307d9ed7bc227af4908f33a0fbb930e00f46f8a6d63035bfc3d92b52`,
+whose children are `linux/amd64` `sha256:ea621b6cbdfd808fbf4aa17afd5ae9703120905e8dd922588effd3fd3eda4962`
+and `linux/arm64` `sha256:78648646c42564e2010333281857a4b71db1dd0b76826f7980ff30ac5024bd2c` - the
+arm64 child is what the proposed Oracle Ampere host would run. (An earlier version of this note
+presented the amd64 child as the image's digest.) `GET /actuator/info` on a running instance reports
+the commit. Recordings are attached to [the release](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.0).
+**Superseded by v0.10.1** for the findings listed above; the artifacts are preserved as released.
 
 ### What is new
 

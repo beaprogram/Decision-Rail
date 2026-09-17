@@ -8,7 +8,10 @@ produced, and the live authorization, capture and refund in the first recording 
 against the real transaction boundary.
 
 Recorded **2026-09-17** on the rehearsal stack described in [verification.md](verification.md), from
-the tree released as `v0.10.0`. The videos are attached to
+the tree released as **`v0.10.0`** (revision `1977084`). The corrective release `v0.10.1` changed no
+visible behaviour - its fixes are in the limiter, the edge, health authorization, budgeting, replay
+admission, broker storage and the operator scripts - so the recordings were not re-made; they show
+the `v0.10.0` build and are labelled as such. The videos are attached to
 [the v0.10.0 release](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.0) rather than
 committed, so the repository stays small:
 

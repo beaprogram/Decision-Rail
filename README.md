@@ -18,9 +18,9 @@ The scope checkpoints are equally weighted planning units, not a measure of effo
 
 **Everything in this system is synthetic.** No real account, card, bank or payment network is involved anywhere, and the risk policy is a demonstrator, not a fraud model.
 
-- **Public demo:** *not yet live.* The deployment is fully prepared under [`deploy/`](deploy/) for an Oracle Cloud Always Free instance - the one option that runs the whole stack permanently for nothing, assessed with sources in [docs/hosting.md](docs/hosting.md) - and needs the owner to create that account and a DNS name. When it is up, its URL, the visitor credentials and the running commit (`GET /actuator/info`) will be here.
+- **Public demo:** *not yet live.* The deployment is prepared under [`deploy/`](deploy/) for an Oracle Cloud Always Free instance - the one option that runs the whole stack permanently for nothing, assessed with sources in [docs/hosting.md](docs/hosting.md) - and needs the owner to create that account and a DNS name. A review of the first release found eight configuration findings, fixed in `v0.10.1` ([release notes](docs/release-notes.md)); until the live checks in `deploy/README.md` have run on the actual host it is not treated as ready for exposure. When it is up, its URL, the visitor credentials and the running commit (`GET /actuator/info`) will be here.
 - **Recorded walkthrough:** the visitor path and a separate, labelled operator segment, recorded against the deployed configuration - the videos are on [the v0.10.0 release](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.0) and the script is in [docs/walkthrough.md](docs/walkthrough.md).
-- **Release image:** `ghcr.io/beaprogram/decision-rail:v0.10.0`, public, for arm64 and amd64; `GET /actuator/info` on any instance says which commit it is.
+- **Release image:** `ghcr.io/beaprogram/decision-rail:v0.10.1` (pin deployments to its `sha-<commit>` tag), public, a multi-platform index with arm64 and amd64 children; `GET /actuator/info` on any instance says which commit it is.
 - **Run it yourself:** the local stack below starts in a few minutes on Docker.
 
 ### The guided demo path
@@ -290,7 +290,7 @@ again. The method, the environment, the ceiling and the limitations are in
 - **Hosting.** Zero budget, enforced by the account type rather than by a spending alert. The chosen host may stop an idle instance after a week; it can be restarted and its data is still there. See [docs/hosting.md](docs/hosting.md).
 - **Persistence.** PostgreSQL on a persistent volume is the system of record and is what backups cover. The broker is one node: acknowledged events lost with its volume are not reconstructed.
 - **Availability.** None is claimed. Single instance, single broker, a free tier.
-- **Recovery and rollback.** Logical backup and restore are scripted and were rehearsed; a rollback across a migration boundary is a restore followed by the older image, and the script refuses to pretend otherwise.
+- **Recovery and rollback.** Backup is coherent by construction - the application is stopped and both consumer groups at zero lag before the dump - and restore resets the broker to the recovery point and leaves the application stopped; everything after the recovery point is discarded, and the runbook says so. A rollback across a migration boundary is one command that restores first and never lets the newer image touch the restored data. All rehearsed with real images, including the failure paths.
 
 Redis features, candidate policy promotion and a highly available broker are **not included**. Neither are settlement rails, merchant liquidity accounts, chargebacks, or foreign exchange: returns move money between synthetic accounts that already exist. [PROGRESS.md](docs/PROGRESS.md) lists the material limitations of what is shipped and [release-notes.md](docs/release-notes.md) summarises this release.
 

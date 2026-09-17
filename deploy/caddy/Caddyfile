@@ -2,8 +2,10 @@
 #
 # Caddy terminates TLS with an automatically obtained and renewed certificate for {$DEMO_HOST}, and
 # forwards to the application on the Compose network. It is the only published port on the host and
-# therefore the only source of X-Forwarded-* headers the application will see, which is what makes
-# the application's forwarded-header strategy safe to enable.
+# therefore the only thing that can reach the application; the application, for its part, trusts
+# X-Forwarded-For and X-Forwarded-Proto only from a private-network peer (Tomcat's native remote-ip
+# handling) and never reads the standardized `Forwarded` header at all. Both halves are needed: the
+# proxy must author the headers, and the application must believe only the proxy.
 {
 	# No admin API on the network, and no telemetry.
 	admin off
@@ -35,7 +37,20 @@
 	@app path / /index.html /favicon.ico /dashboard/* /ui/* /v1/* /actuator/health /actuator/health/* /actuator/info
 	handle @app {
 		reverse_proxy app:8080 {
+			# Forwarding information is authored here and only here. Anything a client sent in these
+			# headers is discarded, then the four the application honours are set from what Caddy
+			# itself observed. Without this, a client-supplied standardized `Forwarded: for=...`
+			# passed through untouched - Caddy manages the X-Forwarded-* trio, not `Forwarded` - and
+			# the application's forwarded-header support took its `for=` as the client address,
+			# which made the authentication limiter's key client-selectable.
+			header_up -Forwarded
+			header_up -X-Forwarded-Port
+			header_up -X-Forwarded-Prefix
+			header_up -X-Forwarded-Ssl
+			header_up X-Forwarded-For {client_ip}
 			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+			header_up X-Forwarded-Port {server_port}
 			transport http {
 				dial_timeout 5s
 				response_header_timeout 30s

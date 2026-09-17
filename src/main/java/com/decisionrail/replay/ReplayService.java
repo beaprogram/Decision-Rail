@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.UUID;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -31,11 +32,15 @@ public class ReplayService {
     private final Clock clock;
     private final MeterRegistry metrics;
 
-    public ReplayService(ReplayStore store, PolicyService policies, Clock clock, MeterRegistry metrics) {
+    private final ReplayAdmissionPolicy admission;
+
+    public ReplayService(ReplayStore store, PolicyService policies, Clock clock, MeterRegistry metrics,
+                         ObjectProvider<ReplayAdmissionPolicy> admission) {
         this.store = store;
         this.policies = policies;
         this.clock = clock;
         this.metrics = metrics;
+        this.admission = admission.getIfAvailable(() -> ReplayAdmissionPolicy.UNLIMITED);
     }
 
     public record CreateCommand(String candidateVersion, Integer limit, Instant from) {}
@@ -77,6 +82,10 @@ public class ReplayService {
             metrics.counter("decisionrail.replay.requests.replayed").increment();
             return new CreatedJob(store.findJob(merchantId, existing.jobId()), true);
         }
+
+        // A genuinely new job. Admission runs here, inside the transaction and before anything is
+        // written, so a refusal leaves no job, no membership and no request record behind.
+        admission.admit(merchantId);
 
         UUID jobId = UUID.randomUUID();
         Instant windowTo = clock.instant();
