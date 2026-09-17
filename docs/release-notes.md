@@ -2,7 +2,10 @@
 
 ## v0.10.0 - Public demo and release (Checkpoint 10)
 
-Revision: see the git tag `v0.10.0` and `GET /actuator/info` on any running instance.
+Revision `1977084`, tag `v0.10.0`, image `ghcr.io/beaprogram/decision-rail:sha-19770842ab47837fbf0e035c0ae1964b840c4583`
+(digest `sha256:ea621b6c…`, `linux/arm64` and `linux/amd64`). `GET /actuator/info` on a running
+instance reports the same commit. Recordings are attached to
+[the release](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.0).
 
 ### What is new
 

@@ -7,14 +7,17 @@ and captured by Playwright. Nothing in them is mocked or staged: every screen sh
 produced, and the live authorization, capture and refund in the first recording are real commands
 against the real transaction boundary.
 
-Recorded **2026-09-17** against revision `50a2761` plus this release's changes, on the rehearsal
-stack described in [verification.md](verification.md). The videos are attached to the GitHub release
-for this checkpoint rather than committed, so the repository stays small:
+Recorded **2026-09-17** on the rehearsal stack described in [verification.md](verification.md), from
+the tree released as `v0.10.0`. The videos are attached to
+[the v0.10.0 release](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.0) rather than
+committed, so the repository stays small:
 
-- **`visitor-walkthrough.webm`** (about 56 s) - what anyone can do with the public credentials.
-- **`operator-walkthrough.webm`** (about 19 s) - **operator segment, recorded against an isolated
-  instance with a private administrator identity.** A visitor to the public demo cannot perform
-  these actions; that is the point of showing them separately.
+- [**`visitor-walkthrough.webm`**](https://github.com/beaprogram/Decision-Rail/releases/download/v0.10.0/visitor-walkthrough.webm)
+  (about 56 s) - what anyone can do with the public credentials.
+- [**`operator-walkthrough.webm`**](https://github.com/beaprogram/Decision-Rail/releases/download/v0.10.0/operator-walkthrough.webm)
+  (about 19 s) - **operator segment, recorded against an isolated instance with a private
+  administrator identity.** A visitor to the public demo cannot perform these actions; that is the
+  point of showing them separately.
 
 No credential appears in either. The visitor's is entered by the page's own button and masked; the
 administrator's is filled without being displayed.

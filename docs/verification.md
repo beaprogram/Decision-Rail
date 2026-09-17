@@ -62,7 +62,7 @@ Tests share one database on purpose, and append-only history is retained so the 
 
 CI runs the same `compose.test.yaml` stack rather than workflow service containers, so the documented local command and the remote build exercise identical infrastructure. It then builds the Docker image, starts the container, and runs both demo scripts without publishing the image.
 
-[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35246574566) passed on revision `aec16d7`, the payment-identity correction: 329 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. The [preceding runs](https://github.com/beaprogram/Decision-Rail/actions/runs/35238244685) passed on `995ba63` with 318 backend tests and on `fdc6d96` with 310, and an [earlier one](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35275604071) passed on revision `1977084`, the checkpoint 10 release: 359 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. The [preceding runs](https://github.com/beaprogram/Decision-Rail/actions/runs/35246574566) passed on `aec16d7` with 329 backend tests, on `995ba63` with 318 and on `fdc6d96` with 310, and an [earlier one](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 Test reports are written under `target/surefire-reports/`; the JaCoCo report is generated under `target/site/jacoco/`. CI uploads available reports when a verification job finishes, including on failure. Coverage is a diagnostic aid, not a substitute for meaningful assertions.
 
@@ -1033,6 +1033,20 @@ Playwright **1.63**, Docker via Colima.
   **27 checks**; `scripts/recovery-demo.sh` **16 checks**; every script's `--help` verified by hand
   to leave the development broker's start time unchanged
 - the rehearsal above, and two walkthrough recordings
+
+Remotely, [CI run 35275604071](https://github.com/beaprogram/Decision-Rail/actions/runs/35275604071)
+passed every step on the delivered revision `1977084`: compile and test, image build, container
+startup with the operator demos, restart recovery, the browser suite, both collector checks and the
+harness smoke run. The tag `v0.10.0` on that commit ran
+[the release workflow](https://github.com/beaprogram/Decision-Rail/actions/runs/35278164285), which
+published `ghcr.io/beaprogram/decision-rail:sha-19770842ab47837fbf0e035c0ae1964b840c4583` (also
+`:v0.10.0`, the same digest `sha256:ea621b6c…`) for `linux/amd64` and `linux/arm64`. The published
+image was then pulled without credentials, its revision label and `APP_COMMIT` read back as
+`1977084…`, its `/app/latest-migration` as 15, and it was started in public mode against the
+disposable stack: `GET /actuator/info` reported that same commit and image, the bootstrap introduced
+the visitor, and the async health details answered 401 anonymously. The two recordings are attached
+to [the v0.10.0 release](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.0) and were
+fetched back from it as real WebM streams.
 
 The development stack was not started, stopped, migrated, reset or written to by this work. The
 machine had rebooted before the pass began, which took the container runtime down; starting the

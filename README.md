@@ -19,7 +19,8 @@ The scope checkpoints are equally weighted planning units, not a measure of effo
 **Everything in this system is synthetic.** No real account, card, bank or payment network is involved anywhere, and the risk policy is a demonstrator, not a fraud model.
 
 - **Public demo:** *not yet live.* The deployment is fully prepared under [`deploy/`](deploy/) for an Oracle Cloud Always Free instance - the one option that runs the whole stack permanently for nothing, assessed with sources in [docs/hosting.md](docs/hosting.md) - and needs the owner to create that account and a DNS name. When it is up, its URL, the visitor credentials and the running commit (`GET /actuator/info`) will be here.
-- **Recorded walkthrough:** the visitor path and a separate, labelled operator segment, recorded against the deployed configuration - see [docs/walkthrough.md](docs/walkthrough.md) for the videos and the script.
+- **Recorded walkthrough:** the visitor path and a separate, labelled operator segment, recorded against the deployed configuration - the videos are on [the v0.10.0 release](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.0) and the script is in [docs/walkthrough.md](docs/walkthrough.md).
+- **Release image:** `ghcr.io/beaprogram/decision-rail:v0.10.0`, public, for arm64 and amd64; `GET /actuator/info` on any instance says which commit it is.
 - **Run it yourself:** the local stack below starts in a few minutes on Docker.
 
 ### The guided demo path
