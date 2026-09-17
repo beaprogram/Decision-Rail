@@ -360,14 +360,19 @@ rejected by arithmetic, eventually.
 
 ### An upgrade that refuses to apply
 
-Two migrations validate a relationship across rows that already exist, and both check for incompatible
-records **before** touching anything:
+Three migrations validate a relationship across rows that already exist, and each checks for
+incompatible records **before** touching anything:
 
 - **`V12`** — every payment must be denominated in the currency its funding account holds.
-- **`V13`** — every payment's `returned_amount_minor` must equal the sum of its return operations.
+- **`V13`** — every payment's `returned_amount_minor` must equal the sum of its return operations,
+  checked when a payment's totals are updated.
+- **`V14`** — the same equality, checked when a payment is *inserted*. V13 left that entry point open,
+  so a V13 database can hold a row written directly that no longer satisfies the rule, and V14's
+  pre-flight is the first thing to look at it.
 
-If either finds rows that disagree, the migration fails and the startup stops there, with a message
-naming how many rows, one example payment, and the reconciliation finding types that describe them:
+If any of them finds rows that disagree, the migration fails and the startup stops there, with a
+message naming how many rows, one example payment, and the reconciliation finding types that describe
+them:
 
 ```
 Cannot enforce payment/account currency agreement: 4 payment(s) are denominated
@@ -379,7 +384,10 @@ HINT:    Investigate those records and correct them with compensating operations
 ```
 
 The database is left exactly as the migration found it: the failed migration rolls back, and the
-schema stays at the last version that applied. Nothing is repaired, adjusted or deleted on your behalf
+schema stays at the last version that applied. `V14` also holds `SHARE ROW EXCLUSIVE` on `payments`
+and `payment_returns` from before its check until it commits, so an application still writing during
+the upgrade waits rather than slipping an incompatible row past the validation. Readers are not
+blocked; writers may briefly block, which for a migration of this size is a moment. Nothing is repaired, adjusted or deleted on your behalf
 — an upgrade that "fixed" such rows would destroy the only evidence that something went wrong.
 
 What to do:

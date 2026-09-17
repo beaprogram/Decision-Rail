@@ -47,12 +47,12 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 ## Verification record
 
 Local evidence recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
-**3.9.1**, after the pre-checkpoint-10 hardening pass, and confirmed remotely by
-[CI run 35230495695](https://github.com/beaprogram/Decision-Rail/actions/runs/35230495695) on the
-delivered revision `fdc6d96`.
+**3.9.1**, after the returned-total INSERT correction.
 
-- Pinned-wrapper build and suite: **307 backend tests passed**, with **0 failures, 0 errors, and
-  0 skipped**, up from 213 at checkpoint 8.
+- Pinned-wrapper build and suite: **318 backend tests passed**, with **0 failures, 0 errors, and
+  0 skipped**, up from 213 at checkpoint 8. The 310 recorded for `fdc6d96` was correct; a 307 that
+  appeared briefly in [verification.md](verification.md) was a counting mistake of mine, explained
+  there.
 - Dashboard: **42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled, up
   from 44.
 - Demos: **12 checks** (transactional), **26 checks** (lifecycle and reconciliation), **27 checks**
@@ -244,6 +244,28 @@ Four things, none of which extend scope:
 - **An upgrade that finds pre-existing disagreement refuses and explains**, naming the count, an
   example payment and the reconciliation finding types, and repairs nothing. The runbook is in
   [operator-guide.md](operator-guide.md).
+
+### The returned-total INSERT correction
+
+One bounded fix. The equality between a payment's returned total and its return operations was
+enforced when a return was inserted (V10) and when a payment was updated (V13), and both this ledger
+and ADR-0007 then described it as holding whichever side was written. A payment *inserted* already
+inconsistent was neither event, and committed. Reproduced against V1-V13 on PostgreSQL 16.15: a valid
+account, a CAPTURED payment of 1000 captured 1000 recording 100 returned, a valid balanced capture
+journal and no return operations at all. An UPDATE of that same total was refused, which is what shows
+the guard was live and blind to how the row arrived.
+
+`V14` adds the missing deferred trigger on payment insert, reusing the existing validation function so
+all three entry points are one rule. It validates existing rows first and refuses an upgrade that
+would declare an invariant they do not satisfy, holding `SHARE ROW EXCLUSIVE` from before the check
+until the protection is in place so nothing can slip between them.
+
+This is a schema-invariant gap. **No API path producing it and no money loss were demonstrated** - the
+service writes returns and totals together under the payment row lock, and an authorization inserts
+the column at its default of zero. What is worth carrying forward is the reasoning error rather than
+the trigger: a rule was described by the events someone happened to attach it to instead of by
+enumerating every way the state it protects can change, and that mistake was made twice in the same
+place before it was caught.
 
 ## Remaining checkpoints
 

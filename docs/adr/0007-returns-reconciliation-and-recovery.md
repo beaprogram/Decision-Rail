@@ -71,13 +71,17 @@ enforced in three independent places.
    what remains.
 2. **A row-level CHECK** on `payments` refuses `returned_amount_minor` above `captured_amount_minor`,
    whatever wrote it.
-3. **Deferred constraint triggers** on `payment_returns` *and* on `payments` refuse a commit where the
-   sum of return operations exceeds the capture, or where the payment's recorded total disagrees with
-   that sum — whichever side of the relationship was written.
+3. **Three deferred constraint triggers**, over one shared function, refuse a commit where the sum of
+   return operations exceeds the capture, or where the payment's recorded total disagrees with that
+   sum — whichever of the three ways a transaction can break it was used.
 
-### The third one, and how it came to cover both sides (V13)
+### The third one, and the two corrections it took to finish (V13, V14)
 
-It originally fired only when a return was written, because that is the event it was attached to. An
+A transaction can put a payment's recorded total and its return operations out of agreement in exactly
+three ways: insert the payment already inconsistent, update the payment's total, or insert a return
+operation. The check was originally attached to one of them.
+
+**V10** attached it to inserts on `payment_returns`, because that is the event that was in mind. An
 update touching only the payment was therefore not checked against the return rows at all: within the
 row-level cap, `returned_amount_minor` could be moved to a value its operations did not sum to. The
 guarantee was "checked whenever a return is recorded", not "true of every row at every moment", and an
@@ -87,14 +91,33 @@ That gap was first documented rather than closed, on the argument that reconcili
 separately maintained records disagreeing with each other, and that a schema making this disagreement
 impossible would leave the detector with nothing to demonstrate. **That argument is withdrawn.** It
 trades a production invariant for the convenience of a test fixture, which is the wrong way round:
-prevention and detection are separate concerns and can be evidenced separately. `V13` adds a second
-deferred constraint trigger, on `payments`, so the same rule is reached from whichever side is written,
-and the detector is exercised against a snapshot of the schema as it stood before the constraint
-existed (see *Keeping detection honest* below).
+prevention and detection are separate concerns and can be evidenced separately.
 
-Both triggers are deferred, so a refund that writes its return operation and the payment's new total in
-one transaction is still judged once, on the state that actually commits, rather than on whichever
-statement ran first.
+**V13** added the payment-update trigger, and this document then described the rule as holding
+"whichever side is written". That was still one case short, and the claim was wrong a second time in
+the same place. A payment *inserted* already inconsistent is neither an update to a payment nor an
+insert of a return. Reproduced against V1–V13 on PostgreSQL 16.15: a valid account, a CAPTURED payment
+of 1000 captured 1000 recording 100 returned, a valid balanced 1000-unit capture journal and no return
+operations at all — committed cleanly. An `UPDATE` of that same total to 101 was then refused, which is
+what shows the guard was live and blind to how the row arrived.
+
+**V14** adds the payment-insert trigger, reusing `enforce_returned_total()` unchanged so all three
+entry points are one rule with one message rather than three implementations free to drift apart. The
+lesson worth recording is not the missing trigger but the reasoning that missed it twice: a rule was
+described by the events someone happened to attach it to, rather than by enumerating every way the
+state it protects can change.
+
+The insert trigger carries `WHEN (NEW.returned_amount_minor IS DISTINCT FROM 0)`, so the ordinary
+authorization path queues nothing. A payment inserted at zero cannot be inconsistent at that moment —
+a return operation references its payment, so none can exist before the row does — and one added later
+in the same transaction is caught by the return-side trigger, which a regression test asserts rather
+than assuming. What that avoids is a per-authorization aggregate at every commit on the hottest path in
+the system, which would also have invalidated the published throughput figures for no extra protection.
+
+All three are deferred, so a transaction that writes a payment, its return operation and its new total
+together is judged once, on the state that actually commits, rather than on whichever statement ran
+first. A payment inserted claiming 250 returned alongside the 250-unit return that justifies it commits;
+the same insert without that return does not.
 
 Concurrency is handled by the payment row lock. The shared rule takes `SELECT … FOR UPDATE` on the
 payment before summing its returns, so two transactions changing the same payment validate one after
@@ -125,9 +148,12 @@ service path producing either inconsistency.
 
 ### Upgrading a database that already disagrees
 
-Both migrations look for incompatible rows before validating anything, and refuse with a count, an
+All three migrations look for incompatible rows before validating anything, and refuse with a count, an
 example payment, the reconciliation finding types that describe it, and a statement that the migration
-will not repair financial data. A bare foreign-key violation names one row and explains nothing; worse,
+will not repair financial data. V14 additionally takes `SHARE ROW EXCLUSIVE` on `payments` and
+`payment_returns` first, so a transaction already in flight cannot commit the very row the validation
+just declared absent; it conflicts with the `ROW EXCLUSIVE` that writes take and leaves readers alone,
+and it is the mode `CREATE TRIGGER` needs anyway. A bare foreign-key violation names one row and explains nothing; worse,
 an upgrade that "fixed" such rows would destroy the only evidence that something went wrong, using the
 same code whose output is in doubt. The refusal leaves the database exactly as it was, and the upgrade
 stops at the migration that refused.
@@ -143,6 +169,8 @@ can honestly be established:
 | Production refuses the invalid write | `ReconciliationIntegrationTest`, against the real schema: the write is attempted and the named constraint refuses it |
 | Valid data reconciles | `ReconciliationIntegrationTest`, over payments, captures, refunds and reversals made through the service |
 | The detector still identifies damaged evidence | `ReconciliationLegacyEvidenceTest`, against a **private throwaway database migrated only to V11** and dropped afterwards |
+| Each entry point refuses, and a legitimate deferred transaction still commits | `ReturnedTotalInsertGuardTest`, against the real schema |
+| A V13 database upgrades, or is refused with its evidence intact | `ReturnedTotalInsertUpgradeTest`, one throwaway database per case |
 
 The third is the one that needs care. A database restored from a partial backup, or simply not yet
 upgraded, can hold rows nothing would write today, and a report that could not see them would be

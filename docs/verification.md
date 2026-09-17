@@ -62,7 +62,7 @@ Tests share one database on purpose, and append-only history is retained so the 
 
 CI runs the same `compose.test.yaml` stack rather than workflow service containers, so the documented local command and the remote build exercise identical infrastructure. It then builds the Docker image, starts the container, and runs both demo scripts without publishing the image.
 
-[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35230495695) passed on revision `fdc6d96`, the pre-checkpoint-10 hardening pass: 307 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. An [earlier remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) passed on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35230495695) passed on revision `fdc6d96`, the pre-checkpoint-10 hardening pass: 310 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. An [earlier remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) passed on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 Test reports are written under `target/surefire-reports/`; the JaCoCo report is generated under `target/site/jacoco/`. CI uploads available reports when a verification job finishes, including on failure. Coverage is a diagnostic aid, not a substitute for meaningful assertions.
 
@@ -70,12 +70,12 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw clean verify` passed **307 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
+`./mvnw clean verify` passed **318 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
 **42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled. That is the
-pre-checkpoint-10 hardening pass, recorded in full further down; the 302/41 figures it replaces belong
-to `aa6de43`. The table below is
+returned-total INSERT correction, recorded in full further down; the 310 figure it replaces belongs to
+`fdc6d96` and the 302/41 figures before that to `aa6de43`. The table below is
 the checkpoint 8 record, kept because it is what the group breakdown was counted against; the checkpoint
-9 additions are listed in the section that follows it. The **307** figure is the current total and the
+9 additions are listed in the section that follows it. The **318** figure is the current total and the
 **213** figure is a historical record of an earlier revision — they are not two counts of the same thing.
 
 ### The earlier recorded result (checkpoint 8)
@@ -118,7 +118,7 @@ Backend tests went from 213 (checkpoint 8's recorded figure) to **282**, and bro
 | Reversal after a partial refund | Refused with `PAYMENT_NOT_REVERSIBLE`; refunding the remainder still works, and the summary says why | A "reversal" that silently means something different depending on history |
 | Cross-merchant refund, reversal and read | 404 for another merchant, 403 for the operations identity; no return written | Ownership enforced only by what the dashboard chooses to show |
 | Malformed compensating journals | The database refuses a second journal for one return, a wrong amount, a reversed direction, a second capture journal, and any deletion of entries | "Balanced" accepted as sufficient, when a balanced pair can still name the wrong account |
-| Database-level over-return | A direct UPDATE above the capture is refused by the row-level cap by name; a return row and a payment-only update that disagree with the recorded total are each refused by the equality rule | A cap that only exists in application code, and an equality checked from only one of the two sides that can break it |
+| Database-level over-return | A direct UPDATE above the capture is refused by the row-level cap by name; an inserted payment, a payment-only update and a return row that disagree with the recorded total are each refused by the equality rule | A cap that only exists in application code, and an equality checked at only some of the three points that can break it |
 | Other payments on the same account | A refund credits the balance and leaves an unrelated hold exactly as it was; that authorization still captures | Refunded money silently reserved against work nobody requested |
 | Ordered return events | Four events in sequence, the two refunds distinguished by their return block, each naming its operation | Two partial refunds indistinguishable because the status did not move |
 | Refund events and shadow | No shadow task is enqueued during a bounded window after two refunds are delivered | A candidate's divergence rate depending on how often merchants issue refunds |
@@ -448,6 +448,13 @@ Two environmental details were corrected while adding these tests, both test-onl
   whether or not the server had destroyed anything. They now replay the cookie from an API request
   context outside the browser, where the header is honoured.
 
+- **Editing a migration after the suite has applied it breaks the next run.** Flyway records a
+  checksum per migration, so even a comment-only change to a file already applied to the shared test
+  database fails validation on the next start. The fix is to recreate the disposable stack
+  (`docker compose --file compose.test.yaml down && up -d --wait`) so it migrates from empty, never to
+  edit the recorded checksum. This is also why a migration should be finished before it is run, and
+  why the suite is re-run after any late edit to one.
+
 - **An application container left attached to the test broker will eat the suite's events.** The
   browser run uses a packaged container pointed at the disposable stack; leaving it running while
   `./mvnw verify` starts gives the topics a second set of consumers in the same group. Eleven
@@ -602,7 +609,7 @@ Recorded because a suite that only ever passes on the second run is not evidence
 | A compile error: `ReturnCommand(UUID, ReturnType, int, null)` undefined | The amount is a boxed `Long` | Fixture only |
 | `isolation.spec.ts` timed out waiting for the second merchant's search response | My rendezvous, not the application: that response had already arrived before the wait began | The test now waits on rendered state instead |
 | `returns.spec.ts` showed "50 of 52" after returning to the newest page | React Query serves a page younger than its five-second `staleTime` from cache, so a return created moments earlier was not yet visible | The application is behaving as designed. The between-page assertion was dropped from the browser test; that coverage is the backend's |
-| `./mvnw clean verify` failed 11 Kafka-path tests | The disposable application container used for the browser run was still attached to the shared test broker, so its consumers were taking the suite's events out of the same topics under the same group | Environmental, and mine. Removing the container and re-running gave 307 of 307 with no other change. Recorded because the failure list — delivery ordering, breaker recovery, shadow isolation — looks exactly like a real delivery regression |
+| `./mvnw clean verify` failed 11 Kafka-path tests | The disposable application container used for the browser run was still attached to the shared test broker, so its consumers were taking the suite's events out of the same topics under the same group | Environmental, and mine. Removing the container and re-running gave 310 of 310 with no other change. Recorded because the failure list — delivery ordering, breaker recovery, shadow isolation — looks exactly like a real delivery regression |
 
 ### Recorded result for this pass
 
@@ -610,7 +617,7 @@ Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka 
 Playwright **1.63**, against a disposable application container on the disposable test stack — the
 development stack was left running and untouched throughout.
 
-- `./mvnw clean verify`: **307 backend tests**, 0 failures, 0 errors, 0 skipped
+- `./mvnw clean verify`: **310 backend tests**, 0 failures, 0 errors, 0 skipped
 - **42 frontend unit tests**
 - **54 browser end-to-end tests**, first attempt, retries disabled
 - `scripts/demo.sh` passed; `scripts/lifecycle-demo.sh` **26 checks**; `scripts/async-demo.sh`
@@ -627,10 +634,133 @@ regressions, the two-sided returned-total rule and the constraint rollback, thre
 `ReconciliationLegacyEvidenceTest`, less the one reconciliation fixture the new constraints made
 unwritable — plus one in `client.test.ts` on the frontend.
 
-The previous record for `aa6de43` reads **302** backend tests, and 307 less the eight added here is
-299. I have not re-run `aa6de43` to reconcile that difference — its database would now be ahead of the
-migrations that revision knows about — so the 307 above is a measurement of this revision and the 302
-is quoted as what was recorded then, not as an arithmetic baseline for it.
+**Correction.** This section first recorded **307**, and said the difference from `aa6de43`'s 302 could
+not be reconciled. It can: 307 was a miscount of mine, not a measurement. I had totalled the
+`Tests run:` lines in `target/surefire-reports/*.txt`, and `TraceSamplingTest` uses `@Nested` classes —
+its `.txt` summary reads `Tests run: 0` while its XML report and Maven's own total both count 3. The
+real figure is **310**, exactly 302 plus the eight tests this pass added, and it is what CI reported for
+`fdc6d96` all along. Read totals from `*.xml` or from Maven's summary line; the per-class `.txt` files
+undercount any class with nested tests.
+
+## The returned-total INSERT gap
+
+Baseline `a81a5db`, whose CI run passed 310 backend, 42 frontend unit and 54 browser tests. One
+correction, deliberately bounded to the missing guard and the documentation that overstated it.
+
+### The failure window, reproduced
+
+V10 attached the returned-total equality to inserts on `payment_returns`; V13 added the payment-update
+side, after which ADR-0007 and this document described the rule as holding "whichever side is written".
+It did not. A transaction can break the equality three ways — insert the payment already inconsistent,
+update the payment's totals, insert a return operation — and only two were covered.
+
+Reproduced on the project's own PostgreSQL **16.15**, against V1–V13 applied unchanged to an isolated
+database, with a fixture valid in every respect except the one under test:
+
+| Step | Result |
+| --- | --- |
+| A valid account: real merchant, CAD, funded | committed |
+| A CAPTURED payment, amount 1000, captured 1000, **recording 100 returned** | committed |
+| A valid balanced 1000-unit capture journal debiting the wallet and crediting merchant clearing | committed |
+| Zero return operations | — |
+| `COMMIT` | **accepted** |
+
+After commit the payment recorded `returned_amount_minor = 100` against an operation sum of `0`. An
+`UPDATE` of that same total to 101 was then refused by V13:
+
+```
+ERROR:  Payment bbbbbbbb-… records 101 returned but its return operations total 0
+CONTEXT:  PL/pgSQL function enforce_returned_total(uuid) line 24 at RAISE
+          SQL statement "SELECT enforce_returned_total(NEW.id)"
+```
+
+That contrast is the finding: the guard was live and blind to how the row arrived. The review's
+reproduction used PostgreSQL 14.19; this one is on the supported 16.15, so the gap is not a
+version-specific behaviour.
+
+As with V12 and V13 this is a schema-invariant gap. **No API path that produces it was demonstrated,
+and no money loss was demonstrated.** `PaymentService` writes returns and totals together under the
+payment row lock, and an authorization inserts the column at its default of zero.
+
+### What V14 adds
+
+One deferred constraint trigger, `returned_total_on_payment_insert`, on `AFTER INSERT ON payments`,
+executing the existing `enforce_returned_total_on_payment()` — so insert, update and return insertion
+are one rule with one message and one `FOR UPDATE` on the payment, rather than three implementations
+free to drift apart. Nothing in V13 or any earlier migration is edited.
+
+It carries `WHEN (NEW.returned_amount_minor IS DISTINCT FROM 0)`, so the ordinary authorization path
+queues no deferred work at all. A payment inserted at zero cannot be inconsistent at that instant — a
+return operation references its payment, so none can exist before the row does — and one added later in
+the same transaction is caught by the return-side trigger. That last sentence is a test, not an
+assumption: `aPaymentInsertedAtZeroStillCannotGainAReturnWithoutItsTotal`. What the clause avoids is a
+per-authorization aggregate at every commit on the hottest path in the system, which would also have
+invalidated the published throughput figures for no additional protection.
+
+The migration takes `LOCK TABLE payments, payment_returns IN SHARE ROW EXCLUSIVE MODE` **before** its
+pre-flight, so a transaction already in flight cannot commit the very row the validation just declared
+absent. It conflicts with the `ROW EXCLUSIVE` that writes take, leaves readers alone, and is the mode
+`CREATE TRIGGER` acquires anyway. V12 and V13 validated without it and had that window; they are
+applied and are not edited, and V14's own pre-flight is what would catch anything that slipped through.
+
+### Evidence
+
+Transaction behaviour, against the real schema, written through `JdbcTemplate` because no API path
+produces any of it (`ReturnedTotalInsertGuardTest`):
+
+| Case | Result |
+| --- | --- |
+| Inconsistent payment INSERT, valid capture journal, no returns, **and no follow-up UPDATE** that could hand the work to V13's guard | refused at COMMIT, naming `records 100 returned … total 0` |
+| The same, one minor unit inconsistent and far below the cap | refused by the equality rule, asserted by message so the cap cannot be what answered |
+| A returned total above the capture | refused by `payments_returned_within_capture`, by name — the separate rule still answers for its own case |
+| A valid captured payment, nothing returned, no returns | commits — the control that proves the fixtures reach the rule under test rather than dying on an unrelated constraint |
+| A payment inserted claiming 250 returned **together with** the 250-unit return that justifies it | commits, which is what proves the check is genuinely deferred rather than immediate |
+| A payment inserted at zero, then a return added in the same transaction with no update | refused by the return-side trigger |
+| The V13 update side and the V10 return-insertion side | still refuse, and writing both sides together still commits |
+| A refused transaction | leaves no payment, no journal and no ledger entries |
+
+Upgrade behaviour, one throwaway database per case, created and dropped by the test
+(`ReturnedTotalInsertUpgradeTest`):
+
+| Case | Result |
+| --- | --- |
+| A V13 database whose rows agree | upgrades to 14; totals, returns and journals unchanged; the new trigger installed; and the reproduced insert is then refused on that upgraded database |
+| A V13 database holding the reproduced inconsistency | refused, naming the count, the example payment and `RETURN_TOTAL_MISMATCH`; schema stays at 13; the total is still 100, no return operation was invented, nothing deleted, both ledger entries intact, and the trigger is **not** half-installed |
+
+The legacy-evidence reconciliation tests are untouched and still run against their own V11 snapshot.
+
+### First-attempt failures in this pass
+
+Two, neither of them the migration:
+
+| What failed | Why | What it means |
+| --- | --- | --- |
+| Applying V14 by hand through `psql` failed with `LOCK TABLE can only be used in transaction blocks` | My ad-hoc reproduction script ran statements in autocommit; Flyway runs each migration in a transaction | The migration is correct and now says so in a comment. Failing loudly beats running unprotected, so the behaviour is kept rather than worked around |
+| A late comment-only edit to V14, after the suite had already applied it, would have failed the next run's Flyway validation on a changed checksum | Mine, caught before it failed | The disposable stack was recreated from empty and the full suite re-run against the exact committed file, which is the 318 recorded below |
+
+Everything else passed on its first attempt: the eight new tests, the full suite, the browser suite and
+all four demos.
+
+One sequencing note, stated rather than glossed: the demos and the browser suite ran against a
+container built before that comment-only edit. The executable content of the migration did not change,
+the backend suite was re-run afterwards from an empty database, and CI re-runs every step against the
+final pushed revision — which is what the delivered claim rests on.
+
+### Recorded result for this pass
+
+Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka **3.9.1** and
+Playwright **1.63**, against a disposable application container on the disposable test stack. The
+development stack was not started, stopped or written to.
+
+- `./mvnw clean verify`: **318 backend tests**, 0 failures, 0 errors, 0 skipped — 310 plus the eight
+  added here, with Maven's own summary and the XML reports agreeing
+- **42 frontend unit tests** and **54 browser end-to-end tests**, first attempt, retries disabled
+- `scripts/demo.sh` passed; `scripts/lifecycle-demo.sh` **26 checks**; `scripts/async-demo.sh`
+  **27 checks**; `scripts/recovery-demo.sh` **16 checks**, the last on its own stack built from empty,
+  which is also where V14 is exercised as part of a first-time migration rather than an upgrade
+
+No benchmark campaign was run and no throughput claim is changed; `performance.md` and the artifacts
+under `benchmark/results/` are untouched.
 
 ## Failure cases and rationale
 
