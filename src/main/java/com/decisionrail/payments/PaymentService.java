@@ -1,6 +1,7 @@
 package com.decisionrail.payments;
 
 import com.decisionrail.decision.DecisionEngine;
+import com.decisionrail.publicdemo.PublicDemoProperties;
 import com.decisionrail.decision.DecisionInput;
 import com.decisionrail.decision.DecisionResult;
 import com.decisionrail.telemetry.Correlation;
@@ -40,15 +41,17 @@ public class PaymentService {
     private final Clock clock;
     private final MeterRegistry metrics;
     private final Correlation correlation;
+    private final PublicDemoProperties publicDemo;
 
     public PaymentService(PaymentStore store, ReturnStore returns, DecisionEngine engine, Clock clock,
-                          MeterRegistry metrics, Correlation correlation) {
+                          MeterRegistry metrics, Correlation correlation, PublicDemoProperties publicDemo) {
         this.store = store;
         this.returns = returns;
         this.engine = engine;
         this.clock = clock;
         this.metrics = metrics;
         this.correlation = correlation;
+        this.publicDemo = publicDemo;
     }
 
     @Transactional(timeout = 15)
@@ -69,6 +72,17 @@ public class PaymentService {
                 () -> {
             AccountView account = store.account(merchant, command.accountId(), true);
             if (!account.currency().equals(currency)) throw new PaymentException("CURRENCY_MISMATCH", 422, "Payment currency must match the account currency.");
+            // The public visitor's accounts have a bounded history, because reconciliation walks all
+            // of it and the instance is shared. Checked inside the idempotent action, after the key
+            // is claimed and before anything is written: a retry of an authorization that already
+            // committed still replays its receipt, and a refusal rolls the claim back so the key is
+            // not consumed by a request that did nothing.
+            if (publicDemo.isVisitor(merchant)
+                    && store.paymentCount(account.id()) >= publicDemo.maxPaymentsPerAccount()) {
+                throw new PaymentException("DEMO_ACCOUNT_FULL", 429,
+                        "This demo account has reached its limit of " + publicDemo.maxPaymentsPerAccount()
+                                + " payments. Use another demo account; nothing was changed by this request.");
+            }
             // Timed at the calling boundary. The evaluator itself stays free of Micrometer, Spring and
             // clocks, which is what lets replay and shadow reuse it unchanged.
             DecisionResult decision = decisionTimer().record(() -> engine.evaluate(input));

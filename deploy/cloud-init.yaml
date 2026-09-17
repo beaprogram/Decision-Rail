@@ -1,0 +1,58 @@
+#cloud-config
+# First boot of the demo host: Ubuntu 24.04 on an Oracle Cloud Always Free Ampere A1 instance.
+#
+# Paste this as the instance's "cloud-init script" when creating it, or run the runcmd block by hand
+# on an existing Ubuntu host. It installs Docker, opens the host firewall for HTTPS (Oracle's Ubuntu
+# images ship iptables rules that block everything but SSH, which is the usual reason a fresh
+# instance "does not respond"), and checks out the repository at a pinned revision.
+#
+# It contains no secrets and creates none. After it finishes, the operator signs in once and runs
+#   cd /opt/decisionrail && deploy/bin/prepare-env.sh && deploy/bin/up.sh && deploy/bin/seed-demo.sh
+# which is the whole deployment. Replace DEPLOY_REVISION with the commit being deployed.
+package_update: true
+package_upgrade: true
+packages:
+  - ca-certificates
+  - curl
+  - git
+  - jq
+  - iptables-persistent
+
+write_files:
+  - path: /etc/sysctl.d/60-decisionrail.conf
+    content: |
+      # Kafka and PostgreSQL both want a higher map count and more open files than the default.
+      vm.max_map_count = 262144
+      fs.file-max = 262144
+  - path: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": { "max-size": "20m", "max-file": "5" }
+      }
+
+runcmd:
+  # Docker Engine and the Compose plugin from Docker's own repository, for arm64.
+  - install -m 0755 -d /etc/apt/keyrings
+  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+  - chmod a+r /etc/apt/keyrings/docker.asc
+  - sh -c 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo $VERSION_CODENAME) stable" > /etc/apt/sources.list.d/docker.list'
+  - apt-get update
+  - apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  - usermod -aG docker ubuntu
+  - sysctl --system
+  # Oracle's image blocks inbound 80/443 at the host as well as in the VCN. Open the host side here;
+  # the VCN security list is an owner action in the console (see deploy/README.md).
+  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80 -j ACCEPT
+  - iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
+  - iptables -I INPUT 6 -m state --state NEW -p udp --dport 443 -j ACCEPT
+  - netfilter-persistent save
+  # The repository at the revision being deployed. deploy/ is all the host needs from it.
+  - git clone https://github.com/beaprogram/Decision-Rail.git /opt/decisionrail
+  - git -C /opt/decisionrail checkout DEPLOY_REVISION
+  - chown -R ubuntu:ubuntu /opt/decisionrail
+  # Unattended security updates keep the host patched; the containers are pinned and updated by hand.
+  - apt-get install -y unattended-upgrades
+  - dpkg-reconfigure -f noninteractive unattended-upgrades
+
+final_message: "DecisionRail host prepared. Sign in and run deploy/bin/prepare-env.sh, then deploy/bin/up.sh."

@@ -16,7 +16,7 @@ export function SignInPage({
   sessionExpired: boolean;
   unconfirmedSignOut?: { detail: string };
 }) {
-  const { signIn, retrySignOut, ready, retryBootstrap, idle } = useSession();
+  const { signIn, retrySignOut, ready, retryBootstrap, idle, publicDemo } = useSession();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -45,6 +45,33 @@ export function SignInPage({
     <div className="signin-page">
       <div className="signin-card">
         <Card title="Sign in to DecisionRail" scope="Operator console for synthetic payment data">
+          {publicDemo && (
+            <Notice tone="info" title="Public demo - synthetic money, shared state">
+              <span>
+                This is a portfolio deployment of a payment decisioning system. Every amount is
+                synthetic: nothing here touches a real account, card, bank or payment network.
+              </span>
+              <span>
+                Sign in as <strong>{publicDemo.visitorUsername}</strong> with the password{' '}
+                <code data-testid="visitor-password">{publicDemo.visitorPassword}</code>. Every visitor
+                shares this merchant, so you will see what other visitors have done and they will see
+                what you do. Commands are limited to {publicDemo.commandsPerMinute} a minute and each
+                account holds at most {publicDemo.maxPaymentsPerAccount} payments; when a limit is
+                reached the server says so rather than dropping your request.
+              </span>
+              <div className="row">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUsername(publicDemo.visitorUsername);
+                    setPassword(publicDemo.visitorPassword);
+                  }}
+                >
+                  Use the visitor credentials
+                </button>
+              </div>
+            </Notice>
+          )}
           {sessionExpired && (
             <Notice tone="warning" title="Your session ended">
               Sign in again to continue. Nothing from the previous session is still on screen.

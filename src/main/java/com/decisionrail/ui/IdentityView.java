@@ -20,7 +20,32 @@ public record IdentityView(
         boolean authenticated,
         String username,
         List<String> roles,
-        Capabilities capabilities) {
+        Capabilities capabilities,
+        PublicDemo publicDemo) {
+
+    /**
+     * How the public portfolio instance introduces itself, so the sign-in screen can say what this is
+     * and how to get in without anyone having to read a README first.
+     *
+     * <p>The visitor credential is public by design: it is a shared synthetic merchant, and the
+     * instance is bounded by server-side budgets and an authentication limiter rather than by that
+     * password being secret. Every other identity's credential stays private, and none of them is
+     * mentioned here. Absent entirely when the instance is not the public demo.
+     *
+     * @param sharedState true, stated plainly: every visitor signs in as the same merchant and sees
+     *                    what every other visitor has done
+     */
+    public record PublicDemo(
+            String visitorUsername,
+            String visitorPassword,
+            boolean sharedState,
+            int commandsPerMinute,
+            int maxPaymentsPerAccount) {}
+
+    /** The same identity, introduced as the public demo. */
+    public IdentityView withPublicDemo(PublicDemo demo) {
+        return new IdentityView(authenticated, username, roles, capabilities, demo);
+    }
 
     /**
      * What the signed-in identity may do.
@@ -59,7 +84,7 @@ public record IdentityView(
     }
 
     public static IdentityView anonymous() {
-        return new IdentityView(false, null, List.of(), Capabilities.forRoles(Set.of()));
+        return new IdentityView(false, null, List.of(), Capabilities.forRoles(Set.of()), null);
     }
 
     public static IdentityView of(Authentication authentication) {
@@ -71,6 +96,6 @@ public record IdentityView(
                 .map(GrantedAuthority::getAuthority)
                 .collect(java.util.stream.Collectors.toUnmodifiableSet());
         return new IdentityView(true, authentication.getName(),
-                authorities.stream().sorted().toList(), Capabilities.forRoles(authorities));
+                authorities.stream().sorted().toList(), Capabilities.forRoles(authorities), null);
     }
 }

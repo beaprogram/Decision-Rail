@@ -11,6 +11,57 @@
 # as long as this script wants it to - no waiting for a 250ms poll to lose.
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Arguments, handled before anything happens
+# ---------------------------------------------------------------------------
+#
+# This block runs before .env is sourced, before credentials are required, before dependencies are
+# checked, and before any docker, curl, psql or mktemp call. This script takes no arguments; asking it
+# a question must not be a way to perform an action against whatever stack the environment points at.
+usage() {
+  cat <<'USAGE'
+Usage: scripts/recovery-demo.sh
+
+Demonstrates that a committed refund survives the process that committed it, and that the
+application starts while the broker's name does not resolve.
+It takes no arguments; everything is configured through the environment.
+
+THIS SCRIPT BUILDS AND DESTROYS ITS OWN DOCKER COMPOSE STACK (compose.recovery.yaml) - a database, a
+broker and an application container on their own ports - and kills the application inside it. It
+touches nothing else, but it does build an image and start containers.
+
+Environment:
+  RECOVERY_COMPOSE_FILE  Compose file to use       (default <project>/compose.recovery.yaml)
+  RECOVERY_APP_PORT      host port for the app     (default 8084)
+  RECOVERY_STARTUP_BUDGET, RECOVERY_DELIVERY_BUDGET  seconds to wait (default 180 each)
+
+Example:
+  RECOVERY_APP_PORT=8085 scripts/recovery-demo.sh
+
+Exit status: 0 demo passed or help printed, 1 a check failed, 2 the arguments were not usable.
+USAGE
+}
+
+if (( $# > 0 )); then
+  case "$1" in
+    -h|--help)
+      if (( $# > 1 )); then
+        printf '%s takes no arguments, so --help cannot be combined with any.\n\n' "${BASH_SOURCE[0]##*/}" >&2
+        usage >&2
+        exit 2
+      fi
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unrecognised argument: %s\n%s takes no arguments; configure it through the environment.\n\n' \
+        "$1" "${BASH_SOURCE[0]##*/}" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+fi
+
 project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 compose_file=${RECOVERY_COMPOSE_FILE:-$project_dir/compose.recovery.yaml}
 app_port=${RECOVERY_APP_PORT:-8084}

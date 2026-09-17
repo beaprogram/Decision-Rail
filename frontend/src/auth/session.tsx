@@ -11,7 +11,7 @@ import {
 } from 'react';
 import { ApiError, advanceIdentityGeneration, csrfToken, onSessionEnded } from '../api/client';
 import { identityApi } from '../api/endpoints';
-import type { Capabilities, Identity } from '../api/types';
+import type { Capabilities, Identity, PublicDemo } from '../api/types';
 
 /**
  * Who is signed in, and the one place that changes.
@@ -81,6 +81,11 @@ interface SessionContextValue {
   ready: boolean;
   /** Re-runs the bootstrap after it failed, so a transient outage is recoverable without a reload. */
   retryBootstrap: () => Promise<void>;
+  /**
+   * The public demo's introduction, when this is that instance. Instance-level rather than
+   * identity-level: it is learned once from the bootstrap and does not change with who signs in.
+   */
+  publicDemo: PublicDemo | null;
 }
 
 const SessionContext = createContext<SessionContextValue | null>(null);
@@ -103,6 +108,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const queries = useQueryClient();
   const [state, setState] = useState<SessionState>({ status: 'loading' });
   const [ready, setReady] = useState(false);
+  const [publicDemo, setPublicDemo] = useState<PublicDemo | null>(null);
 
   // Transitions are serialised. Two overlapping sign-ins, or a sign-in racing a sign-out, would leave
   // the client's idea of who is signed in decided by whichever response happened to land last.
@@ -173,6 +179,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
         .current(signal)
         .then((identity) => {
           setState(identity.authenticated ? { status: 'authenticated', identity } : { status: 'anonymous' });
+          setPublicDemo(identity.publicDemo ?? null);
           // This request is also what issues the CSRF cookie, so its presence is checked rather
           // than assumed.
           setReady(Boolean(csrfToken()));
@@ -282,8 +289,9 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       idle,
       ready,
       retryBootstrap: () => bootstrap(),
+      publicDemo,
     }),
-    [state, signIn, performSignOut, idle, ready, bootstrap],
+    [state, signIn, performSignOut, idle, ready, bootstrap, publicDemo],
   );
 
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;

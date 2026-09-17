@@ -1,0 +1,169 @@
+# The public portfolio deployment: one host, four containers, persistent storage, HTTPS at the edge.
+#
+# This is deliberately the same shape as the local stack - PostgreSQL, a single-node KRaft broker and
+# the application - with three differences that matter for a machine other people can reach:
+#
+#   * Nothing but Caddy publishes a port. The application, the database and the broker are reachable
+#     only on the Compose network, so the reverse proxy is the one way in and the only source of the
+#     forwarded headers the application trusts.
+#   * Storage is persistent and durable. Named volumes, and PostgreSQL's defaults: no tmpfs and no
+#     fsync=off, both of which the benchmark stack uses and which have no place here.
+#   * Memory is limited per container so the four of them fit the host and one of them misbehaving
+#     cannot take the others down with it.
+#
+# Project name is distinct from the development stack (decisionrail), the test stack
+# (decisionrail-test) and the recovery demo (decisionrail-recovery), and every script under deploy/bin
+# checks it before doing anything destructive.
+name: decisionrail-public
+services:
+  database:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: decisionrail
+      POSTGRES_USER: decisionrail
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Run deploy/bin/prepare-env.sh first}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U decisionrail -d decisionrail"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 768M
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # Single node, replication factor 1: not highly available, and not claimed to be. A broker restart
+  # is a delivery outage the application rides out on its outbox; a lost broker volume loses events
+  # that were already acknowledged, which the outbox does not resend. See deploy/README.md.
+  broker:
+    image: apache/kafka:3.9.1
+    environment:
+      KAFKA_NODE_ID: "1"
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: INTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: INTERNAL://broker:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@broker:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: "1"
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: "1"
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: "0"
+      KAFKA_NUM_PARTITIONS: "3"
+      # Bounded retention: the demo's history is small and the outbox is the durable record.
+      KAFKA_LOG_RETENTION_HOURS: "168"
+      KAFKA_HEAP_OPTS: "-Xmx768m -Xms256m"
+      CLUSTER_ID: ${KAFKA_CLUSTER_ID:?Run deploy/bin/prepare-env.sh first}
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server broker:9092 --list >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 10s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 1536M
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  app:
+    # Pinned to a digest or an immutable commit tag, never :latest. deploy/bin/up.sh refuses a tag
+    # that does not name a revision, and GET /actuator/info reports what is actually running.
+    image: ${APP_IMAGE:?Set APP_IMAGE to the ghcr.io image for the revision being deployed}
+    environment:
+      PORT: "8080"
+      JDBC_URL: jdbc:postgresql://database:5432/decisionrail
+      JDBC_USERNAME: decisionrail
+      JDBC_PASSWORD: ${POSTGRES_PASSWORD:?Run deploy/bin/prepare-env.sh first}
+      KAFKA_BOOTSTRAP_SERVERS: broker:9092
+      # Identities. The visitor's password is public; the other four are private to the operator.
+      PUBLIC_DEMO_ENABLED: "true"
+      VISITOR_PASSWORD: ${VISITOR_PASSWORD:?Run deploy/bin/prepare-env.sh first}
+      MERCHANT_DEMO_PASSWORD: ${MERCHANT_DEMO_PASSWORD:?Run deploy/bin/prepare-env.sh first}
+      MERCHANT_OTHER_PASSWORD: ${MERCHANT_OTHER_PASSWORD:?Run deploy/bin/prepare-env.sh first}
+      OPERATIONS_PASSWORD: ${OPERATIONS_PASSWORD:?Run deploy/bin/prepare-env.sh first}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Run deploy/bin/prepare-env.sh first}
+      # Served over HTTPS by Caddy, which is the only thing that can reach this port.
+      SESSION_COOKIE_SECURE: "true"
+      FORWARD_HEADERS_STRATEGY: framework
+      SESSION_TIMEOUT: 30m
+      # The seeded development accounts are not created here; the visitor's are (see PublicDemoFixtures).
+      DEMO_ENABLED: "false"
+      # Never on a public instance. The application also refuses to start if this is set.
+      EVENTS_FAULT_INJECTION_ENABLED: "false"
+      LOG_FORMAT: ecs
+      # Budgets for the shared visitor; the defaults are documented in deploy/README.md.
+      DEMO_COMMANDS_PER_MINUTE: ${DEMO_COMMANDS_PER_MINUTE:-30}
+      DEMO_REPLAY_JOBS_PER_HOUR: ${DEMO_REPLAY_JOBS_PER_HOUR:-6}
+      DEMO_MAX_PAYMENTS_PER_ACCOUNT: ${DEMO_MAX_PAYMENTS_PER_ACCOUNT:-300}
+      # Which image this is, for GET /actuator/info; the build stamps the commit itself.
+      APP_IMAGE: ${APP_IMAGE}
+    depends_on:
+      database:
+        condition: service_healthy
+      # Orders startup only. The application starts and serves payments with the broker unavailable,
+      # and reconnects on its own; see docs/operator-guide.md "Restarting during a broker outage".
+      broker:
+        condition: service_started
+    healthcheck:
+      # Liveness: the process answers. Readiness (database-backed) and async degradation are read
+      # separately by deploy/bin/status.sh; a degraded broker must not restart a healthy payment API.
+      test: ["CMD-SHELL", "curl --fail --silent --max-time 3 http://127.0.0.1:8080/actuator/health/liveness || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    deploy:
+      resources:
+        limits:
+          memory: 1024M
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+
+  caddy:
+    build: ./caddy
+    environment:
+      # The public hostname. Caddy obtains and renews its certificate for it automatically.
+      DEMO_HOST: ${DEMO_HOST:?Set DEMO_HOST to the public hostname, e.g. decisionrail.duckdns.org}
+      # "internal" issues a locally trusted certificate for a rehearsal on a private host; unset it
+      # for the real deployment so Caddy uses a public CA.
+      CADDY_TLS_DIRECTIVE: ${CADDY_TLS_DIRECTIVE:-}
+    ports:
+      # 80 and 443 on the demo host. Overridable only so a rehearsal on a workstation can use high
+      # ports; the real deployment leaves these unset.
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+      - "${CADDY_HTTPS_PORT:-443}:443/udp"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      app:
+        condition: service_started
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+volumes:
+  postgres-data:
+  kafka-data:
+  caddy-data:
+  caddy-config:

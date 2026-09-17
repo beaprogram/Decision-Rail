@@ -11,7 +11,7 @@ import { Notice } from './ui';
  * path gets a refusal rather than data.
  */
 export function Shell({ children }: { children: ReactNode }) {
-  const { can, username, signOut, state, idle } = useSession();
+  const { can, username, signOut, state, idle, publicDemo } = useSession();
   const roles = state.status === 'authenticated' ? state.identity.roles : [];
   const readableRole = roles.map((role) => role.replace(/^ROLE_/, '')).join(', ') || 'none';
 
@@ -26,7 +26,9 @@ export function Shell({ children }: { children: ReactNode }) {
       <nav className="sidebar" aria-label="Dashboard sections">
         <div className="brand">
           <span className="brand-name">DecisionRail</span>
-          <span className="brand-note">Operator console · synthetic data</span>
+          <span className="brand-note">
+            {publicDemo ? 'Public demo · synthetic money · shared merchant' : 'Operator console · synthetic data'}
+          </span>
         </div>
 
         <div className="nav">
@@ -72,6 +74,18 @@ export function Shell({ children }: { children: ReactNode }) {
       </nav>
 
       <main className="content" id="main">
+        {publicDemo && (
+          <div className="page-body" style={{ paddingBottom: 0 }}>
+            <Notice tone="info" title="Public demo">
+              <span>
+                Synthetic money only. The <strong>{publicDemo.visitorUsername}</strong> merchant is shared
+                by everyone who visits, so this workspace shows what other visitors have done too.
+                Administrative operations - registering policies, configuring shadow evaluation,
+                redriving delivery - are private and are shown in the recorded operator walkthrough.
+              </span>
+            </Notice>
+          </div>
+        )}
         {!hasAnyWorkspace ? (
           <div className="page-body">
             <Notice tone="info" title="This identity has no dashboard workspace">

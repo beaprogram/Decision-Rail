@@ -10,9 +10,31 @@ It now answers a second one: **when the broker is down, a worker dies mid-send, 
 
 The transactional payment core handles synthetic funds with merchant isolation, concurrency-safe authorizations, durable idempotency, versioned policy decisions, and a balanced capture journal. On top of that, committed events are delivered to Kafka in per-payment order with idempotent consumers, candidate policies can be replayed against real history or evaluated alongside live traffic without touching it, and the new dependencies have explicit, tested failure behaviour. All of it is now usable through an operator console served by the same application.
 
-**Status:** **9 of 10 planned scope checkpoints** · Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Kafka 3.9 · React 19 + TypeScript
+**Status:** **10 of 10 planned scope checkpoints implemented and verified; public deployment pending an owner action** · Java 21 · Spring Boot 3.5.16 · PostgreSQL 16 · Kafka 3.9 · React 19 + TypeScript
 
-“Approximately 90%” refers to those equally weighted scope checkpoints, not elapsed effort or production readiness. See the [delivery ledger](docs/roadmap.md) for the exact boundary and [PROGRESS.md](docs/PROGRESS.md) for the material limitations.
+The scope checkpoints are equally weighted planning units, not a measure of effort or production readiness. The last one - a public demo on a zero budget - is built, rehearsed in its deployed shape and recorded; what it still needs is a hosting account only the owner can create, which is stated plainly below rather than worked around. See the [delivery ledger](docs/roadmap.md) for the exact boundary and [PROGRESS.md](docs/PROGRESS.md) for the material limitations.
+
+## Try it
+
+**Everything in this system is synthetic.** No real account, card, bank or payment network is involved anywhere, and the risk policy is a demonstrator, not a fraud model.
+
+- **Public demo:** *not yet live.* The deployment is fully prepared under [`deploy/`](deploy/) for an Oracle Cloud Always Free instance - the one option that runs the whole stack permanently for nothing, assessed with sources in [docs/hosting.md](docs/hosting.md) - and needs the owner to create that account and a DNS name. When it is up, its URL, the visitor credentials and the running commit (`GET /actuator/info`) will be here.
+- **Recorded walkthrough:** the visitor path and a separate, labelled operator segment, recorded against the deployed configuration - see [docs/walkthrough.md](docs/walkthrough.md) for the videos and the script.
+- **Run it yourself:** the local stack below starts in a few minutes on Docker.
+
+### The guided demo path
+
+Sign in as the shared **visitor** merchant (the sign-in page shows the credential and says, plainly, that every visitor shares this merchant's state). Then:
+
+1. **Payments** - the seeded history. Filter to `DECLINED` in CAD and open one: the stored decision names the rule that fired. Filter to `DECLINED` in USD and open one: the policy *approved* it and it was declined for funds. Those are different things and are shown as different things.
+2. **New authorization** - 42.00 on the second CAD account, review, authorize. Open it: `APPROVE`, `AUTHORIZED`, funds held.
+3. **Capture** - the capture journal appears: one balanced debit/credit pair, sealed.
+4. **Refund 15.00** with a reason - a return operation with its own compensating journal; the capture is untouched.
+5. **Reconciliation** - read-only; it says what it examined and that it agreed.
+6. **Policy replay** - the seeded job replayed the visitor's history against a stricter candidate; filter to the divergences.
+7. **Shadow comparisons** - the candidate's disagreement recorded beside a live decision it did not change.
+
+The visitor can do all of that and cannot register policies, configure shadow evaluation, redrive delivery or read another merchant's data - on either API, not only in the console. Those are shown in the operator segment of the recording.
 
 ## What is implemented
 
@@ -257,11 +279,19 @@ and the third dropped 21 iterations with p95 quadrupling. Through a 25-second br
 again. The method, the environment, the ceiling and the limitations are in
 [performance.md](docs/performance.md); the harness is in [benchmarking.md](docs/benchmarking.md).
 
-## What comes next
+## Deploying it
 
-The next and final checkpoint is a free-budget hosting assessment with a recorded walkthrough.
+[`deploy/`](deploy/) holds the public deployment: a Compose file with persistent storage and per-container memory limits, Caddy for automatic HTTPS, a cloud-init for the host, and scripts that prepare secrets, deploy a pinned image, seed the guided history, report health, back up, restore, roll back, reset the sandbox and tear down. The image is published to GHCR by [the release workflow](.github/workflows/release.yml) with the commit stamped into it. [deploy/README.md](deploy/README.md) is the runbook, including the owner actions and the honest limits: one instance with in-memory sessions (a restart signs everyone out), one broker with replication factor 1, and a rollback that stops at a migration boundary.
 
-Redis features, candidate policy promotion, a highly available broker, and public deployment are **not included**. Neither are settlement rails, merchant liquidity accounts, chargebacks, or foreign exchange: returns move money between the two synthetic accounts that already exist. No backup or restore procedure has been demonstrated, so no recovery-point or recovery-time objective is claimed. The console also authenticates against the identities in the generated local environment file and is not hardened for deployment to the public internet. The [roadmap](docs/roadmap.md) tracks the remaining checkpoints, and [PROGRESS.md](docs/PROGRESS.md) lists the material limitations of what is shipped.
+## Security, hosting, persistence and availability - the limits
+
+- **Access.** On the public instance one shared visitor merchant with a public password, budgeted on the server on both APIs (commands per minute, replay jobs per hour and in flight, reconciliation reports per minute, payments per account); four private identities whose credentials exist only on the host; failed sign-ins limited per address; `Secure` session and CSRF cookies behind a proxy that is the only way in; fault injection refused at startup. There is no per-visitor isolation and no account creation: visitors share synthetic state, and the page says so.
+- **Hosting.** Zero budget, enforced by the account type rather than by a spending alert. The chosen host may stop an idle instance after a week; it can be restarted and its data is still there. See [docs/hosting.md](docs/hosting.md).
+- **Persistence.** PostgreSQL on a persistent volume is the system of record and is what backups cover. The broker is one node: acknowledged events lost with its volume are not reconstructed.
+- **Availability.** None is claimed. Single instance, single broker, a free tier.
+- **Recovery and rollback.** Logical backup and restore are scripted and were rehearsed; a rollback across a migration boundary is a restore followed by the older image, and the script refuses to pretend otherwise.
+
+Redis features, candidate policy promotion and a highly available broker are **not included**. Neither are settlement rails, merchant liquidity accounts, chargebacks, or foreign exchange: returns move money between synthetic accounts that already exist. [PROGRESS.md](docs/PROGRESS.md) lists the material limitations of what is shipped and [release-notes.md](docs/release-notes.md) summarises this release.
 
 ## Portfolio value
 

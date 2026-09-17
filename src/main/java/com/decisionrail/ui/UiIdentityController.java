@@ -1,5 +1,6 @@
 package com.decisionrail.ui;
 
+import com.decisionrail.publicdemo.PublicDemoProperties;
 import org.springframework.http.CacheControl;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
@@ -17,12 +18,23 @@ import org.springframework.web.bind.annotation.RestController;
 @RestController
 @RequestMapping("/ui")
 public class UiIdentityController {
+    private final PublicDemoProperties publicDemo;
+
+    public UiIdentityController(PublicDemoProperties publicDemo) {
+        this.publicDemo = publicDemo;
+    }
 
     @GetMapping("/identity")
     public ResponseEntity<IdentityView> identity(Authentication authentication) {
+        IdentityView view = IdentityView.of(authentication);
+        if (publicDemo.enabled()) {
+            view = view.withPublicDemo(new IdentityView.PublicDemo(
+                    publicDemo.visitorUsername(), publicDemo.visitorPassword(), true,
+                    publicDemo.commandsPerMinute(), publicDemo.maxPaymentsPerAccount()));
+        }
         // Never cached: a stale identity would let one user's session state decorate another's screen.
         return ResponseEntity.ok()
                 .cacheControl(CacheControl.noStore())
-                .body(IdentityView.of(authentication));
+                .body(view);
     }
 }

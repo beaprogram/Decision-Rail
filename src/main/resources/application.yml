@@ -24,6 +24,12 @@ spring:
 server:
   port: ${PORT:8080}
   shutdown: graceful
+  # Behind the deployment's reverse proxy the application must learn the client's scheme and address
+  # from X-Forwarded-* headers, so that Secure cookies, redirects and the authentication limiter see
+  # the real request. Off by default: on the loopback development stack there is no proxy, and a
+  # forwarded header from an arbitrary client must not be believed. The deployment sets `framework`,
+  # and its proxy is the only thing able to reach this port.
+  forward-headers-strategy: ${FORWARD_HEADERS_STRATEGY:none}
   error:
     include-message: never
     include-stacktrace: never
@@ -173,3 +179,23 @@ app:
   merchant-other-password: ${MERCHANT_OTHER_PASSWORD}
   operations-password: ${OPERATIONS_PASSWORD}
   admin-password: ${ADMIN_PASSWORD}
+  build:
+    # Stamped by the image build and the deployment; reported by GET /actuator/info and nowhere else.
+    commit: ${APP_COMMIT:}
+    image: ${APP_IMAGE:}
+    built-at: ${APP_BUILT_AT:}
+  public-demo:
+    # The publicly reachable portfolio instance. Off everywhere except that deployment. Turning it on
+    # adds the shared visitor identity, applies the budgets below to that identity on both API chains,
+    # limits failed authentication attempts per client address, and makes the async health details an
+    # operator read. It also refuses to start with fault injection enabled or without Secure cookies.
+    enabled: ${PUBLIC_DEMO_ENABLED:false}
+    visitor-username: ${VISITOR_USERNAME:visitor}
+    visitor-password: ${VISITOR_PASSWORD:}
+    commands-per-minute: ${DEMO_COMMANDS_PER_MINUTE:30}
+    replay-jobs-per-hour: ${DEMO_REPLAY_JOBS_PER_HOUR:6}
+    max-running-replay-jobs: ${DEMO_MAX_RUNNING_REPLAY_JOBS:1}
+    reconciliation-per-minute: ${DEMO_RECONCILIATION_PER_MINUTE:10}
+    max-payments-per-account: ${DEMO_MAX_PAYMENTS_PER_ACCOUNT:300}
+    auth-failures-per-window: ${DEMO_AUTH_FAILURES_PER_WINDOW:10}
+    auth-failure-window: ${DEMO_AUTH_FAILURE_WINDOW:15m}

@@ -56,6 +56,12 @@ public class PaymentStore {
                 """, encode(result.body()), result.httpStatus(), kind.name(), merchant, key);
     }
 
+    /** How many payments an account has ever carried, whatever their status. */
+    public long paymentCount(UUID accountId) {
+        Long count = jdbc.queryForObject("SELECT count(*) FROM payments WHERE account_id = ?", Long.class, accountId);
+        return count == null ? 0 : count;
+    }
+
     public AccountView account(String merchant, UUID id, boolean lock) {
         List<AccountView> values = jdbc.query("SELECT id,currency,balance_minor,held_minor FROM accounts WHERE merchant_id=? AND id=?" + (lock ? " FOR UPDATE" : ""),
                 (rs, n) -> new AccountView(rs.getObject(1, UUID.class), rs.getString(2).trim(), rs.getLong(3), rs.getLong(4), rs.getLong(3) - rs.getLong(4)), merchant, id);

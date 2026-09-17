@@ -9,6 +9,61 @@
 # before the script exits so the database is left exactly as it was found.
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Arguments, handled before anything happens
+# ---------------------------------------------------------------------------
+#
+# This block runs before .env is sourced, before credentials are required, before dependencies are
+# checked, and before any docker, curl, psql or mktemp call. This script takes no arguments; asking it
+# a question must not be a way to perform an action against whatever stack the environment points at.
+usage() {
+  cat <<'USAGE'
+Usage: scripts/lifecycle-demo.sh
+
+Walks refunds, reversal and reconciliation against an already-running DecisionRail stack.
+It takes no arguments; everything is configured through the environment.
+
+THIS SCRIPT CREATES SYNTHETIC PAYMENTS AND RETURNS on the instance it targets, creates an account of
+its own in the configured database, and briefly skews that account's balance by direct SQL to show
+reconciliation detecting it (and puts it back). Point it at disposable infrastructure only.
+
+Environment:
+  BASE_URL               application base URL      (default http://localhost:8080)
+  COMPOSE_FILE_PATH      Compose file for psql     (default <project>/compose.yaml)
+  DATABASE_SERVICE       database service          (default database)
+  DATABASE_NAME          database to write to      (default decisionrail)
+  MERCHANT_USERNAME      merchant identity         (default demo-merchant)
+  ADMIN_USERNAME         administrator identity    (default admin)
+  MERCHANT_DEMO_PASSWORD, ADMIN_PASSWORD           required; read from .env when present
+
+Example:
+  BASE_URL=http://localhost:8081 COMPOSE_FILE_PATH=compose.test.yaml \\
+    DATABASE_SERVICE=test-database DATABASE_NAME=decisionrail_test scripts/lifecycle-demo.sh
+
+Exit status: 0 demo passed or help printed, 1 a check failed, 2 the arguments were not usable.
+USAGE
+}
+
+if (( $# > 0 )); then
+  case "$1" in
+    -h|--help)
+      if (( $# > 1 )); then
+        printf '%s takes no arguments, so --help cannot be combined with any.\n\n' "${BASH_SOURCE[0]##*/}" >&2
+        usage >&2
+        exit 2
+      fi
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unrecognised argument: %s\n%s takes no arguments; configure it through the environment.\n\n' \
+        "$1" "${BASH_SOURCE[0]##*/}" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+fi
+
 project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ -f "$project_dir/.env" ]]; then
   set -a

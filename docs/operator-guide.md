@@ -165,6 +165,16 @@ The dev server proxies the API so the browser still sees one origin; without tha
 would not be sent. Other useful commands: `npm run typecheck`, `npm run lint`, `npm test`, and
 `npm run e2e` for the browser suite (which needs the application running and `../.env` loaded).
 
+## The public demo instance
+
+A separate deployment shape, documented in [deploy/README.md](../deploy/README.md) and assessed in
+[hosting.md](hosting.md). Everything in this guide applies to it, with these differences: the
+identities are one public visitor and four private ones whose passwords exist only on the host;
+the visitor is budgeted on the server and a refusal is `429` with `Retry-After`;
+`/actuator/health/async` needs the operations credential; metrics are not reachable from the
+internet; and "reset" means `deploy/bin/reset-sandbox.sh`, which recreates the expendable sandbox
+after the project name is typed - there is no reset endpoint and no editing of history anywhere.
+
 ## Walk through the transaction lifecycle
 
 ```bash

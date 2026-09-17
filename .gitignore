@@ -20,12 +20,18 @@
 /frontend/coverage/
 /frontend/playwright-report/
 /frontend/test-results/
+# Walkthrough recordings are release assets attached to the GitHub release, not repository content.
+/frontend/walkthrough-output/
 /frontend/.vite/
 /frontend/tsconfig.*.tsbuildinfo
 # Browser traces and screenshots from end-to-end runs can contain session cookies and tenant data.
 /frontend/e2e-artifacts/
 /screenshots/
 observability/prometheus/scrape-credentials.yml
+# The public deployment's generated secrets, backups and DNS token live only on the demo host.
+/deploy/public.env
+/deploy/backups/
+/deploy/duckdns.token
 
 # Benchmark application logs. The sanitised result files beside them are the evidence; these are
 # megabytes of Spring Boot startup output with nothing reproducible in them.

@@ -18,11 +18,27 @@ export interface Capabilities {
   viewMetrics: boolean;
 }
 
+/**
+ * How the public portfolio instance introduces itself. Present only on that deployment.
+ *
+ * The visitor credential is public by design - a shared synthetic merchant - and the server bounds
+ * what it can do. Nothing about any private identity is ever carried here.
+ */
+export interface PublicDemo {
+  visitorUsername: string;
+  visitorPassword: string;
+  sharedState: boolean;
+  commandsPerMinute: number;
+  maxPaymentsPerAccount: number;
+}
+
 export interface Identity {
   authenticated: boolean;
   username: string | null;
   roles: string[];
   capabilities: Capabilities;
+  /** Null or absent except on the public demo instance. */
+  publicDemo?: PublicDemo | null;
 }
 
 export interface ReasonContribution {

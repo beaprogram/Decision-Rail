@@ -70,12 +70,12 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw clean verify` passed **329 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
+`./mvnw clean verify` passed **359 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
 **42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled. That is the
-payment-identity correction, recorded in full further down; the 318 figure it replaces belongs to
-`fc6fa5c`, 310 to `fdc6d96`, and the 302/41 figures before that to `aa6de43`. The table below is
+checkpoint 10 release, recorded in full further down; the 329 figure it replaces belongs to
+`50a2761`, 318 to `fc6fa5c`, 310 to `fdc6d96`, and the 302/41 figures before that to `aa6de43`. The table below is
 the checkpoint 8 record, kept because it is what the group breakdown was counted against; the checkpoint
-9 additions are listed in the section that follows it. The **329** figure is the current total and the
+9 additions are listed in the section that follows it. The **359** figure is the current total and the
 **213** figure is a historical record of an earlier revision — they are not two counts of the same thing.
 
 ### The earlier recorded result (checkpoint 8)
@@ -930,6 +930,115 @@ with the operator demos, restart recovery, the browser suite, both collector che
 smoke run.
 
 No benchmark campaign was run and no throughput claim is changed.
+
+## Checkpoint 10: the public demo, verified in its deployed shape
+
+Baseline `50a2761`, whose CI run passed 329 backend, 42 frontend unit and 54 browser tests. What
+this checkpoint adds is a deployment shape, so the verification has two halves: the ordinary suite
+with the new behaviour under test, and a rehearsal of the actual deployment bundle on this machine -
+the same Compose file, the same edge, the same image build - with every claim in `deploy/README.md`
+exercised rather than asserted.
+
+### What the suite covers
+
+`PublicDemoIntegrationTest` (12) runs a context with the public mode on and the budgets set very low,
+through both API chains, with an injected clock advanced between tests so the in-memory windows are
+empty each time:
+
+| Claim | Evidence |
+| --- | --- |
+| The visitor is an ordinary merchant to every ownership rule | its own payment readable; another merchant's payment and account 404, in both directions |
+| It has no administrative reach on either chain | `POST /v1/policies`, `/v1/ops/**`, `PUT shadow`, redrive, `/actuator/prometheus`, `/ui/ops/**`, `POST /ui/policies` all 403; capabilities agree but are not the rule |
+| The bootstrap introduces the demo and nothing private | `publicDemo` names the visitor and the limits; no private credential in the body |
+| The command budget refuses before anything is written, on both chains | 2 browser + 2 API commands spend a budget of 4; the 5th is `429 DEMO_CAPACITY_EXHAUSTED` with `Retry-After`, no payment and **no idempotency key claimed**; reads still work; the private merchant is not budgeted |
+| The history cap consumes no key and leaves retries replayable | the 3rd authorization on a 2-payment account is `429 DEMO_ACCOUNT_FULL`; its key is absent; a retry of the first authorization still replays `201`; another account is unaffected |
+| Replay is bounded to one in flight and an hourly allowance | second job while one is PENDING: 429; after completion: allowed; third within the hour: 429; reading jobs is not budgeted |
+| Reconciliation is bounded per minute for the visitor only | 2 allowed, 3rd 429; the private merchant's 4 succeed |
+| Failed sign-ins lock an address out on both chains | 3 bad Basic attempts; then the right password is 429 and so is a browser sign-in; another address and an unauthenticated probe are unaffected |
+| A successful sign-in clears an address's failures | two mistakes, success, two more mistakes, success |
+| Probes public, async details an operator read | liveness/readiness 200 with no components; `/actuator/health/async` 401 anonymous, 403 visitor, 200 operations and admin |
+| The running revision is public and carries no configuration | commit, image, `latestMigration`, `synthetic: true`; no password, JDBC or broker string |
+| Fault injection has no HTTP surface for anyone | four plausible paths as three identities: 403/404/405 |
+
+`PublicDemoGuardsTest` (6) checks what a public instance refuses to start with - fault injection on,
+cookies not `Secure`, a placeholder password - and the budget window's edges with a frozen clock.
+`DemoScriptArgumentSafetyTest` (16) proves, for all four demo scripts, that `--help`, `-h`, an unknown
+argument and `--help` combined with anything reach neither `.env` nor `docker`, `curl`, `psql`,
+`jq`, `openssl` or `mktemp` - the fake `.env` leaves a marker if sourced and every command is a stub
+that records and fails - with a no-argument positive control per script so the negative cases cannot
+pass vacuously.
+
+### The rehearsal: `deploy/` in the deployed shape
+
+On this machine, on the Compose project `decisionrail-public` with a locally issued certificate
+(`tls internal`) and high ports, from an image built with the commit stamped in. Every step below is
+a script from `deploy/bin` or a request through Caddy over HTTPS; nothing was done to the containers
+by hand except where the check is about doing exactly that.
+
+| Check | Result |
+| --- | --- |
+| `up.sh` refuses `APP_IMAGE=…:latest` | refused, naming the tag |
+| `up.sh` with a pinned image | four containers up; readiness reached; `/actuator/info` reports the commit, image, build time and `V15` |
+| Transport | HTTP/2 over TLS; HSTS, CSP, `X-Frame-Options: DENY`, `nosniff`, `no-referrer`; no `Server` header; HTTP redirects to HTTPS |
+| Edge allow-list | `/actuator/prometheus`, `/env`, `/metrics` answer 404 at Caddy; liveness, readiness and info 200; async health 401 anonymous, 200 as operations; readiness body is `{"status":"UP"}` only |
+| Cookies through the proxy | `XSRF-TOKEN … Secure; SameSite=Lax`; `JSESSIONID … Secure; HttpOnly; SameSite=Lax` |
+| Sign-in | without the CSRF token 403; with it 200 as `visitor`, `ROLE_MERCHANT` only; a mutation without the token 403; `DELETE /ui/session` 204 and the identity is anonymous afterwards |
+| Visitor through `/v1` | `POST /v1/policies` 403, `/v1/ops/outbox/backlog` 403, `PUT /v1/ops/shadow` 403, another merchant's account 404 |
+| Seed | `seed-demo.sh` created, through the API: CAPTURED; CAPTURED with 15.00 refunded; VOIDED; CAPTURED and fully reversed; REVIEW; DECLINED by policy (`TEST_COUNTRY_BLOCKED`); **DECLINED with `INSUFFICIENT_FUNDS` and an APPROVE decision**; a candidate policy; shadow enabled and a diverging authorization; a replay job that ran to COMPLETED. 2 returns, 5 journals, 3 shadow comparisons, all events published and consumed |
+| Seed is idempotent | a second run exits 0 and the payment count is unchanged: every command replayed its receipt |
+| Command budget through the proxy | 30 authorizations 201, the 31st and 32nd 429 with `Retry-After: 57` and the documented detail |
+| Authentication limiter through the proxy | ten wrong admin passwords; then the right one is 429, and so is a visitor sign-in from the same address |
+| Application restart | payments 38, published 44, consumed 88 before and after; a signed-in session is anonymous afterwards |
+| Broker outage | authorization during the outage 201; readiness 200; async details show 1 undelivered with the breaker still CLOSED (the DEGRADED threshold is age-based and had not elapsed); after `start broker` the event is PUBLISHED and undelivered is 0 |
+| Backup and restore | `backup.sh` wrote a V15 custom-format dump; one more payment was made; `restore.sh` (project name typed) dropped and restored; the fingerprint of every payment's id, status and returned total matches the backup exactly and the later payment is gone |
+| Rollback | `…:latest` refused; an image whose `/app/latest-migration` says 14 against a V15 database refused with the restore instruction; an image that knows V15 accepted, `APP_IMAGE` rewritten, stack redeployed |
+| Reset | a wrong project name refused; the right one removed the volumes, started empty and re-seeded |
+| Teardown | a wrong project name refused; the right one removed containers, network and volumes; the development stack's containers, start times, schema (V11) and payment count (622) unchanged throughout |
+| Recording | two WebM videos produced by Playwright against this stack: the visitor path (56 s) and the operator segment (19 s) |
+
+Not rehearsed, because it cannot be here: the Oracle host itself, the public certificate, and the
+live smoke test. Those are what the owner actions in `deploy/README.md` unlock, and the checkpoint is
+recorded as pending on exactly that.
+
+### First-attempt failures in this pass
+
+| What failed | Why | What it means |
+| --- | --- | --- |
+| `PublicDemoIntegrationTest` — 12 errors, FK violation on `accounts.merchant_id` | the visitor had no `merchants` row | A real gap: the visitor needs to exist as a tenant. `PublicDemoFixtures` writes the merchant row and three accounts idempotently when the mode is on |
+| the same — 3 failures, `DEMO_CAPACITY_EXHAUSTED` in unrelated tests | the in-memory budgets are per process and the tests share one context | The budgets working as designed; the tests now advance an injected clock two hours apart |
+| the same — 1 failure after advancing the clock one minute | `SlidingWindowBudget` pruned only events strictly older than the window, so with a frozen clock an event exactly one window old never left | A real boundary defect in new code, found by the frozen clock. The boundary is inclusive now, and `secondsUntilRelief` agrees with it |
+| the same — 2 failures | my two very low test limits (4 commands, 2 payments per account) reached each other | Test design; the flows were separated |
+| a compile error and a duplicate `clock` bean name | harness | — |
+| `DemoScriptArgumentSafetyTest` — all cases exit 127 | I cleared `PATH` entirely, so the usage heredoc could not find `cat` | The stubs now shadow the dangerous commands with the system paths behind them |
+| the same — one phrase assertion | "takes no arguments" wrapped across a line in the usage text | reworded |
+| Rehearsal: `internal: command not found` | `CADDY_TLS_DIRECTIVE=tls internal` unquoted in the env file | the template now says to quote it |
+| Rehearsal: `compose pull` failed | a locally built image is in no registry | `up.sh` and `rollback.sh` accept a local image only when it is actually present, and still fail otherwise |
+| Rehearsal: bind-mounting the Caddyfile failed under Colima | a single-file mount from the external volume | the edge is now a tiny built image with the file inside it, which is also the better deployment |
+| Seed: the "insufficient funds" case was a policy decline | 90,000.00 tripped `HIGH_AMOUNT` before the balance mattered | the USD account is now 600.00 so a policy-approved 900.00 is refused for funds — the genuine `INSUFFICIENT_FUNDS` with an `APPROVE` decision |
+| Walkthrough: four re-recordings | an ambiguous `visitor` match once the banner existed; seeded rows pushed off page one by the budget test's 30 payments; a strict-mode duplicate; reconciliation wording | the recording uses the page's own filters, which is a better walkthrough, and scoped assertions |
+
+None of the application's existing tests changed.
+
+### Recorded result for this pass
+
+Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka **3.9.1**, Caddy 2,
+Playwright **1.63**, Docker via Colima.
+
+- `./mvnw clean verify`: **359 backend tests**, 0 failures, 0 errors, 0 skipped, from an empty
+  database — 329 plus 34 added (12 public demo, 6 guards, 16 script safety), less the 4 the
+  generalised script test replaced
+- **42 frontend unit tests**, lint clean; **54 browser end-to-end tests** first attempt, retries
+  disabled, against a standard-mode container
+- `scripts/demo.sh` passed; `scripts/lifecycle-demo.sh` **26 checks**; `scripts/async-demo.sh`
+  **27 checks**; `scripts/recovery-demo.sh` **16 checks**; every script's `--help` verified by hand
+  to leave the development broker's start time unchanged
+- the rehearsal above, and two walkthrough recordings
+
+The development stack was not started, stopped, migrated, reset or written to by this work. The
+machine had rebooted before the pass began, which took the container runtime down; starting the
+runtime brought the development containers back exactly as the reboot had left them (image of
+2026-09-16, schema V11, "No migration necessary", 622 payments), and nothing here touched them
+afterwards.
 
 ## Failure cases and rationale
 

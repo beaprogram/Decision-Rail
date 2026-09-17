@@ -139,6 +139,26 @@ A payment mutation joins the following work in one database transaction:
 
 A rolled-back transaction must not leave a successful payment without its journal, an isolated event, a return without its compensating journal, or a saved success response. See the implementation and integration tests for the exact order and storage details.
 
+## The public instance
+
+One deployment shape is publicly reachable, and it differs from every other environment in exactly
+one configuration switch, `app.public-demo.enabled`. Everything it changes is listed in
+[deploy/README.md](../deploy/README.md) and enforced on the server:
+
+- a shared **visitor** merchant - an ordinary `MERCHANT` to every ownership rule - whose credential is
+  public and shown on the sign-in page, with the shared state disclosed there;
+- **budgets on that identity only**, applied by an interceptor after both security chains have
+  established who is calling, so `/v1` and `/ui` are one budget: commands per minute, replay jobs
+  per hour and in flight, reconciliation reports per minute; and a per-account history cap checked
+  inside the idempotent action so a refusal consumes no key and a committed retry still replays;
+- an **authentication attempt limiter** per client address ahead of both chains;
+- **operator-only async health details**, public liveness and readiness;
+- **startup refusals** for fault injection or non-Secure cookies.
+
+The edge is Caddy: HTTPS, security headers, and a route allow-list that leaves metrics and anything
+else unreachable from the internet. It is the only published port, which is what makes the
+application's forwarded-header handling safe to enable.
+
 ## Invariants that matter
 
 | Boundary | Required property | Why it matters |

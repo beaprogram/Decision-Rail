@@ -31,6 +31,9 @@ const queryClient = new QueryClient({
         if (error instanceof ApiError && (error.status === 401 || error.status === 403 || error.status === 404)) {
           return false;
         }
+        // A capacity refusal says exactly when to try again; repeating it sooner is what it asked
+        // the caller not to do.
+        if (error instanceof ApiError && error.status === 429) return false;
         return attempt < 2;
       },
       staleTime: 5_000,

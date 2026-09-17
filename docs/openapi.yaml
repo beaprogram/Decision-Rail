@@ -116,6 +116,8 @@ paths:
           $ref: '#/components/responses/UnsupportedMediaType'
         '422':
           $ref: '#/components/responses/CurrencyMismatch'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -147,6 +149,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -177,6 +181,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -239,6 +245,8 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -283,6 +291,8 @@ paths:
           $ref: '#/components/responses/NotFound'
         '409':
           $ref: '#/components/responses/Conflict'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -352,6 +362,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -414,6 +426,8 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -443,6 +457,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -478,6 +494,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -513,6 +531,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -560,6 +580,32 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Health'
+  /actuator/info:
+    get:
+      operationId: getInfo
+      tags: [Operations]
+      summary: Identify the running revision
+      description: |
+        The commit, image, build time and newest schema migration of the running instance, so what is
+        deployed can be matched to a release and a CI run. Public, and deliberately carries nothing
+        about the instance's configuration. `synthetic` is always true.
+      security: []
+      responses:
+        '200':
+          description: The running revision
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  decisionrail:
+                    type: object
+                    properties:
+                      commit: { type: string, example: 50a27613a2d1f0fe514a79cc8c86deba38eaff11 }
+                      image: { type: string, example: ghcr.io/beaprogram/decision-rail:sha-50a27613a2d1f0fe514a79cc8c86deba38eaff11 }
+                      builtAt: { type: string, example: '2026-09-17T20:47:28Z' }
+                      latestMigration: { type: string, example: V15 }
+                      synthetic: { type: boolean, example: true }
   /actuator/prometheus:
     get:
       operationId: getMetrics
@@ -614,6 +660,8 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
   /v1/activity:
@@ -1092,6 +1140,8 @@ paths:
           $ref: '#/components/responses/Unauthenticated'
         '403':
           $ref: '#/components/responses/Forbidden'
+        '429':
+          $ref: '#/components/responses/CapacityExhausted'
         '503':
           $ref: '#/components/responses/StorageUnavailable'
         default:
@@ -1898,6 +1948,25 @@ components:
     NotFound:
       description: Resource does not exist or is owned by another merchant
       headers:
+        X-Request-Id:
+          $ref: '#/components/headers/RequestId'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    CapacityExhausted:
+      description: |
+        Refused before any work was done, with `Retry-After`. Only ever returned on the public demo
+        instance: `DEMO_CAPACITY_EXHAUSTED` when the shared visitor's budget for this kind of request
+        is spent (commands per minute, replay jobs per hour or in flight, reconciliation reports per
+        minute), `DEMO_ACCOUNT_FULL` when a visitor account has reached its payment cap, and
+        `AUTHENTICATION_RATE_LIMITED` when a client address has failed to authenticate too often.
+        Nothing was claimed or written; the same request may simply be retried after the delay.
+      headers:
+        Retry-After:
+          description: Seconds until the request may succeed
+          schema:
+            type: integer
         X-Request-Id:
           $ref: '#/components/headers/RequestId'
       content:

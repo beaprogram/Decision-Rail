@@ -1,0 +1,50 @@
+# HTTPS at the edge for the public demo.
+#
+# Caddy terminates TLS with an automatically obtained and renewed certificate for {$DEMO_HOST}, and
+# forwards to the application on the Compose network. It is the only published port on the host and
+# therefore the only source of X-Forwarded-* headers the application will see, which is what makes
+# the application's forwarded-header strategy safe to enable.
+{
+	# No admin API on the network, and no telemetry.
+	admin off
+}
+
+{$DEMO_HOST} {
+	{$CADDY_TLS_DIRECTIVE}
+
+	encode zstd gzip
+
+	header {
+		# The application sets its own cookie attributes; these are the transport-level protections.
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		# The dashboard is a same-origin single-page application: scripts and connections from
+		# nowhere else, no embedding.
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		-Server
+	}
+
+	# Body size and timeouts bound what one client can hand the application.
+	request_body {
+		max_size 64KB
+	}
+
+	# The only routes the public needs: the dashboard, its API, the public probes and the revision.
+	@app path / /index.html /favicon.ico /dashboard/* /ui/* /v1/* /actuator/health /actuator/health/* /actuator/info
+	handle @app {
+		reverse_proxy app:8080 {
+			header_up X-Forwarded-Proto {scheme}
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 30s
+			}
+		}
+	}
+
+	# Everything else - metrics included - does not exist as far as the internet is concerned.
+	handle {
+		respond 404
+	}
+}

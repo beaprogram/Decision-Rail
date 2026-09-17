@@ -1,9 +1,10 @@
 # Current delivery and continuation
 
-The plan is ten equally weighted scope checkpoints. Nine are now complete: **approximately 90% of
-planned scope**, not 90% of effort or production readiness. Calling it that is planning shorthand, and
-the checkpoints are not equally difficult. The detailed scope and completion criteria are in
-[roadmap.md](roadmap.md).
+The plan is ten equally weighted scope checkpoints. Nine are complete, and the tenth is implemented
+and verified in its deployed shape with one deliverable - the public URL itself - waiting on an owner
+action that a repository cannot perform. "Ten of ten implemented" is planning shorthand, not a claim
+of effort or production readiness, and the checkpoints are not equally difficult. The detailed scope
+and completion criteria are in [roadmap.md](roadmap.md).
 
 ## Completed checkpoints
 
@@ -47,11 +48,9 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 ## Verification record
 
 Local evidence recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
-**3.9.1**, after the payment-identity correction, and confirmed remotely by
-[CI run 35246574566](https://github.com/beaprogram/Decision-Rail/actions/runs/35246574566) on the
-delivered revision `aec16d7`.
+**3.9.1**, after the checkpoint 10 release work.
 
-- Pinned-wrapper build and suite: **329 backend tests passed**, with **0 failures, 0 errors, and
+- Pinned-wrapper build and suite: **359 backend tests passed**, with **0 failures, 0 errors, and
   0 skipped**, up from 213 at checkpoint 8. The 310 recorded for `fdc6d96` was correct; a 307 that
   appeared briefly in [verification.md](verification.md) was a counting mistake of mine, explained
   there.
@@ -292,9 +291,47 @@ Two findings and a documentation correction, all narrow.
   and it now carries the incident. A statement grouping V12 and V13 as sharing a validate-then-install
   window was also wrong about V12, which installs an ordinary validated foreign key.
 
-## Remaining checkpoints
+## Checkpoint 10: public demo and release
 
-- [ ] 10. Free-budget hosting assessment, secure public demo deployment, and release walkthrough.
+Acceptance criteria, with the state of each. A checkbox is ticked only when the thing exists and was
+verified; the record is in [verification.md](verification.md).
+
+- [x] **Hosting assessed against a zero budget** using current official documentation, with the
+      date and sources recorded, covering the whole stack's memory, storage, networking, expiry,
+      billing requirements and whether zero spend is enforceable - [hosting.md](hosting.md).
+- [x] **A hosting option chosen and its trade-offs stated**: Oracle Cloud Always Free (Ampere A1),
+      the only option that runs the application, PostgreSQL and Kafka permanently with a zero that
+      the account type enforces; idle reclamation, capacity and the single-instance limits stated.
+- [x] **A public access model that keeps administration private**: one shared visitor merchant with a
+      public credential, budgets enforced on the server on both API chains, private identities for
+      the operator, `/v1` not a way around the restrictions, UI visibility never the authorization -
+      `PublicDemoIntegrationTest`, and rehearsed through the real proxy.
+- [x] **Bounded, repeatable synthetic usage**: commands per minute, replay jobs per hour and in
+      flight, reconciliation reports per minute, payments per account; a truthful `429` before any
+      work; an idempotent seed script producing genuine approvals, declines of both kinds, capture,
+      void, refund, reversal, a candidate policy, a shadow divergence and a replay; reset as an
+      explicit, confirmed operator action on the expendable sandbox only.
+- [x] **A reproducible deployment bundle**: `deploy/` with environment separation and secrets outside
+      source control, pinned versions, memory limits, persistent storage without the benchmark's
+      tmpfs or `fsync=off`, three-way health, outage-tolerant startup, backup/restore, a
+      migration-aware rollback, and `GET /actuator/info` naming the deployed commit and image.
+- [x] **Demo scripts safe to ask questions of**: all four answer `--help` and refuse unknown
+      arguments before touching `.env` or any command, proven with failing stubs.
+- [x] **The packaged deployment verified in its deployed shape**: HTTPS, cookie attributes, login,
+      logout, CSRF, visitor permissions and direct-API bypass attempts, cross-merchant and
+      administrative denial, budget and authentication limits, the payment lifecycle and
+      reconciliation, replay and shadow, restart persistence, broker outage and recovery, backup and
+      restore round trip, rollback refusal and acceptance - all on disposable infrastructure.
+- [x] **Release materials**: README, `deploy/README.md`, [release-notes.md](release-notes.md) with
+      defensible resume bullets, [walkthrough.md](walkthrough.md), and a **playable recording** of the
+      visitor path and a labelled operator segment, produced from the real application.
+- [ ] **Public deployment working**: a live URL, verified by a smoke test against the actual page,
+      running the reported revision. **Pending**: it needs an Oracle Cloud Free Tier account and a
+      DuckDNS name, which are owner actions (card verification, a sign-in); the exact steps are in
+      `deploy/README.md`. No URL is claimed until then.
+
+The checkpoint's implementation is finished and the release is verified. It is not marked complete,
+because its last deliverable does not yet exist.
 
 ## Material limitations to carry forward
 
@@ -395,14 +432,17 @@ These are known and deliberate, not oversights:
 ## Guidance for the next implementation session
 
 Read [architecture.md](architecture.md), the [ADRs](adr/), and the [API contract](openapi.yaml) before
-extending this. Checkpoint 10 is the free-budget hosting assessment, secure configuration, synthetic
-demo data, deployment validation, and a recorded walkthrough.
+extending this. The remaining work on checkpoint 10 is the owner's: create the free-tier account and
+the DNS name, run the three commands in `deploy/README.md`, smoke-test the URL, and record it here
+and in the README with the commit `GET /actuator/info` reports. Nothing in the repository needs to
+change for that.
 
-Two things from checkpoint 9 are worth carrying into it. The hosting budget is zero, and the
-application now has a reconciliation endpoint whose balance derivation walks an account's whole
-history — it is bounded by account count, not by cost per account, so a public demo should seed
-accounts with short histories rather than one long one. And the local `.env` identities are still the
-only authentication there is; a public deployment needs that replaced, not merely put behind TLS.
+Two things checkpoint 10 settled are worth keeping in mind. The reconciliation endpoint walks an
+account's whole history, which is why the visitor's accounts are capped at 300 payments each and the
+report is budgeted per minute for that identity; a longer-lived public instance should keep those
+bounds rather than raise them. And the public-demo mode is the only place the visitor identity and
+its budgets exist; every other environment runs without it, so a test that needs it enables it
+explicitly, as `PublicDemoIntegrationTest` does.
 
 Start by confirming the current suite and both demos, with the test stack from `compose.test.yaml`.
 Integration tests install failure-injection triggers and create a throwaway database, so they must not
