@@ -47,7 +47,9 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 ## Verification record
 
 Local evidence recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
-**3.9.1**, after the pre-checkpoint-10 hardening pass.
+**3.9.1**, after the pre-checkpoint-10 hardening pass, and confirmed remotely by
+[CI run 35230495695](https://github.com/beaprogram/Decision-Rail/actions/runs/35230495695) on the
+delivered revision `fdc6d96`.
 
 - Pinned-wrapper build and suite: **307 backend tests passed**, with **0 failures, 0 errors, and
   0 skipped**, up from 213 at checkpoint 8.

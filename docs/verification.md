@@ -62,7 +62,7 @@ Tests share one database on purpose, and append-only history is retained so the 
 
 CI runs the same `compose.test.yaml` stack rather than workflow service containers, so the documented local command and the remote build exercise identical infrastructure. It then builds the Docker image, starts the container, and runs both demo scripts without publishing the image.
 
-[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) passed on revision `4754fab`: 213 backend tests, 41 frontend unit tests, and the 41 browser end-to-end tests that existed at that revision, against PostgreSQL 16 and a real broker, plus the image build, container startup, and both demos (12 and 27 checks). The browser step ran with retries at 0, so every one of those 41 passed on its first attempt. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35230495695) passed on revision `fdc6d96`, the pre-checkpoint-10 hardening pass: 307 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. An [earlier remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) passed on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 Test reports are written under `target/surefire-reports/`; the JaCoCo report is generated under `target/site/jacoco/`. CI uploads available reports when a verification job finishes, including on failure. Coverage is a diagnostic aid, not a substitute for meaningful assertions.
 
@@ -615,6 +615,11 @@ development stack was left running and untouched throughout.
 - **54 browser end-to-end tests**, first attempt, retries disabled
 - `scripts/demo.sh` passed; `scripts/lifecycle-demo.sh` **26 checks**; `scripts/async-demo.sh`
   **27 checks**; `scripts/recovery-demo.sh` **16 checks**
+
+Remotely, [CI run 35230495695](https://github.com/beaprogram/Decision-Rail/actions/runs/35230495695)
+passed every step on the delivered revision `fdc6d96` — the same commit, not an earlier one: compile and
+test, image build, container startup with the operator demos, restart recovery, the browser suite, both
+benchmark collector checks and the harness smoke run.
 
 This pass adds **eight test methods** net (272 to 280 `@Test` declarations; five parameterised classes
 expand to more executions than declarations): six in `RefundIntegrationTest` for the collision
