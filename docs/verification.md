@@ -62,7 +62,7 @@ Tests share one database on purpose, and append-only history is retained so the 
 
 CI runs the same `compose.test.yaml` stack rather than workflow service containers, so the documented local command and the remote build exercise identical infrastructure. It then builds the Docker image, starts the container, and runs both demo scripts without publishing the image.
 
-[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35238244685) passed on revision `995ba63`, the returned-total INSERT correction: 318 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. The [preceding run](https://github.com/beaprogram/Decision-Rail/actions/runs/35230495695) passed on `fdc6d96` with 310 backend tests, and an [earlier one](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35246574566) passed on revision `aec16d7`, the payment-identity correction: 329 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. The [preceding runs](https://github.com/beaprogram/Decision-Rail/actions/runs/35238244685) passed on `995ba63` with 318 backend tests and on `fdc6d96` with 310, and an [earlier one](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 Test reports are written under `target/surefire-reports/`; the JaCoCo report is generated under `target/site/jacoco/`. CI uploads available reports when a verification job finishes, including on failure. Coverage is a diagnostic aid, not a substitute for meaningful assertions.
 
@@ -923,6 +923,11 @@ Infrastructure for this pass was uniquely named and confirmed by name before rem
 `dr-verify-v15` application container on 127.0.0.1:8082, and an image tagged `decisionrail:verify-v15`.
 **The development stack was not started, stopped, migrated or written to by this pass** — its
 containers' start times and its payment count were checked before and after.
+
+Remotely, [CI run 35246574566](https://github.com/beaprogram/Decision-Rail/actions/runs/35246574566)
+passed every step on the delivered revision `aec16d7`: compile and test, image build, container startup
+with the operator demos, restart recovery, the browser suite, both collector checks and the harness
+smoke run.
 
 No benchmark campaign was run and no throughput claim is changed.
 
