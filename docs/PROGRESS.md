@@ -47,11 +47,9 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 ## Verification record
 
 Local evidence recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
-**3.9.1**, after the returned-total INSERT correction, and confirmed remotely by
-[CI run 35238244685](https://github.com/beaprogram/Decision-Rail/actions/runs/35238244685) on the
-delivered revision `995ba63`.
+**3.9.1**, after the payment-identity correction.
 
-- Pinned-wrapper build and suite: **318 backend tests passed**, with **0 failures, 0 errors, and
+- Pinned-wrapper build and suite: **329 backend tests passed**, with **0 failures, 0 errors, and
   0 skipped**, up from 213 at checkpoint 8. The 310 recorded for `fdc6d96` was correct; a 307 that
   appeared briefly in [verification.md](verification.md) was a counting mistake of mine, explained
   there.
@@ -268,6 +266,29 @@ the column at its default of zero. What is worth carrying forward is the reasoni
 the trigger: a rule was described by the events someone happened to attach it to instead of by
 enumerating every way the state it protects can change, and that mistake was made twice in the same
 place before it was caught.
+
+### The payment-identity correction
+
+Two findings and a documentation correction, all narrow.
+
+- **A payment could be renamed out from under a deferred check.** V14 refuses a payment inserted with a
+  returned total its operations do not sum to, but a deferred trigger captures its row when the
+  statement runs and validates at COMMIT. Inserting payment `A`, changing its id to `B`, and committing
+  left the inconsistency behind: the queued check looked for `A`, found nothing and returned, and `B`
+  was never examined. Reproduced on PostgreSQL 16.15, with the same transaction minus the rename
+  correctly refused as the control. `V15` makes a payment's id immutable, which removes the class
+  rather than the instance — any future deferred constraint on `payments` would have inherited the same
+  assumption. A direct-SQL defect: **no API path reaches it and no money loss was demonstrated.**
+- **`scripts/async-demo.sh --help` ran the demo.** The script ignored arguments, so asking what it does
+  stopped the configured broker and created synthetic payments. It now parses arguments before sourcing
+  `.env` or touching anything, documents that a real run interrupts its broker, and has a test that
+  proves the help and invalid-argument paths reach no operational command. The other three demo scripts
+  still ignore arguments; that is out of this pass's scope and recorded in
+  [verification.md](verification.md).
+- **Two claims corrected.** The previous pass's record said the development stack was not started,
+  stopped or written to; that was wrong and contradicted an incident disclosed in the same delivery,
+  and it now carries the incident. A statement grouping V12 and V13 as sharing a validate-then-install
+  window was also wrong about V12, which installs an ordinary validated foreign key.
 
 ## Remaining checkpoints
 

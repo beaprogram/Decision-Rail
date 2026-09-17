@@ -360,15 +360,21 @@ rejected by arithmetic, eventually.
 
 ### An upgrade that refuses to apply
 
-Three migrations validate a relationship across rows that already exist, and each checks for
-incompatible records **before** touching anything:
+Four migrations declare something about rows that already exist. V12 does it with an ordinary
+validated foreign key, which PostgreSQL checks and locks for as one operation. The other three run a
+pre-flight of their own **before** touching anything:
 
-- **`V12`** — every payment must be denominated in the currency its funding account holds.
+- **`V12`** — every payment must be denominated in the currency its funding account holds. Enforced by
+  a composite foreign key; the server validates the existing rows when adding it.
 - **`V13`** — every payment's `returned_amount_minor` must equal the sum of its return operations,
   checked when a payment's totals are updated.
-- **`V14`** — the same equality, checked when a payment is *inserted*. V13 left that entry point open,
-  so a V13 database can hold a row written directly that no longer satisfies the rule, and V14's
-  pre-flight is the first thing to look at it.
+- **`V14`** — the same equality, checked when a payment is *inserted*. V13 left that entry point open.
+- **`V15`** — a payment's id is immutable. Without it, renaming a payment inside the transaction that
+  inserted it moved the row out from under V14's deferred check. Its pre-flight re-checks returned-total
+  equality, because that inconsistency is what such a rename was able to leave behind.
+
+The pre-flights in V13, V14 and V15 check **returned-total equality only**. Currency agreement is
+V12's foreign key and is not re-validated by the later ones.
 
 If any of them finds rows that disagree, the migration fails and the startup stops there, with a
 message naming how many rows, one example payment, and the reconciliation finding types that describe
@@ -384,10 +390,35 @@ HINT:    Investigate those records and correct them with compensating operations
 ```
 
 The database is left exactly as the migration found it: the failed migration rolls back, and the
-schema stays at the last version that applied. `V14` also holds `SHARE ROW EXCLUSIVE` on `payments`
-and `payment_returns` from before its check until it commits, so an application still writing during
-the upgrade waits rather than slipping an incompatible row past the validation. Readers are not
-blocked; writers may briefly block, which for a migration of this size is a moment. Nothing is repaired, adjusted or deleted on your behalf
+schema stays at the last version that applied. `V14` and `V15` hold `SHARE ROW EXCLUSIVE` on
+`payments` and `payment_returns` from before their check until they commit, so an application still
+writing during the upgrade waits rather than slipping an incompatible row past the validation. Readers
+are not blocked; writers may briefly block, which for a migration of this size is a moment. `V13` does
+not hold that lock and had the window; it is applied and is not edited, and the pre-flights in V14 and
+V15 are what would find anything that got through it.
+
+### Upgrading a database that has been sitting at an older version
+
+An instance left on an older schema — a long-running development database, a restored snapshot — picks
+up every migration since, in order, the next time the application starts. Whether that succeeds
+**depends on its data**, and it is not safe to assume. Each of V12 to V15 validates the existing rows
+and refuses the whole upgrade if they contradict the invariant, leaving the schema where it was. Check
+before restarting, rather than finding out from a container that will not come up:
+
+```bash
+# Currency agreement (V12), and returned-total equality (V13, V14, V15).
+psql ... --command "SELECT count(*) AS currency_mismatches
+                      FROM payments p JOIN accounts a ON a.id = p.account_id
+                     WHERE p.currency <> a.currency"
+psql ... --command "SELECT count(*) AS total_mismatches FROM (
+                      SELECT p.id FROM payments p
+                      LEFT JOIN payment_returns r ON r.payment_id = p.id
+                      GROUP BY p.id, p.returned_amount_minor
+                      HAVING p.returned_amount_minor <> coalesce(sum(r.amount_minor), 0)) x"
+```
+
+Two zeros mean the upgrade has nothing to object to. Anything else is a record to investigate first,
+by the procedure above. Nothing is repaired, adjusted or deleted on your behalf
 — an upgrade that "fixed" such rows would destroy the only evidence that something went wrong.
 
 What to do:

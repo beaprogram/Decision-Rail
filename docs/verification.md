@@ -70,12 +70,12 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw clean verify` passed **318 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
+`./mvnw clean verify` passed **329 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
 **42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled. That is the
-returned-total INSERT correction, recorded in full further down; the 310 figure it replaces belongs to
-`fdc6d96` and the 302/41 figures before that to `aa6de43`. The table below is
+payment-identity correction, recorded in full further down; the 318 figure it replaces belongs to
+`fc6fa5c`, 310 to `fdc6d96`, and the 302/41 figures before that to `aa6de43`. The table below is
 the checkpoint 8 record, kept because it is what the group breakdown was counted against; the checkpoint
-9 additions are listed in the section that follows it. The **318** figure is the current total and the
+9 additions are listed in the section that follows it. The **329** figure is the current total and the
 **213** figure is a historical record of an earlier revision — they are not two counts of the same thing.
 
 ### The earlier recorded result (checkpoint 8)
@@ -700,8 +700,22 @@ invalidated the published throughput figures for no additional protection.
 The migration takes `LOCK TABLE payments, payment_returns IN SHARE ROW EXCLUSIVE MODE` **before** its
 pre-flight, so a transaction already in flight cannot commit the very row the validation just declared
 absent. It conflicts with the `ROW EXCLUSIVE` that writes take, leaves readers alone, and is the mode
-`CREATE TRIGGER` acquires anyway. V12 and V13 validated without it and had that window; they are
-applied and are not edited, and V14's own pre-flight is what would catch anything that slipped through.
+`CREATE TRIGGER` acquires anyway.
+
+**Correction.** An earlier revision of this section grouped V12 and V13 together as having that
+window. They do not behave the same way, and only one of them does:
+
+| Migration | How it installs | Window |
+| --- | --- | --- |
+| V12 | An ordinary validated `FOREIGN KEY`. PostgreSQL checks the existing rows and takes the locks that constraint needs as part of adding it | None of this kind — the check and the constraint are one operation the server performs |
+| V13 | A custom `DO` pre-flight, then `CREATE TRIGGER`, with no lock held across the two | Yes: a conflicting row could commit between them |
+| V14, V15 | The same shape as V13, but holding `SHARE ROW EXCLUSIVE` from before the pre-flight | Closed |
+
+V13 is applied and is not edited. What would catch anything that slipped through its window is the
+pre-flight in V14 or V15 — each re-checks returned-total equality against the rows as they stand.
+Note what those pre-flights do **not** cover: they check returned-total equality only, not
+payment/account currency agreement, which is V12's concern and is enforced by V12's foreign key
+rather than re-validated later.
 
 ### Evidence
 
@@ -751,8 +765,25 @@ the local ordering.
 ### Recorded result for this pass
 
 Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka **3.9.1** and
-Playwright **1.63**, against a disposable application container on the disposable test stack. The
-development stack was not started, stopped or written to.
+Playwright **1.63**, against a disposable application container on the disposable test stack.
+
+**Correction.** This paragraph first said the development stack was not started, stopped or written
+to. That was wrong, and it contradicted an incident disclosed in the same delivery. During that pass I
+ran `./scripts/async-demo.sh --help`; the script ignored arguments, so it executed the demo against
+its defaults — `compose.yaml` and the `broker` service — rather than printing usage. It therefore:
+
+- stopped the **development** broker for roughly 21 seconds, which the script's own cleanup restarted;
+- created **three synthetic payments** in the development database, taking it from 619 to 622.
+
+Recovery was reported at the time as consumers running, breaker CLOSED and zero undelivered events;
+that is what the health endpoint showed then and it has not been re-verified since. Three terminally
+failed events dated **2026-09-12** predate all of this and were deliberately left untouched, so the
+development stack's DEGRADED async health is older than the incident rather than a consequence of it.
+Nothing has been deleted or edited to make the environment look untouched: the three payments are
+still there and the older failed events are unchanged.
+
+The script's argument handling is fixed in the pass that follows this one, with a test that proves the
+help and invalid-argument paths reach neither `.env` nor any operational command.
 
 - `./mvnw clean verify`: **318 backend tests**, 0 failures, 0 errors, 0 skipped — 310 plus the eight
   added here, with Maven's own summary and the XML reports agreeing
@@ -768,6 +799,132 @@ both benchmark collector checks and the harness smoke run.
 
 No benchmark campaign was run and no throughput claim is changed; `performance.md` and the artifacts
 under `benchmark/results/` are untouched.
+
+## The payment-identity bypass
+
+Baseline `fc6fa5c`, whose CI run passed 318 backend, 42 frontend unit and 54 browser tests. That green
+run did not resolve these findings; they were identified against it.
+
+### Reproduction and control, on PostgreSQL 16.15
+
+V14 refuses a payment inserted with a returned total its operations do not sum to, but a deferred
+trigger captures its `NEW` row when the statement runs and validates at COMMIT. Moving the row out from
+under it defeated the check.
+
+Run against V1–V14 applied unchanged to a database created for this purpose and dropped afterwards:
+
+| Transaction | PostgreSQL 16.15 | Review's 14.19 |
+| --- | --- | --- |
+| Insert CAPTURED payment `A` (1000/1000, recording 100 returned), `UPDATE payments SET id = B`, insert a valid balanced 1000-unit CAPTURE journal for `B`, COMMIT | **committed** — final row `recorded=100`, `derived=0`, `return_count=0` | committed, same figures |
+| The identical transaction **without** the identity change | **refused at COMMIT**, `records 100 returned … total 0`, leaving `payments=0`, `journals=0` | refused, same message |
+
+The two versions agree, so this is not version-specific. The mechanism is as the review described: the
+deferred trigger holds `NEW.id = A`, `enforce_returned_total(A)` finds no row and returns early, and
+V13's update trigger has `WHEN (returned or captured changed)` so a change to `id` queues nothing.
+
+**This is a direct-SQL invariant defect. No API path reaches it and no money loss was demonstrated.**
+Every UPDATE the application issues against `payments` sets status, `captured_amount_minor`,
+`returned_amount_minor` or `updated_at`; none of them names `id`. That was confirmed against the source
+before choosing the fix, and `theUpdatesTheApplicationActuallyMakesAreUnaffected` keeps it honest.
+
+### The invariant, and why it rather than a wider trigger
+
+`V15` makes a payment's id immutable, with an immediate `BEFORE UPDATE OF id` trigger carrying
+`WHEN (OLD.id IS DISTINCT FROM NEW.id)` — so an UPDATE that merely mentions `id` while leaving it alone
+is still allowed, and the ones the application actually issues never reach the trigger at all.
+
+Widening the returned-total triggers to watch `id` would have fixed the instance and left the class:
+every future deferred constraint on `payments` would inherit the same unstated assumption that the row
+it captured is still findable at COMMIT. Immutability removes the assumption. It is also correct on its
+own terms — journals, returns, events, audit records and stored idempotency responses all name that id,
+and so does the merchant. `DELETE` is deliberately not covered; that is a separate decision and not the
+defect found.
+
+Immediate rather than deferred, unlike the three returned-total triggers: a total legitimately changes
+during a transaction and is only meaningful at the end, while an identity change has no legitimate
+intermediate form, so the statement attempting it is what to refuse.
+
+### Evidence
+
+Against the real schema (`PaymentIdentityImmutabilityTest`):
+
+| Case | Result |
+| --- | --- |
+| The reproduced bypass | refused, naming both ids; no payment, journal or ledger entry survives under **either** identity |
+| Renaming a payment that has already committed with its journal | refused; row and journal intact |
+| The three UPDATEs the application issues — capture, status transition, returned total | all still work |
+| An UPDATE that sets `id` to its own value | allowed |
+| A payment inserted claiming 250 returned **with** its 250-unit return | commits — V15 did not turn the deferred check into an immediate one |
+| V14's insert-side refusal | still fires |
+| Authorize, capture, void, refund and reversal through `PaymentService` | unchanged, including a reversal leaving the payment CAPTURED |
+
+Upgrade behaviour, one throwaway database per case (`PaymentIdentityUpgradeTest`), with the invalid
+fixture seeded **by running the bypass at V14** rather than by disabling anything:
+
+| Case | Result |
+| --- | --- |
+| A V14 database whose rows agree | upgrades; totals, returns and journal entries unchanged; trigger installed; the rename is then refused on that upgraded database |
+| A V14 database holding the bypassed row | refused, naming the count, the payment and `RETURN_TOTAL_MISMATCH`; schema stays at 14; total still 100; no return operation invented; both ledger entries intact; neither the trigger nor its function partially installed |
+
+V15 cannot detect that an identity was changed in the past — the old value is gone and nothing recorded
+it. What it detects is the inconsistency such a change was used to introduce.
+
+## Asking a demo a question must not run it
+
+`scripts/async-demo.sh` took no arguments and ignored the ones it was given, so `--help` executed the
+demo: it stopped the configured broker and created synthetic payments against whatever stack the
+environment pointed at. That is not hypothetical — it happened to this project's own development stack,
+and is recorded below.
+
+The script now parses arguments in its first executable block, **before** `.env` is sourced, before
+credentials are required, before the dependency check, and before any `docker`, `curl`, `psql`,
+`openssl` or `mktemp` call. `--help`/`-h` print usage and exit 0; an unknown argument or `--help`
+combined with anything else prints the reason and usage on stderr and exits 2. The usage text states
+plainly that a real run stops the selected broker and creates synthetic activity, and shows the
+disposable-stack invocation.
+
+`AsyncDemoArgumentSafetyTest` proves the side-effect freedom rather than asserting the message. It
+copies the script into a temporary directory laid out like the repository, beside a fake `.env` whose
+content creates a marker file when sourced, and puts stubs for `docker`, `curl`, `jq`, `openssl`,
+`psql`, `mktemp` and `sleep` first on `PATH` that record the call and fail. For `--help`, `-h`, an
+unknown argument and an unsupported combination, it asserts the marker is absent and the recorded
+command list is empty. A fourth case is the positive control: with no arguments the script still
+reaches `.env`, so the other three cannot pass by the script simply exiting at the top for everything.
+
+Only this script was changed. `demo.sh`, `lifecycle-demo.sh` and `recovery-demo.sh` still ignore
+arguments and remain exposed to the same mistake — out of scope here, and stated rather than left to be
+discovered.
+
+### First-attempt failures in this pass
+
+| What failed | Why | What it means |
+| --- | --- | --- |
+| `AsyncDemoArgumentSafetyTest` — all four, exit 127 | I cleared `PATH` entirely, so the usage heredoc could not find `cat` | Fixture. The stubs now *shadow* the dangerous commands with the system paths following, which is what the check actually needs |
+| `helpPrintsUsageAndTouchesNothing` — a phrase assertion | "takes no arguments" wrapped across a newline in the usage text | The usage was reworded so the phrase reads on one line |
+| A boxed-type compile error on `ReturnCommand(…, 1_500, …)` | The amount is a `Long` | Fixture only |
+| `ReturnedTotalInsertUpgradeTest` asserted the upgraded schema was at "14" | Adding V15 made that hard-coded number wrong | A real consequence of the change. Both upgrade tests now read the latest version from the migrations on the classpath, so the next migration does not break a check that is about the upgrade succeeding |
+
+The reproduction, both migrations' behaviour, the identity regressions and the full suite passed on
+their first attempt.
+
+### Recorded result for this pass
+
+Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka **3.9.1** and
+Playwright **1.63**.
+
+- `./mvnw clean verify`: **329 backend tests**, 0 failures, 0 errors, 0 skipped — 318 plus eleven added
+  here, with Maven's summary and the XML reports agreeing, against a database migrated from empty
+- **42 frontend unit tests** and **54 browser end-to-end tests**, first attempt, retries disabled
+- `scripts/demo.sh` passed; `scripts/lifecycle-demo.sh` **26 checks**; `scripts/async-demo.sh`
+  **27 checks**; `scripts/recovery-demo.sh` **16 checks**
+
+Infrastructure for this pass was uniquely named and confirmed by name before removal: a
+`dr-pk-probe-fc6fa5c` PostgreSQL 16.15 container on 127.0.0.1:55499 for the reproduction, a
+`dr-verify-v15` application container on 127.0.0.1:8082, and an image tagged `decisionrail:verify-v15`.
+**The development stack was not started, stopped, migrated or written to by this pass** — its
+containers' start times and its payment count were checked before and after.
+
+No benchmark campaign was run and no throughput claim is changed.
 
 ## Failure cases and rationale
 

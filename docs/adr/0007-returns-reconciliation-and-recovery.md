@@ -119,6 +119,45 @@ together is judged once, on the state that actually commits, rather than on whic
 first. A payment inserted claiming 250 returned alongside the 250-unit return that justifies it commits;
 the same insert without that return does not.
 
+### V15: deferral has a precondition nobody had stated
+
+Covering all three entry points still was not enough, for a reason that is about deferral rather than
+about returns. A deferred trigger captures its `NEW` row when the statement runs and validates at
+COMMIT, so it assumes the row it captured is still findable then. Changing the payment's primary key
+between the two broke that assumption:
+
+```
+INSERT payment A recording 100 returned   -- queues enforce_returned_total(A)
+UPDATE payments SET id = B WHERE id = A   -- V13's trigger watches returned/captured, not id
+COMMIT                                    -- enforce_returned_total(A) finds no row, returns early,
+                                             and B is never examined
+```
+
+Reproduced on PostgreSQL 16.15 against V1–V14 applied unchanged, and by review on 14.19: it committed,
+leaving a payment recording 100 returned with zero return operations. The identical transaction without
+the rename was refused, which is what identifies the identity change rather than the amounts as the way
+through.
+
+**V15 makes a payment's id immutable**, with an immediate `BEFORE UPDATE OF id` trigger. The choice was
+between widening the returned-total triggers to watch `id` as well, and forbidding the rename. Widening
+would have fixed the instance and left the class: any future deferred constraint on `payments` would
+inherit the same assumption, silently. Forbidding the rename is also simply correct on its own terms —
+a payment's id is what its journals, returns, events, audit records and stored idempotency responses
+name, and what a merchant was told their payment is called. There is no operation in this system for
+which changing it is the answer, and the application never does: every UPDATE it issues against
+`payments` sets status, captured or returned amounts, or `updated_at`.
+
+The trigger is immediate rather than deferred, unlike the three above it. A total legitimately changes
+during a transaction and is only meaningful at the end, so deferral is right for it. An identity change
+has no legitimate intermediate form, so the statement attempting it is what to refuse, where the error
+can name what was tried.
+
+`DELETE` is deliberately not covered. A deletion removes the row rather than leaving a misattributed
+one, payments are never deleted here, and the foreign keys from journals, returns and audit records
+already refuse it while that evidence exists. Refusing it would be a separate decision from this one.
+
+This was a direct-SQL defect. No API path reaches it, and no money loss was demonstrated.
+
 Concurrency is handled by the payment row lock. The shared rule takes `SELECT … FOR UPDATE` on the
 payment before summing its returns, so two transactions changing the same payment validate one after
 the other against committed state rather than each against a view that looks consistent alone. In
@@ -148,12 +187,16 @@ service path producing either inconsistency.
 
 ### Upgrading a database that already disagrees
 
-All three migrations look for incompatible rows before validating anything, and refuse with a count, an
+V13, V14 and V15 look for incompatible rows before validating anything, and refuse with a count, an
 example payment, the reconciliation finding types that describe it, and a statement that the migration
-will not repair financial data. V14 additionally takes `SHARE ROW EXCLUSIVE` on `payments` and
-`payment_returns` first, so a transaction already in flight cannot commit the very row the validation
-just declared absent; it conflicts with the `ROW EXCLUSIVE` that writes take and leaves readers alone,
-and it is the mode `CREATE TRIGGER` needs anyway. A bare foreign-key violation names one row and explains nothing; worse,
+will not repair financial data. V14 and V15 additionally take `SHARE ROW EXCLUSIVE` on `payments`
+and `payment_returns` first, so a transaction already in flight cannot commit the very row the
+validation just declared absent; it conflicts with the `ROW EXCLUSIVE` that writes take and leaves
+readers alone, and it is the mode `CREATE TRIGGER` needs anyway. V12 needs none of this: it installs an
+ordinary validated foreign key, and PostgreSQL checks the existing rows and takes the locks that
+requires as one operation. V13 does have the window, and is not edited; the later pre-flights are what
+would find anything that used it. Those pre-flights check returned-total equality only — currency
+agreement is V12's foreign key and is not re-validated by them. A bare foreign-key violation names one row and explains nothing; worse,
 an upgrade that "fixed" such rows would destroy the only evidence that something went wrong, using the
 same code whose output is in doubt. The refusal leaves the database exactly as it was, and the upgrade
 stops at the migration that refused.
@@ -171,6 +214,8 @@ can honestly be established:
 | The detector still identifies damaged evidence | `ReconciliationLegacyEvidenceTest`, against a **private throwaway database migrated only to V11** and dropped afterwards |
 | Each entry point refuses, and a legitimate deferred transaction still commits | `ReturnedTotalInsertGuardTest`, against the real schema |
 | A V13 database upgrades, or is refused with its evidence intact | `ReturnedTotalInsertUpgradeTest`, one throwaway database per case |
+| A payment cannot be renamed, before or after commit, and the ordinary lifecycle is unaffected | `PaymentIdentityImmutabilityTest`, against the real schema |
+| A V14 database upgrades, or is refused with no half-installed protection | `PaymentIdentityUpgradeTest`, seeding its fixture by running the bypass at V14 |
 
 The third is the one that needs care. A database restored from a partial backup, or simply not yet
 upgraded, can hold rows nothing would write today, and a report that could not see them would be

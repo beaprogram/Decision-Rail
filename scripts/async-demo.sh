@@ -8,6 +8,74 @@
 # endpoint that executes commands, and it only ever targets the Compose services named below.
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Arguments, handled before anything happens
+# ---------------------------------------------------------------------------
+#
+# This block runs before .env is sourced, before credentials are required, before dependencies are
+# checked, and before any docker, curl, psql or mktemp call. That ordering is the point: this script
+# takes no arguments, and an earlier revision ignored them entirely, so `--help` from someone trying
+# to find out what it does ran the demo instead - stopping the configured broker and creating
+# synthetic payments against whatever stack the environment happened to point at. Asking a question
+# must not be a way to perform an action.
+usage() {
+  cat <<'USAGE'
+Usage: scripts/async-demo.sh
+
+Demonstrates asynchronous event delivery against an already-running DecisionRail stack.
+It takes no arguments; everything is configured through the environment.
+
+THIS SCRIPT CHANGES THE STACK IT RUNS AGAINST. It deliberately stops the selected broker container
+to produce a real outage, restarts it, and creates synthetic payments, a candidate policy and a
+shadow comparison. Point it at disposable infrastructure, never at anything whose data matters.
+
+Environment:
+  BASE_URL                 application base URL            (default http://localhost:8080)
+  COMPOSE_FILE_PATH        Compose file to drive           (default <project>/compose.yaml)
+  BROKER_SERVICE           broker service to stop/start    (default broker)
+  DATABASE_SERVICE         database service for psql       (default database)
+  DATABASE_NAME            database to query               (default decisionrail)
+  MERCHANT_USERNAME        merchant identity               (default demo-merchant)
+  ADMIN_USERNAME           administrator identity          (default admin)
+  ACCOUNT_ID               funding account                 (default the seeded demo account)
+  EVENTS_TOPIC             topic to inspect                (default decisionrail.payments.v1)
+  RECOVERY_BUDGET_SECONDS  how long recovery may take      (default 120)
+  MERCHANT_DEMO_PASSWORD, ADMIN_PASSWORD                    required; read from .env when present
+
+Against the disposable test stack:
+  BASE_URL=http://localhost:8081 COMPOSE_FILE_PATH=compose.test.yaml \
+    BROKER_SERVICE=test-broker DATABASE_SERVICE=test-database \
+    DATABASE_NAME=decisionrail_test scripts/async-demo.sh
+
+Exit status: 0 demo passed or help printed, 1 a check failed, 2 the arguments were not usable.
+USAGE
+}
+
+if (( $# > 0 )); then
+  case "$1" in
+    -h|--help)
+      if (( $# > 1 )); then
+        printf '%s takes no arguments, so --help cannot be combined with any.
+
+' "${BASH_SOURCE[0]##*/}" >&2
+        usage >&2
+        exit 2
+      fi
+      usage
+      exit 0
+      ;;
+    *)
+      printf 'Unrecognised argument: %s
+%s takes no arguments; configure it through the environment.
+
+' \
+        "$1" "${BASH_SOURCE[0]##*/}" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+fi
+
 project_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 if [[ -f "$project_dir/.env" ]]; then
   set -a

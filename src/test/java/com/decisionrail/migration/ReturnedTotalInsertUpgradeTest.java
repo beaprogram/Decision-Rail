@@ -36,8 +36,10 @@ class ReturnedTotalInsertUpgradeTest {
             migrateTo(database, null);
 
             try (Connection connection = database.open()) {
+                // Read from the classpath rather than hard-coded, so adding a migration does not
+                // break a check that is about the upgrade succeeding, not about a version number.
                 assertThat(single(connection, "SELECT version FROM flyway_schema_history WHERE success"
-                        + " ORDER BY installed_rank DESC LIMIT 1")).isEqualTo("14");
+                        + " ORDER BY installed_rank DESC LIMIT 1")).isEqualTo(latestMigrationVersion());
                 assertThat(single(connection,
                         "SELECT returned_amount_minor::text FROM payments WHERE id = '" + seeded.payment() + "'"))
                         .as("the upgrade changes no money").isEqualTo("250");
@@ -161,6 +163,22 @@ class ReturnedTotalInsertUpgradeTest {
     }
 
     // ----- infrastructure -----
+
+    /** The highest migration version on the classpath, as Flyway records it. */
+    static String latestMigrationVersion() throws Exception {
+        java.net.URL location = ReturnedTotalInsertUpgradeTest.class.getClassLoader().getResource("db/migration");
+        assertThat(location).as("migrations are on the classpath").isNotNull();
+        java.io.File[] files = new java.io.File(location.toURI()).listFiles();
+        assertThat(files).isNotNull();
+        int highest = 0;
+        for (java.io.File file : files) {
+            java.util.regex.Matcher matcher =
+                    java.util.regex.Pattern.compile("^V(\\d+)__.*\\.sql$").matcher(file.getName());
+            if (matcher.matches()) highest = Math.max(highest, Integer.parseInt(matcher.group(1)));
+        }
+        assertThat(highest).as("at least one migration was found").isGreaterThan(0);
+        return String.valueOf(highest);
+    }
 
     private static void migrateTo(ThrowawayDatabase database, String version) {
         Flyway.configure()
