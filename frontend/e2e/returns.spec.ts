@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test';
-import { capture, createIsolatedAccount, identities, signIn, sql } from './support';
+import { capture, createIsolatedAccount, identities, refundThroughApi, signIn, sql } from './support';
 
 /**
  * Returning captured money from the browser: partial refunds, the remainder, a reversal, and an
@@ -11,6 +11,12 @@ import { capture, createIsolatedAccount, identities, signIn, sql } from './suppo
 test.describe.configure({ mode: 'serial' });
 
 const returnsCard = (page: Page) => page.locator('section.card', { hasText: 'Returns' });
+
+/** The sequence numbers rendered in the returns table, top to bottom. */
+async function sequencesOnScreen(card: ReturnType<typeof returnsCard>): Promise<number[]> {
+  const cells = await card.locator('tbody tr td:first-child').allInnerTexts();
+  return cells.map((text) => Number(text.trim()));
+}
 
 /** The notice holding an unresolved command. Scoped, because the dialog restates the same figures. */
 const unresolvedNotice = (page: Page) => page.locator('.notice', { hasText: 'Submitted command' });
@@ -152,31 +158,74 @@ test.describe('returning captured money', () => {
     await expect(card.getByRole('button', { name: 'Reverse the capture' })).toHaveCount(0);
   });
 
-  test('shows the payment total rather than the page length, and reaches older returns', async ({ page }) => {
+  /**
+   * History that genuinely spans more than one page, traversed with the page's own controls.
+   *
+   * The API's page size is 50 and the dashboard does not override it, so a payment needs more than
+   * fifty return operations before there is a second page to reach at all. An earlier version of this
+   * test created four and asserted on a single page while claiming to cover paging; the buttons it
+   * describes were never pressed. These returns are real operations made through the API because
+   * fifty-odd trips through the form would take minutes without testing anything the form's own tests
+   * above do not already cover - what is under test here is the traversal.
+   *
+   * What a return committing between two page reads does to the pages already fetched is asserted
+   * where it can be asserted without depending on the dashboard's cache timing: against the API, in
+   * RefundIntegrationTest#aReturnCommittedWhilePagingDoesNotDisturbThePagesAlreadyRead, alongside the
+   * 201-operation history that proves nothing is unreachable past the old cap.
+   */
+  test('reaches older returns and comes back, without a page overlapping or hiding one', async ({ page }) => {
+    test.slow();
     const account = await createIsolatedAccount('demo-merchant', 'CAD', 500_000);
     const paymentId = await capturedPaymentOn(page, account, '60.00');
     const card = returnsCard(page);
 
-    // Enough returns to need more than one page at the API's default of 50 would make this test slow,
-    // so the page size is set explicitly instead. The defect is the same at any size: a list that ends
-    // silently, and a count taken from the list rather than from the payment.
-    for (let i = 0; i < 4; i++) {
-      await refundThroughUi(page, '5.00', `slice ${i}`);
+    // The first one through the form, so this payment's history starts the way an operator would start
+    // it; the rest through the API, to get past the page boundary quickly.
+    await refundThroughUi(page, '1.00', 'slice 1');
+    for (let i = 2; i <= 52; i++) {
+      await refundThroughApi(identities.merchant(), paymentId, 100, `slice ${i}`);
     }
+    expect(await sql(`SELECT count(*) FROM payment_returns WHERE payment_id = '${paymentId}'`)).toBe('52');
 
-    // exact, because the paging hint below also reads "... of 4 returns".
-    await expect(card.getByText('4 returns', { exact: true })).toBeVisible();
     await page.goto(`/dashboard/payments/${paymentId}`);
 
-    // The screen states which part of the total is on screen, rather than letting the row count imply
-    // it is everything.
-    await expect(card.getByText(/Showing 4 of 4 returns, newest first/)).toBeVisible();
-    // Newest first, so the most recent operation is the one on top.
-    await expect(card.locator('tbody tr').first().locator('td').first()).toHaveText('4');
-
-    expect(await sql(`SELECT count(*) FROM payment_returns WHERE payment_id = '${paymentId}'`)).toBe('4');
-    expect(await sql(`SELECT returned_amount_minor FROM payments WHERE id = '${paymentId}'`)).toBe('2000');
+    // Page one: the server's page size, and the payment's total stated separately from it. The count
+    // beside the rows is the payment's, not the page's, which is the distinction that used to be wrong.
+    await expect(card.getByText(/Showing 50 of 52 returns, newest first/)).toBeVisible();
+    await expect(card.getByText(/Older operations continue below/)).toBeVisible();
+    const firstPage = await sequencesOnScreen(card);
+    expect(firstPage).toHaveLength(50);
+    expect(firstPage[0]).toBe(52);
+    expect(firstPage.at(-1)).toBe(3);
+    // Newest first with no gaps inside the page.
+    expect(firstPage).toEqual(Array.from({ length: 50 }, (_, index) => 52 - index));
+    await expect(card.getByRole('button', { name: 'Newest' })).toHaveCount(0);
     await capture(page, '50-return-history');
+
+    // Older, by the page's own control.
+    await card.getByRole('button', { name: 'Older returns' }).click();
+    await expect(card.getByText(/Showing 2 of 52 returns, newest first/)).toBeVisible();
+    const secondPage = await sequencesOnScreen(card);
+    expect(secondPage).toEqual([2, 1]);
+    // The two pages neither overlap nor leave a gap: every operation is reachable exactly once, which
+    // is the whole claim a keyset-paged history makes.
+    expect(secondPage.filter((sequence) => firstPage.includes(sequence))).toEqual([]);
+    expect([...firstPage, ...secondPage].sort((left, right) => left - right))
+      .toEqual(Array.from({ length: 52 }, (_, index) => index + 1));
+    // The last page offers no older one, and does offer the way back.
+    await expect(card.getByRole('button', { name: 'Older returns' })).toHaveCount(0);
+    await expect(card.getByRole('button', { name: 'Newest' })).toBeVisible();
+
+    // And back again, which is a traversal in its own right: paging is forward-only on the cursor, so
+    // returning to the newest page means starting a new one rather than reversing the last request.
+    await card.getByRole('button', { name: 'Newest' }).click();
+    await expect(card.getByText(/Showing 50 of 52 returns, newest first/)).toBeVisible();
+    expect(await sequencesOnScreen(card)).toEqual(firstPage);
+    await expect(card.getByRole('button', { name: 'Newest' })).toHaveCount(0);
+    await expect(card.getByRole('button', { name: 'Older returns' })).toBeVisible();
+
+    expect(await sql(`SELECT count(*) FROM payment_returns WHERE payment_id = '${paymentId}'`)).toBe('52');
+    expect(await sql(`SELECT returned_amount_minor FROM payments WHERE id = '${paymentId}'`)).toBe('5200');
   });
 
   test('a refund whose outcome is unknown is retried as the same command, not a new one', async ({ page }) => {

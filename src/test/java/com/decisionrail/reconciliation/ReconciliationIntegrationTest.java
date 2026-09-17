@@ -20,12 +20,14 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.MvcResult;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 
 /**
@@ -100,25 +102,6 @@ class ReconciliationIntegrationTest {
     }
 
     @Test
-    void aReturnedTotalThatDisagreesWithItsOperationsIsReported() {
-        UUID captured = capture(authorize(6_000));
-        refund(captured, 1_000);
-
-        // The payment's own total is moved without touching the operations or the journals, which is
-        // exactly the divergence a check comparing only two fields of the same write would miss.
-        jdbc.update("UPDATE payments SET returned_amount_minor = 900 WHERE id = ?", captured);
-
-        List<ReconciliationFinding> findings = report().findings();
-        assertThat(findings).extracting(ReconciliationFinding::type).contains("RETURN_TOTAL_MISMATCH");
-        ReconciliationFinding mismatch = findings.stream()
-                .filter(finding -> finding.type().equals("RETURN_TOTAL_MISMATCH")).findFirst().orElseThrow();
-        assertThat(mismatch.resourceId()).isEqualTo(captured);
-        assertThat(mismatch.expectedMinor()).isEqualTo(1_000);
-        assertThat(mismatch.actualMinor()).isEqualTo(900);
-        assertThat(mismatch.deltaMinor()).isEqualTo(-100);
-    }
-
-    @Test
     void aHoldThatDisagreesWithTheOutstandingAuthorizationsIsReported() {
         authorize(2_000);
         jdbc.update("UPDATE accounts SET held_minor = held_minor + 75 WHERE id = ?", accountId);
@@ -130,64 +113,69 @@ class ReconciliationIntegrationTest {
     }
 
     @Test
-    void anAccountWhoseCurrencyDisagreesWithItsPaymentsIsNotReportedClean() {
+    void theProductionSchemaNowRefusesTheCurrencyCorruptionThisDetectorLooksFor() {
         UUID payment = authorize(2_000);
 
-        // The account's currency is changed and nothing else. The application refuses this at
-        // authorization time - the currencies must match - but the schema does not, so this is exactly
-        // the kind of inconsistency between separately maintained records that reconciliation exists to
-        // notice. Scoped to an account this test created.
-        jdbc.update("UPDATE accounts SET currency = 'USD' WHERE id = ?", accountId);
+        // What used to be this test's fixture is now rejected outright. Prevention and detection are
+        // separate concerns tested separately: this asserts the constraint, and
+        // ReconciliationLegacyEvidenceTest asserts the detector against a snapshot that predates it.
+        assertThatThrownBy(() -> jdbc.update("UPDATE accounts SET currency = 'USD' WHERE id = ?", accountId))
+                .as("an account cannot be redenominated out from under its payments")
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasStackTraceContaining("payments_currency_matches_account");
 
-        ReconciliationReport report = report();
-        assertThat(report.status())
-                .as("evidence in disagreeing currencies is not a clean result")
-                .isEqualTo(ReconciliationReport.Status.DISCREPANCIES_FOUND);
-        assertThat(report.findings()).extracting(ReconciliationFinding::type)
-                .contains("ACCOUNT_CURRENCY_MISMATCH");
+        // And a payment cannot be created in a currency its account does not hold.
+        UUID usdAccount = UUID.randomUUID();
+        jdbc.update("INSERT INTO accounts (id,merchant_id,currency,opening_balance_minor,balance_minor) VALUES (?,?,'USD',?,?)",
+                usdAccount, "demo-merchant", 10_000, 10_000);
+        assertThatThrownBy(() -> jdbc.update("""
+                INSERT INTO payments (id,merchant_id,account_id,amount_minor,currency,country,status,decision,created_at,updated_at)
+                VALUES (?, 'demo-merchant', ?, 100, 'CAD', 'CA', 'AUTHORIZED', '{}'::jsonb, now(), now())
+                """, UUID.randomUUID(), usdAccount))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasStackTraceContaining("payments_currency_matches_account");
 
-        ReconciliationFinding mismatch = report.findings().stream()
-                .filter(f -> f.type().equals("ACCOUNT_CURRENCY_MISMATCH")).findFirst().orElseThrow();
-        assertThat(mismatch.severity()).isEqualTo(ReconciliationFinding.Severity.CRITICAL);
-        assertThat(mismatch.resourceId()).isEqualTo(accountId);
-        assertThat(mismatch.currency()).isEqualTo("USD");
-        assertThat(mismatch.detail()).contains("CAD").contains("USD");
-        assertThat(mismatch.references()).contains(new ReconciliationFinding.Reference("ACCOUNT", accountId));
+        // The two currencies stay independent: a USD payment on the USD account is ordinary and
+        // commits. The constraint ties a payment to its own account, not the system to one currency.
+        UUID usdPayment = payments.authorize("demo-merchant", key(),
+                new AuthorizationCommand(usdAccount, 2_500, "USD", "US")).body().id();
+        payments.capture("demo-merchant", key(), usdPayment);
+        payments.returnFunds("demo-merchant", key(),
+                new ReturnCommand(usdPayment, ReturnType.REFUND, 500L, null));
+        assertThat(jdbc.queryForObject("SELECT balance_minor FROM accounts WHERE id = ?", Long.class, usdAccount))
+                .as("USD money moved in USD, on its own account").isEqualTo(8_000L);
+        assertThat(reconciliation.forMerchant("demo-merchant", new ReconciliationRequest(usdAccount, 25, 500))
+                .findings()).isEmpty();
 
-        // And the arithmetic is refused rather than performed across currencies: no CAD minor units are
-        // added into a USD expectation, and no balance figure is presented as reconciled.
-        assertThat(report.findings()).extracting(ReconciliationFinding::type)
-                .contains("ACCOUNT_TOTALS_NOT_DERIVABLE")
-                .doesNotContain("ACCOUNT_BALANCE_MISMATCH", "ACCOUNT_HELD_MISMATCH");
-        ReconciliationFinding refused = report.findings().stream()
-                .filter(f -> f.type().equals("ACCOUNT_TOTALS_NOT_DERIVABLE")).findFirst().orElseThrow();
-        assertThat(refused.expectedMinor()).as("no expectation can be stated").isNull();
-        assertThat(refused.actualMinor()).isNull();
+        // The CAD account is untouched by any of it and still reconciles.
+        assertThat(report().findings()).isEmpty();
         assertThat(payment).isNotNull();
     }
 
     @Test
-    void separateCadAndUsdAccountsStillReconcileIndependently() {
-        UUID usdAccount = UUID.randomUUID();
-        jdbc.update("INSERT INTO accounts (id,merchant_id,currency,opening_balance_minor,balance_minor) VALUES (?,?,'USD',?,?)",
-                usdAccount, "demo-merchant", 60_000, 60_000);
-        payments.capture("demo-merchant", key(), payments.authorize("demo-merchant", key(),
-                new AuthorizationCommand(usdAccount, 4_000, "USD", "US")).body().id());
-        UUID cadCaptured = capture(authorize(3_000));
-        refund(cadCaptured, 1_000);
+    void theProductionSchemaNowRefusesAReturnedTotalThatDisagreesWithItsOperations() {
+        UUID captured = capture(authorize(6_000));
+        refund(captured, 1_000);
 
-        // Each account is reconciled in its own currency, and neither is combined with the other.
-        ReconciliationReport cad = reconciliation.forMerchant("demo-merchant",
-                new ReconciliationRequest(accountId, 25, 500));
-        assertThat(cad.findings()).isEmpty();
-        assertThat(cad.status()).isEqualTo(ReconciliationReport.Status.CLEAN);
-        assertThat(cad.scope().currencies()).containsExactly("CAD");
+        // Within the capture cap, and still refused: the recorded total must equal the operations it
+        // summarises, whichever side of the relationship is written.
+        assertThatThrownBy(() -> jdbc.update("UPDATE payments SET returned_amount_minor = 900 WHERE id = ?", captured))
+                .as("a payment-only change cannot drift from its return operations")
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasStackTraceContaining("return operations total");
+        assertThatThrownBy(() -> jdbc.update("UPDATE payments SET returned_amount_minor = 1100 WHERE id = ?", captured))
+                .as("drifting upwards is the same defect in the other direction")
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasStackTraceContaining("return operations total");
 
-        ReconciliationReport usd = reconciliation.forMerchant("demo-merchant",
-                new ReconciliationRequest(usdAccount, 25, 500));
-        assertThat(usd.findings()).isEmpty();
-        assertThat(usd.status()).isEqualTo(ReconciliationReport.Status.CLEAN);
-        assertThat(usd.scope().currencies()).containsExactly("USD");
+        // Above the capture is refused by the row-level cap, which is a separate, still-present rule -
+        // named here so this assertion cannot pass on the equality check firing instead.
+        assertThatThrownBy(() -> jdbc.update("UPDATE payments SET returned_amount_minor = 6001 WHERE id = ?", captured))
+                .isInstanceOf(DataIntegrityViolationException.class)
+                .hasStackTraceContaining("payments_returned_within_capture");
+
+        assertThat(recordedReturnedTotal(captured)).isEqualTo(1_000);
+        assertThat(report().findings()).isEmpty();
     }
 
     @Test
@@ -345,6 +333,10 @@ class ReconciliationIntegrationTest {
         jdbc.update("INSERT INTO accounts (id,merchant_id,currency,opening_balance_minor,balance_minor) VALUES (?,?,'CAD',?,?)",
                 id, merchant, openingBalance, openingBalance);
         return id;
+    }
+
+    private long recordedReturnedTotal(UUID payment) {
+        return jdbc.queryForObject("SELECT returned_amount_minor FROM payments WHERE id = ?", Long.class, payment);
     }
 
     private long balance() {

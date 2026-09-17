@@ -68,12 +68,14 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 ## Recorded local result
 
-Recorded **2026-09-16 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
+Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw clean verify` passed **302 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
-**41 frontend unit tests** and **54 browser end-to-end tests** with retries disabled. The table below is
+`./mvnw clean verify` passed **307 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
+**42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled. That is the
+pre-checkpoint-10 hardening pass, recorded in full further down; the 302/41 figures it replaces belong
+to `aa6de43`. The table below is
 the checkpoint 8 record, kept because it is what the group breakdown was counted against; the checkpoint
-9 additions are listed in the section that follows it. The **302** figure is the current total and the
+9 additions are listed in the section that follows it. The **307** figure is the current total and the
 **213** figure is a historical record of an earlier revision — they are not two counts of the same thing.
 
 ### The earlier recorded result (checkpoint 8)
@@ -116,14 +118,15 @@ Backend tests went from 213 (checkpoint 8's recorded figure) to **282**, and bro
 | Reversal after a partial refund | Refused with `PAYMENT_NOT_REVERSIBLE`; refunding the remainder still works, and the summary says why | A "reversal" that silently means something different depending on history |
 | Cross-merchant refund, reversal and read | 404 for another merchant, 403 for the operations identity; no return written | Ownership enforced only by what the dashboard chooses to show |
 | Malformed compensating journals | The database refuses a second journal for one return, a wrong amount, a reversed direction, a second capture journal, and any deletion of entries | "Balanced" accepted as sufficient, when a balanced pair can still name the wrong account |
-| Database-level over-return | A direct UPDATE above the capture, and a return row disagreeing with the recorded total, are both refused | A cap that only exists in application code |
+| Database-level over-return | A direct UPDATE above the capture is refused by the row-level cap by name; a return row and a payment-only update that disagree with the recorded total are each refused by the equality rule | A cap that only exists in application code, and an equality checked from only one of the two sides that can break it |
 | Other payments on the same account | A refund credits the balance and leaves an unrelated hold exactly as it was; that authorization still captures | Refunded money silently reserved against work nobody requested |
 | Ordered return events | Four events in sequence, the two refunds distinguished by their return block, each naming its operation | Two partial refunds indistinguishable because the status did not move |
 | Refund events and shadow | No shadow task is enqueued during a bounded window after two refunds are delivered | A candidate's divergence rate depending on how often merchants issue refunds |
 | A refund during a broker outage | Commits with the broker unreachable; intent durable and unpublished; delivered in broker-offset order after recovery | A financial command made to depend on a broker |
 | Recovery with no in-process state | The dispatcher's lease, claim and breaker state are all discarded; the committed refund is then delivered from the outbox row alone, with its original identity. Deliberately **not** described as a restart: the JVM does not restart, and a genuine process boundary for an undelivered refund event is not demonstrated anywhere here | A "restart" test that only calls the same method twice, and a restart claim nothing actually crossed |
 | Reconciliation of valid state | A captured, partly refunded account reports CLEAN with its scope, snapshot, checks and limitations | A report whose silence cannot be distinguished from a report that checked nothing |
-| An inconsistent fixture | A skewed balance and a skewed returned total are each detected with expected, actual, delta, currency and references | A reconciliation that only agrees with itself |
+| An inconsistent fixture | A skewed balance is detected with expected, actual, delta, currency and references | A reconciliation that only agrees with itself |
+| Evidence the schema now refuses | Currency disagreement and a drifted returned total are rejected by the named constraint against the real schema, and separately detected by the real report against a throwaway database migrated only to V11 | A constraint dropped to keep a detection test, or a detector silently untested once the corruption became unwritable |
 | Reconciliation under concurrent load | Twelve reports while refunds and captures commit continuously: no findings | A snapshot so loose it invents discrepancies under ordinary traffic |
 | A bounded population | A limit below the population reports INCOMPLETE with no findings, and INCOMPLETE_WITH_DISCREPANCIES when something was also wrong | "Nothing found" read as "nothing wrong" |
 | Reconciliation as a mutation | Three consecutive reports over a known-broken account change no balance, no return, no journal | A report that repairs what it finds, destroying the evidence |
@@ -445,6 +448,12 @@ Two environmental details were corrected while adding these tests, both test-onl
   whether or not the server had destroyed anything. They now replay the cookie from an API request
   context outside the browser, where the header is honoured.
 
+- **An application container left attached to the test broker will eat the suite's events.** The
+  browser run uses a packaged container pointed at the disposable stack; leaving it running while
+  `./mvnw verify` starts gives the topics a second set of consumers in the same group. Eleven
+  delivery, breaker and shadow tests then fail in ways that read as a delivery regression rather than
+  as contention. `docker ps` before believing such a failure, and stop the container.
+
 - **Killing a run mid-test can leave fault injection installed.** The tests that inject storage failures
   create a trigger and drop it in a `finally` block, which a terminated JVM never reaches. A leftover
   trigger on `consumer_quarantine` blocks every quarantine insert, and since holding the partition is the
@@ -453,6 +462,170 @@ Two environmental details were corrected while adding these tests, both test-onl
   `test_` prefix, or reset the stack with `down -v`, before believing such a failure.
 
 Both demo scripts passed against the packaged application in the local Compose stack: `scripts/demo.sh` (**12 HTTP checks**) and `scripts/async-demo.sh` (**27 checks**). The browser suite passed **44 of 44** against that same packaged application, on first attempt with retries disabled. The asynchronous demo observed a payment authorized with the broker container stopped, the breaker OPEN with `/actuator/health/async` DEGRADED while readiness stayed UP, delivery resuming after restart with the original event id and the breaker closing again, a projection applied count that stayed at 1 after the same event was delivered twice more, a replay job whose membership stayed at 4 inputs when a later payment committed, a 409 when a policy version id was rebound to different content, and a shadow divergence (live APPROVE, candidate DECLINE at score 60) after which the balance was unchanged and held funds moved only by the new authorization's own hold.
+
+## The pre-checkpoint-10 hardening pass
+
+Baseline `aa6de43`, whose CI run passed 302 backend, 41 frontend unit and 54 browser tests. Four
+things changed: a remaining cross-generation idempotency collision, two database constraints the
+project had chosen to leave unenforced, and two browser tests that did not test what they said.
+
+### The cross-encoding idempotency collision
+
+The length-prefixed reason encoding fixed the `null`/absent ambiguity, but the receipt check that
+made it safe ran only in the **legacy fallback** branch. A request whose fingerprint hashed to the
+stored value directly was replayed without the receipt ever being consulted — so wherever an old
+unversioned encoding and the new one could produce the same string, the key answered for a command
+nobody sent.
+
+Reproduced through the real HTTP and database path before anything was changed, on both REFUND and
+REVERSAL, in both directions:
+
+| Stored under the legacy encoding | Submitted now | Before |
+| --- | --- | --- |
+| reason `"-"` | reason absent | **201**, replaying the wrong receipt |
+| reason `"4:null"` | reason `"null"` | **201**, replaying the wrong receipt |
+| reason `"1:a"` | reason `"a"` | **201**, replaying the wrong receipt |
+
+This is a changed-request identity and provenance defect, not an observed duplicate credit: the
+replay returns an existing receipt and moves no money.
+
+A version prefix on new fingerprints would not have resolved it, because the ambiguity lives in rows
+already written without one. The correction instead makes the **stored receipt the authority on every
+completed replay**, not just on the fallback path: the decoded response must describe the payment,
+the operation type, the normalised reason and — for a refund — the explicit amount that is being
+asked for now. That covers all three persisted generations at once and needed no migration or version
+column, because the discriminator is data the rows already carry.
+
+Each collision test carries a **control**: re-issuing the genuine legacy request must still replay its
+own receipt. Without it a fixture error would look identical to the fix working. Regression coverage
+asserts that every generation still replays its own legitimate retry, that the opposite direction of
+each collision also conflicts, and that a replayed return leaves exactly one operation, one journal,
+one credit and one event.
+
+### Two constraints, added as a deliberate hardening decision
+
+`V12` ties a payment's currency to its funding account (`payments(account_id, currency) →
+accounts(id, currency)`, no `ON UPDATE`), and `V13` extends returned-total equality to payment-only
+updates with a second deferred constraint trigger. Neither is a response to a demonstrated
+money-losing path: the review found no normal service path producing either inconsistency. ADR-0007
+records the reasoning, including the argument this withdraws.
+
+Both migrations detect incompatible rows **before** validating, and refuse with a count, an example
+payment, the reconciliation finding types that describe it, and an explicit statement that they will
+not repair financial data. Nothing is silently corrected, deleted or skipped.
+
+| Evidence | Where |
+| --- | --- |
+| An account cannot be redenominated out from under its payments; a payment cannot be created in a currency its account does not hold | `ReconciliationIntegrationTest`, asserting the named constraint rather than any database error |
+| CAD and USD stay independent — a USD payment, capture and refund on a USD account commit and reconcile | same test |
+| A payment-only returned total cannot drift downwards or upwards; an overshoot is still refused by the row-level cap, asserted by its own constraint name | `RefundIntegrationTest` |
+| A refusal rolls back the whole financial operation: the credit, the return operation and the total go back together, and the payment is still usable afterwards | `RefundIntegrationTest` |
+| Valid captures, partial refunds, full refunds, reversals and concurrent refunds still commit | the rest of `RefundIntegrationTest`, unchanged |
+| A populated database upgrades through V13 with its journals, events and stored idempotency responses intact | `MigrationUpgradeTest` |
+| A snapshot that disagrees refuses the upgrade, names the count and an example, and is left exactly as it was | `ReconciliationLegacyEvidenceTest`, one throwaway database per pre-flight |
+
+### Keeping the detector under test without weakening production
+
+The constraints make two of the reconciliation corruption fixtures unwritable. Rather than dropping a
+constraint to keep a test, the evidence is split by what each test can honestly establish:
+
+| Claim | Boundary exercised |
+| --- | --- |
+| Production refuses the invalid write | The real schema. The write is attempted through `JdbcTemplate` and the named constraint refuses it |
+| Valid data reconciles | The real schema and the real service: payments, captures, refunds and reversals |
+| The detector still identifies damaged evidence | A **private throwaway database migrated only to V11**, seeded there, read by the real `ReconciliationStore` and `ReconciliationService`, and dropped afterwards |
+
+The third is the case that matters for honesty. A database restored from a partial backup, or not yet
+upgraded, can hold rows nothing would write today. The fixture's returned-total drift is seeded the
+way it could actually have happened — the return and the total were written together and agreed, and a
+later update moved the total alone — with correct journals throughout, which is what made it invisible
+to everything except a check comparing the column against the rows it summarises. The report finds
+**exactly** the four seeded findings and nothing else, so the detector is shown to distinguish rather
+than to condemn everything it sees, and re-running it changes no balance, no return and no currency.
+
+The constraint's absence exists only inside a database created for one test. No migration is edited,
+nothing shared is weakened, and reconciliation stays read-only.
+
+### The delayed-identity browser scenario, rebuilt
+
+The previous version held an outgoing **request** before `route.continue()` — so nothing was ever
+delayed on the response side — and drove the identity change with `signIn`'s `page.goto`, which
+remounts the whole SPA and rebuilds its state from scratch. That remount is the one thing that makes
+the scenario safe by accident. It also waited 1.5 seconds and called that evidence.
+
+It is now a deterministic interleaving inside one document: the route handler fetches the server's real
+answer for the first merchant and holds **the response**, signals that it has it, and the test signs
+out and signs the second merchant in without navigating, then releases. Every step waits for a named
+signal.
+
+What it establishes is that the held response never reaches the next identity's screen — and it says
+which mechanism did that. The dashboard cancels the outstanding request at the transition, so the
+response is abandoned in the browser rather than received and rejected; the test asserts the
+cancellation, because that is what actually happens. The generation guard — the code that refuses a
+response arriving whole after the identity moved on — cannot be reached through that path, so it has
+its own focused test in `src/api/client.test.ts` where the response is delivered late and in full.
+
+Ownership is asserted by resource identity, not by an amount another merchant could legitimately
+share: every rendered row is read back from its own link, the first merchant's payment id is absent,
+and the ids on screen are confirmed to belong to the signed-in merchant **by querying the database**,
+not by comparing a rendered row count against a number taken from the same response that drew the rows.
+
+**The earlier CI failure remains unexplained.** Nothing in this rebuild establishes a cause for it, and
+none is claimed; the section above that records it is unchanged.
+
+### Browser pagination that actually pages
+
+`returns.spec.ts` created four returns against an API page size of 50, asserted on the single page it
+got, and never pressed the Older or Newest buttons its comment described. It now builds a payment with
+**52 return operations** — the first through the form, the rest through the API, because fifty trips
+through the form would take minutes and prove nothing the form's own tests do not — and traverses:
+
+- page one holds 50 rows, sequences 52 down to 3, with the payment's total stated separately from the
+  page length and no "Newest" control offered;
+- **Older returns** reaches sequences 2 and 1, with no "Older" control and a "Newest" one;
+- the two pages neither overlap nor leave a gap: their union is exactly 1–52;
+- **Newest** returns to the first page with the same 50 rows and the controls the other way round.
+
+A return committing between two page reads stays covered where it can be asserted without depending on
+the dashboard's five-second cache window: against the API, in `RefundIntegrationTest`, alongside the
+201-operation history that proves nothing is unreachable past the old cap. Both were kept.
+
+### First-attempt failures in this pass
+
+Recorded because a suite that only ever passes on the second run is not evidence.
+
+| What failed | Why | What it means |
+| --- | --- | --- |
+| Three idempotency collision pairs returned 201 instead of 409 | The defect, reproduced before being fixed | Intended |
+| The shared test database refused to migrate under V12, naming 4 payments denominated differently from their account | Corruption fixtures from earlier reconciliation tests were still in it | The pre-flight working exactly as designed. The **disposable** stack was recreated; the development database was not touched, and was separately confirmed to have no offending rows |
+| `ReconciliationIntegrationTest.aReturnedTotalThatDisagreesWithItsOperationsIsReported` and `RefundIntegrationTest.theReturnedTotalEqualityIsCheckedWhenAReturnIsWrittenAndNotOnEveryUpdate` | V13 contradicts both: they existed to assert the gap it closes | Removed and rewritten. The second's replacement asserts the rule from both sides |
+| A compile error: `ReturnCommand(UUID, ReturnType, int, null)` undefined | The amount is a boxed `Long` | Fixture only |
+| `isolation.spec.ts` timed out waiting for the second merchant's search response | My rendezvous, not the application: that response had already arrived before the wait began | The test now waits on rendered state instead |
+| `returns.spec.ts` showed "50 of 52" after returning to the newest page | React Query serves a page younger than its five-second `staleTime` from cache, so a return created moments earlier was not yet visible | The application is behaving as designed. The between-page assertion was dropped from the browser test; that coverage is the backend's |
+| `./mvnw clean verify` failed 11 Kafka-path tests | The disposable application container used for the browser run was still attached to the shared test broker, so its consumers were taking the suite's events out of the same topics under the same group | Environmental, and mine. Removing the container and re-running gave 307 of 307 with no other change. Recorded because the failure list — delivery ordering, breaker recovery, shadow isolation — looks exactly like a real delivery regression |
+
+### Recorded result for this pass
+
+Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, Kafka **3.9.1** and
+Playwright **1.63**, against a disposable application container on the disposable test stack — the
+development stack was left running and untouched throughout.
+
+- `./mvnw clean verify`: **307 backend tests**, 0 failures, 0 errors, 0 skipped
+- **42 frontend unit tests**
+- **54 browser end-to-end tests**, first attempt, retries disabled
+- `scripts/demo.sh` passed; `scripts/lifecycle-demo.sh` **26 checks**; `scripts/async-demo.sh`
+  **27 checks**; `scripts/recovery-demo.sh` **16 checks**
+
+This pass adds **eight test methods** net (272 to 280 `@Test` declarations; five parameterised classes
+expand to more executions than declarations): six in `RefundIntegrationTest` for the collision
+regressions, the two-sided returned-total rule and the constraint rollback, three in the new
+`ReconciliationLegacyEvidenceTest`, less the one reconciliation fixture the new constraints made
+unwritable — plus one in `client.test.ts` on the frontend.
+
+The previous record for `aa6de43` reads **302** backend tests, and 307 less the eight added here is
+299. I have not re-run `aa6de43` to reconcile that difference — its database would now be ahead of the
+migrations that revision knows about — so the 307 above is a measurement of this revision and the 302
+is quoted as what was recorded then, not as an arithmetic baseline for it.
 
 ## Failure cases and rationale
 

@@ -1793,6 +1793,11 @@ components:
         Merchant-scoped command identity. Retain the same key when retrying the same
         operation. Use a different key for each new operation. Replays return the
         original command snapshot, not a fresh read of the payment.
+
+        A replay is granted only when the stored result actually describes the command
+        being sent now - its payment, operation type, reason and explicit amount - and
+        not merely because the request hashes to the stored value. Anything else under a
+        used key is 409 IDEMPOTENCY_CONFLICT.
       schema:
         type: string
         minLength: 8

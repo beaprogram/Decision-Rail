@@ -326,6 +326,149 @@ class RefundIntegrationTest {
     }
 
     @Test
+    void aLegacyReasonThatLooksLikeTheNewEncodingIsNotTheRequestItResembles() throws Exception {
+        // The new encoding is unambiguous within itself, but it shares a space with the old one. A
+        // legacy record whose reason was literally the text the new encoding produces hashes to the
+        // same value as a different new request - and a direct hash match replayed without ever
+        // consulting the receipt, so the collision was accepted silently.
+        //
+        // Each pair below is: a legacy record whose reason was the left-hand text, then a new request
+        // whose reason is the right-hand one. They are different commands and must conflict.
+        assertLegacyReasonDoesNotAnswerFor("-", null);
+        assertLegacyReasonDoesNotAnswerFor("4:null", "null");
+        assertLegacyReasonDoesNotAnswerFor("1:a", "a");
+    }
+
+    @Test
+    void aReversalHasTheSameCrossEncodingCollisionsAndRefusesThemToo() throws Exception {
+        assertLegacyReversalReasonDoesNotAnswerFor("-", null);
+        assertLegacyReversalReasonDoesNotAnswerFor("4:null", "null");
+        assertLegacyReversalReasonDoesNotAnswerFor("1:a", "a");
+    }
+
+    @Test
+    void theOppositeDirectionOfEachCrossEncodingCollisionAlsoConflicts() throws Exception {
+        // A record written in the new encoding, retried with the text the old encoding would have
+        // produced for a different reason. The hashes do not collide this way round, but the pair is
+        // asserted so the protection is shown to hold in both directions rather than assumed.
+        assertNewReasonDoesNotAnswerFor(null, "-");
+        assertNewReasonDoesNotAnswerFor("null", "4:null");
+        assertNewReasonDoesNotAnswerFor("a", "1:a");
+    }
+
+    @Test
+    void everyFingerprintGenerationStillReplaysItsOwnLegitimateRetry() throws Exception {
+        // Three generations of stored identity, each retried with exactly the request that wrote it.
+        // All three must replay; a fix that refused any of them would strand the commands idempotency
+        // exists to protect.
+
+        // 1. Pre-fix record, retried with its own reason - including reasons that look like the new
+        //    encoding, which is the case the collision above is about.
+        for (String reason : new String[] {"-", "4:null", "1:a", "customer asked", "null"}) {
+            UUID payment = captured(3_000);
+            String key = key();
+            Reply original = refund(payment, 900, reason, key, DEMO);
+            assertThat(original.status()).as("reason %s", reason).isEqualTo(201);
+            rewriteStoredHashToTheOldEncoding(key, "REFUND|" + payment + "|900|" + reason);
+
+            Reply retried = refund(payment, 900, reason, key, DEMO);
+            assertThat(retried.status()).as("legacy retry of reason %s", reason).isEqualTo(201);
+            assertThat(retried.body()).isEqualTo(original.body());
+            assertThat(returnCount(payment)).isEqualTo(1);
+        }
+
+        // 2. A record written in the current encoding, retried identically.
+        UUID current = captured(3_000);
+        String currentKey = key();
+        Reply first = refund(current, 900, "-", currentKey, DEMO);
+        assertThat(refund(current, 900, "-", currentKey, DEMO).body()).isEqualTo(first.body());
+
+        // 3. An absent reason, in the current encoding, which is what "-" collides with.
+        UUID absent = captured(3_000);
+        String absentKey = key();
+        Reply none = refund(absent, 900, null, absentKey, DEMO);
+        assertThat(refund(absent, 900, null, absentKey, DEMO).body()).isEqualTo(none.body());
+        assertThat(returnCount(absent)).isEqualTo(1);
+    }
+
+    @Test
+    void aReplayedReturnLeavesExactlyOneOperationJournalCreditAndEvent() throws Exception {
+        UUID payment = captured(4_000);
+        String key = key();
+        Reply original = refund(payment, 1_500, "-", key, DEMO);
+        assertThat(original.status()).isEqualTo(201);
+        String storedBefore = storedResponseBody(key);
+        rewriteStoredHashToTheOldEncoding(key, "REFUND|" + payment + "|1500|-");
+
+        for (int attempt = 0; attempt < 3; attempt++) {
+            assertThat(refund(payment, 1_500, "-", key, DEMO).body()).isEqualTo(original.body());
+        }
+
+        assertThat(returnCount(payment)).isEqualTo(1);
+        assertThat(returnJournalCount(payment)).isEqualTo(1);
+        assertThat(recordedReturnedTotal(payment)).isEqualTo(1_500);
+        assertThat(outboxCount(payment)).as("authorized, captured, refunded - and no more").isEqualTo(3);
+        assertFunds(accountId, 100_000 - 4_000 + 1_500, 0);
+        assertThat(storedResponseBody(key))
+                .as("a replay must not rewrite the stored receipt").isEqualTo(storedBefore);
+    }
+
+    /** A committed legacy record with {@code legacyReason}; a new request with {@code submitted} must conflict. */
+    private void assertLegacyReasonDoesNotAnswerFor(String legacyReason, String submitted) throws Exception {
+        UUID payment = captured(3_000);
+        String key = key();
+        Reply original = refund(payment, 1_000, legacyReason, key, DEMO);
+        assertThat(original.status()).as("setting up legacy reason %s", legacyReason).isEqualTo(201);
+        rewriteStoredHashToTheOldEncoding(key, "REFUND|" + payment + "|1000|" + legacyReason);
+
+        Reply collision = refund(payment, 1_000, submitted, key, DEMO);
+        assertThat(collision.status())
+                .as("legacy reason %s must not answer for submitted reason %s", legacyReason, submitted)
+                .isEqualTo(409);
+        assertThat(collision.body().path("code").asText()).isEqualTo("IDEMPOTENCY_CONFLICT");
+        assertThat(returnCount(payment)).isEqualTo(1);
+        // The control: the request that really did commit under that key still replays, so the
+        // rejection above is about a changed request rather than a broken fixture.
+        assertThat(refund(payment, 1_000, legacyReason, key, DEMO).body()).isEqualTo(original.body());
+    }
+
+    private void assertLegacyReversalReasonDoesNotAnswerFor(String legacyReason, String submitted) throws Exception {
+        UUID payment = captured(3_000);
+        String key = key();
+        Reply original = reverse(payment, legacyReason, key, DEMO);
+        assertThat(original.status()).as("setting up legacy reversal reason %s", legacyReason).isEqualTo(201);
+        rewriteStoredHashToTheOldEncoding(key, "REVERSAL|" + payment + "|" + legacyReason);
+
+        Reply collision = reverse(payment, submitted, key, DEMO);
+        assertThat(collision.status())
+                .as("legacy reversal reason %s must not answer for %s", legacyReason, submitted)
+                .isEqualTo(409);
+        assertThat(returnCount(payment)).isEqualTo(1);
+        assertThat(reverse(payment, legacyReason, key, DEMO).body()).isEqualTo(original.body());
+    }
+
+    /** A record in the current encoding with {@code storedReason}; a request with {@code submitted} must conflict. */
+    private void assertNewReasonDoesNotAnswerFor(String storedReason, String submitted) throws Exception {
+        UUID payment = captured(3_000);
+        String key = key();
+        Reply original = refund(payment, 1_000, storedReason, key, DEMO);
+        assertThat(original.status()).isEqualTo(201);
+
+        assertThat(refund(payment, 1_000, submitted, key, DEMO).status())
+                .as("stored reason %s must not answer for submitted %s", storedReason, submitted)
+                .isEqualTo(409);
+        assertThat(returnCount(payment)).isEqualTo(1);
+        assertThat(refund(payment, 1_000, storedReason, key, DEMO).body()).isEqualTo(original.body());
+    }
+
+    private String storedResponseBody(String key) {
+        return jdbc.queryForObject("""
+                SELECT response_body::text FROM idempotency_records
+                WHERE merchant_id = 'demo-merchant' AND idempotency_key = ?
+                """, String.class, key);
+    }
+
+    @Test
     void aBlankReasonIsTheSameRequestAsNoReasonAndWhitespaceIsStripped() throws Exception {
         UUID payment = captured(5_000);
         String key = key();
@@ -776,12 +919,12 @@ class RefundIntegrationTest {
     }
 
     @Test
-    void theReturnedTotalEqualityIsCheckedWhenAReturnIsWrittenAndNotOnEveryUpdate() throws Exception {
+    void theReturnedTotalEqualityIsEnforcedFromWhicheverSideIsWritten() throws Exception {
         UUID payment = captured(5_000);
         refund(payment, 1_000, null, key(), DEMO);
 
-        // What the trigger does enforce: writing a return whose amount disagrees with the payment's
-        // recorded total is refused, so the two cannot be made to disagree by adding a return.
+        // From the return side: a return whose amount disagrees with the payment's recorded total is
+        // refused, so the two cannot be made to disagree by adding an operation.
         assertThatThrownBy(() -> transactions.executeWithoutResult(status -> jdbc.update("""
                 INSERT INTO payment_returns
                     (id, payment_id, merchant_id, account_id, return_type, amount_minor, currency, sequence_number, created_at)
@@ -791,25 +934,76 @@ class RefundIntegrationTest {
                 .isInstanceOf(DataAccessException.class)
                 .hasStackTraceContaining("return operations total");
 
-        // What it does not: the constraint trigger fires on inserting a return, so an update that
-        // touches only the payment is not checked against the return rows at all. The row-level cap
-        // still applies, so the total cannot exceed the capture - but within that cap it can be made
-        // to disagree with the operations it is supposed to summarise.
-        //
-        // This is the narrower guarantee the documentation now states. It is deliberately not widened
-        // by a trigger on payments: reconciliation is the layer that catches records disagreeing with
-        // each other, and a database that made this particular disagreement impossible would also make
-        // that detection impossible to demonstrate. See docs/adr/0007.
-        jdbc.update("UPDATE payments SET returned_amount_minor = 900 WHERE id = ?", payment);
-        assertThat(recordedReturnedTotal(payment)).isEqualTo(900);
-        assertThat(returnedTotal(payment)).as("the operations are unchanged and now disagree").isEqualTo(1_000);
+        // And from the payment side, which is what V13 added. An update touching only the payment used
+        // to escape the check entirely, because the trigger was attached to inserts on payment_returns;
+        // within the row-level cap the total could be moved to a value its operations did not sum to.
+        // Both directions are refused now, by the same rule reached from the other side.
+        assertThatThrownBy(() -> jdbc.update("UPDATE payments SET returned_amount_minor = 900 WHERE id = ?", payment))
+                .as("a payment-only decrease is not a correction, it is a disagreement")
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("return operations total");
+        assertThatThrownBy(() -> jdbc.update("UPDATE payments SET returned_amount_minor = 1100 WHERE id = ?", payment))
+                .as("and neither is an increase")
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("return operations total");
 
-        // Above the capture is still refused, whatever writes it.
+        // The row-level cap is a separate rule and still the one that answers for an overshoot. Named
+        // explicitly so this cannot pass on the equality check firing instead.
         assertThatThrownBy(() -> jdbc.update("UPDATE payments SET returned_amount_minor = 5001 WHERE id = ?", payment))
-                .isInstanceOf(DataAccessException.class);
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("payments_returned_within_capture");
 
-        // Put it back so this test leaves its own payment reconciling.
-        jdbc.update("UPDATE payments SET returned_amount_minor = 1000 WHERE id = ?", payment);
+        // Nothing above changed anything, and the ordinary two-sided write still commits: the trigger
+        // is deferred, so a return operation and the new total are judged together on the state that
+        // actually commits rather than on whichever statement runs first.
+        assertThat(recordedReturnedTotal(payment)).isEqualTo(1_000);
+        assertThat(returnedTotal(payment)).isEqualTo(1_000);
+        refund(payment, 2_500, null, key(), DEMO);
+        assertThat(recordedReturnedTotal(payment)).isEqualTo(3_500);
+        assertThat(returnedTotal(payment)).isEqualTo(3_500);
+
+        // Including the write that exhausts the capture exactly, which is the boundary the cap and the
+        // equality check meet at.
+        refund(payment, 1_500, null, key(), DEMO);
+        assertThat(recordedReturnedTotal(payment)).isEqualTo(5_000);
+        assertThat(returnedTotal(payment)).isEqualTo(5_000);
+    }
+
+    @Test
+    void aReturnedTotalRefusalRollsBackEveryFinancialWriteInItsTransaction() throws Exception {
+        UUID payment = captured(5_000);
+        refund(payment, 1_000, null, key(), DEMO);
+        long balanceBefore = accountBalance();
+        long journalsBefore = count("SELECT count(*) FROM ledger_journals WHERE payment_id = ?", payment);
+
+        // One transaction that credits the account, writes a return operation, and moves the payment's
+        // total to a figure the operations do not sum to. The constraint is deferred, so all three
+        // statements succeed and the refusal arrives at COMMIT - which is exactly the case where a
+        // partial application would be worst: money credited, operation recorded, totals wrong.
+        UUID orphan = UUID.randomUUID();
+        assertThatThrownBy(() -> transactions.executeWithoutResult(status -> {
+            jdbc.update("UPDATE accounts SET balance_minor = balance_minor + 400 WHERE id = ?", accountId);
+            jdbc.update("""
+                    INSERT INTO payment_returns
+                        (id, payment_id, merchant_id, account_id, return_type, amount_minor, currency, sequence_number, created_at)
+                    VALUES (?, ?, 'demo-merchant', ?, 'REFUND', 400, 'CAD', 11, now())
+                    """, orphan, payment, accountId);
+            jdbc.update("UPDATE payments SET returned_amount_minor = 1300 WHERE id = ?", payment);
+        }))
+                .isInstanceOf(DataAccessException.class)
+                .hasStackTraceContaining("return operations total");
+
+        assertThat(accountBalance()).as("the credit went back with everything else").isEqualTo(balanceBefore);
+        assertThat(count("SELECT count(*) FROM payment_returns WHERE id = ?", orphan))
+                .as("no return operation survives a refused transaction").isZero();
+        assertThat(count("SELECT count(*) FROM ledger_journals WHERE payment_id = ?", payment)).isEqualTo(journalsBefore);
+        assertThat(recordedReturnedTotal(payment)).isEqualTo(1_000);
+        assertThat(returnedTotal(payment)).isEqualTo(1_000);
+
+        // And the payment is still usable afterwards: a refused write is not a poisoned record.
+        Reply after = refund(payment, 500, null, key(), DEMO);
+        assertThat(after.status()).isEqualTo(201);
+        assertThat(recordedReturnedTotal(payment)).isEqualTo(1_500);
     }
 
     // ----- events -----
@@ -959,6 +1153,14 @@ class RefundIntegrationTest {
 
     private String statusOf(UUID payment) {
         return jdbc.queryForObject("SELECT status FROM payments WHERE id = ?", String.class, payment);
+    }
+
+    private long accountBalance() {
+        return jdbc.queryForObject("SELECT balance_minor FROM accounts WHERE id = ?", Long.class, accountId);
+    }
+
+    private long count(String sql, Object argument) {
+        return jdbc.queryForObject(sql, Long.class, argument);
     }
 
     private long returnCount(UUID payment) {

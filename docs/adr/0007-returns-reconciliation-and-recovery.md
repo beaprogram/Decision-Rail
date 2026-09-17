@@ -71,30 +71,85 @@ enforced in three independent places.
    what remains.
 2. **A row-level CHECK** on `payments` refuses `returned_amount_minor` above `captured_amount_minor`,
    whatever wrote it.
-3. **A deferred constraint trigger** on `payment_returns` refuses a commit where the sum of return
-   operations exceeds the capture, *or* where the payment's recorded total disagrees with that sum.
+3. **Deferred constraint triggers** on `payment_returns` *and* on `payments` refuse a commit where the
+   sum of return operations exceeds the capture, or where the payment's recorded total disagrees with
+   that sum — whichever side of the relationship was written.
 
-### What the third one actually covers, precisely
+### The third one, and how it came to cover both sides (V13)
 
-It fires **when a return is written**, because that is the event it is attached to. So a return whose
-amount would leave the payment's total disagreeing with the sum of its operations is refused, and the
-two cannot be driven apart by adding a return.
+It originally fired only when a return was written, because that is the event it was attached to. An
+update touching only the payment was therefore not checked against the return rows at all: within the
+row-level cap, `returned_amount_minor` could be moved to a value its operations did not sum to. The
+guarantee was "checked whenever a return is recorded", not "true of every row at every moment", and an
+earlier revision of this document claimed the latter.
 
-It does **not** fire on an update that touches only the payment. Within the row-level cap — which does
-apply to every write — `returned_amount_minor` can be moved to a value the return rows do not sum to.
-The guarantee is therefore "checked whenever a return is recorded", not "true of every row at every
-moment", and this document previously claimed the latter.
+That gap was first documented rather than closed, on the argument that reconciliation exists to catch
+separately maintained records disagreeing with each other, and that a schema making this disagreement
+impossible would leave the detector with nothing to demonstrate. **That argument is withdrawn.** It
+trades a production invariant for the convenience of a test fixture, which is the wrong way round:
+prevention and detection are separate concerns and can be evidenced separately. `V13` adds a second
+deferred constraint trigger, on `payments`, so the same rule is reached from whichever side is written,
+and the detector is exercised against a snapshot of the schema as it stood before the constraint
+existed (see *Keeping detection honest* below).
 
-That narrower guarantee is deliberate rather than an omission. Widening it to a trigger on `payments`
-was considered and rejected: reconciliation exists precisely to catch separately maintained records
-disagreeing with each other, and a schema that made this particular disagreement impossible would also
-make that detection impossible to exercise — leaving a check nothing could ever demonstrate. The
-constraint that prevents *loss* (never more returned than captured) is enforced on every write; the
-constraint that detects *drift* is left to the layer built to report it. Both halves are covered by
-tests that assert what fires and what does not.
+Both triggers are deferred, so a refund that writes its return operation and the payment's new total in
+one transaction is still judged once, on the state that actually commits, rather than on whichever
+statement ran first.
 
-Concurrency is handled by the payment row lock, not by the trigger: two refunds on one payment
-serialise, and eight concurrent 300-unit refunds against a 1000-unit capture commit exactly three.
+Concurrency is handled by the payment row lock. The shared rule takes `SELECT … FOR UPDATE` on the
+payment before summing its returns, so two transactions changing the same payment validate one after
+the other against committed state rather than each against a view that looks consistent alone. In
+ordinary operation the transaction already holds that lock — the service takes the payment row, then
+the account — so the re-acquisition is a no-op and introduces no new lock order. Eight concurrent
+300-unit refunds against a 1000-unit capture still commit exactly three.
+
+### Currency agreement, made structural (V12)
+
+A payment must be denominated in the currency its funding account holds. The service has always
+refused anything else and no service path produces a mismatch, but until `V12` nothing in the schema
+said so: the invariant was true by convention. Three of the four relationships were already structural
+— `payment_returns → payments` on `(payment_id, account_id, currency)`, and `enforce_balanced_journal()`
+requiring a journal's currency to equal its payment's — and the one nothing checked was the payment
+against the account above it. A composite foreign key `payments(account_id, currency) →
+accounts(id, currency)` closes it, and currency agreement now holds transitively across account,
+payment, return and journal.
+
+There is deliberately **no `ON UPDATE` action**. Changing an account's currency while payments
+reference it is refused rather than cascaded: a cascade would silently redenominate committed
+payments, which is the corruption the constraint exists to prevent rather than a resolution of it.
+CAD and USD remain independent — the constraint ties a payment to its own account, not the system to
+one currency.
+
+Neither of these is a response to an observed loss. They are hardening: the review found no normal
+service path producing either inconsistency.
+
+### Upgrading a database that already disagrees
+
+Both migrations look for incompatible rows before validating anything, and refuse with a count, an
+example payment, the reconciliation finding types that describe it, and a statement that the migration
+will not repair financial data. A bare foreign-key violation names one row and explains nothing; worse,
+an upgrade that "fixed" such rows would destroy the only evidence that something went wrong, using the
+same code whose output is in doubt. The refusal leaves the database exactly as it was, and the upgrade
+stops at the migration that refused.
+
+### Keeping detection honest
+
+With those constraints in place, the reconciliation fixtures that used to create this damage are
+rejected by the schema, so the evidence is separated into three kinds and each is established where it
+can honestly be established:
+
+| Claim | Where |
+| --- | --- |
+| Production refuses the invalid write | `ReconciliationIntegrationTest`, against the real schema: the write is attempted and the named constraint refuses it |
+| Valid data reconciles | `ReconciliationIntegrationTest`, over payments, captures, refunds and reversals made through the service |
+| The detector still identifies damaged evidence | `ReconciliationLegacyEvidenceTest`, against a **private throwaway database migrated only to V11** and dropped afterwards |
+
+The third is the one that needs care. A database restored from a partial backup, or simply not yet
+upgraded, can hold rows nothing would write today, and a report that could not see them would be
+reassuring about exactly the state it exists to find. So the constraint's absence is confined to a
+database that exists for the length of one test — no production migration is edited, no constraint is
+dropped anywhere shared — and the same file asserts that upgrading that snapshot refuses with the
+message above rather than repairing it.
 
 ### Reversal after a partial refund: refused
 

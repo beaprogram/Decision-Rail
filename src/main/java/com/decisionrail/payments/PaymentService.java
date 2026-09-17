@@ -20,6 +20,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -59,7 +60,13 @@ public class PaymentService {
         String currency = input.currency();
         String country = input.country();
         String fingerprint = "AUTHORIZE|" + command.accountId() + "|" + command.amountMinor() + "|" + currency + "|" + country;
-        return idempotent(merchant, key, fingerprint, StoredResponseKind.PAYMENT, null, () -> {
+        return idempotent(merchant, key, fingerprint, StoredResponseKind.PAYMENT, null,
+                stored -> stored instanceof PaymentView payment
+                        && payment.accountId().equals(command.accountId())
+                        && payment.amountMinor() == command.amountMinor()
+                        && payment.currency().equals(currency)
+                        && payment.country().equals(country),
+                () -> {
             AccountView account = store.account(merchant, command.accountId(), true);
             if (!account.currency().equals(currency)) throw new PaymentException("CURRENCY_MISMATCH", 422, "Payment currency must match the account currency.");
             // Timed at the calling boundary. The evaluator itself stays free of Micrometer, Spring and
@@ -87,16 +94,20 @@ public class PaymentService {
 
     @Transactional(timeout = 15)
     public CommandResult<PaymentView> capture(String merchant, String key, UUID paymentId) {
-        // No legacy fingerprint: this encoding is unchanged. Capture, void and authorize fingerprints
-        // contain no optional free text, so they were never ambiguous and rewriting them would break
-        // every key already stored against them for no benefit.
+        // No superseded fingerprint: this encoding is unchanged. Capture, void and authorize
+        // fingerprints contain no optional free text, so they were never ambiguous and rewriting them
+        // would break every key already stored against them for no benefit. The receipt is still
+        // checked, because a stored response naming a different payment is not this command's answer
+        // however the hash came to match.
         return idempotent(merchant, key, "CAPTURE|" + paymentId, StoredResponseKind.PAYMENT, null,
+                describesTheSamePayment(paymentId),
                 () -> transition(merchant, paymentId, PaymentStatus.CAPTURED));
     }
 
     @Transactional(timeout = 15)
     public CommandResult<PaymentView> voidPayment(String merchant, String key, UUID paymentId) {
         return idempotent(merchant, key, "VOID|" + paymentId, StoredResponseKind.PAYMENT, null,
+                describesTheSamePayment(paymentId),
                 () -> transition(merchant, paymentId, PaymentStatus.VOIDED));
     }
 
@@ -132,7 +143,7 @@ public class PaymentService {
                 ? "REFUND|" + command.paymentId() + "|" + command.amountMinor() + "|" + canonical(reason)
                 : "REVERSAL|" + command.paymentId() + "|" + canonical(reason);
         return idempotent(merchant, key, fingerprint, StoredResponseKind.RETURN,
-                legacyReturnFingerprint(command, reason),
+                supersededReturnFingerprint(command, reason), describesTheSameReturn(command, reason),
                 () -> performReturn(merchant, command, reason));
     }
 
@@ -258,38 +269,34 @@ public class PaymentService {
     }
 
     /**
-     * How a return key written before the canonical encoding is still recognised as the same command.
+     * The fingerprint a return key written before the canonical encoding would carry.
      *
-     * <p>Changing the fingerprint changes the hash stored against every key that came before it, and a
-     * legitimate retry of a return that already committed must not start failing as a conflict. The old
-     * fingerprint is therefore still computed and compared, but only as a fallback, and only when the
-     * stored receipt confirms that the reason really was the one being sent now.
-     *
-     * <p>That second condition is what stops the fallback reintroducing the defect. The ambiguity was
-     * between an absent reason and the literal text "null", and the receipt records which of the two
-     * actually committed - so a request carrying one can never replay a receipt written for the other,
-     * whichever encoding produced the stored hash.
+     * <p>Still computed so a legitimate retry of a return that already committed is recognised rather
+     * than refused as a conflict. It is only ever a second hash to accept; whether the key really is
+     * this command is settled by the stored receipt, which is checked either way.
      */
-    private LegacyFingerprint legacyReturnFingerprint(ReturnCommand command, String reason) {
-        String legacy = command.type() == ReturnType.REFUND
+    private String supersededReturnFingerprint(ReturnCommand command, String reason) {
+        return command.type() == ReturnType.REFUND
                 ? "REFUND|" + command.paymentId() + "|" + command.amountMinor() + "|" + reason
                 : "REVERSAL|" + command.paymentId() + "|" + reason;
-        return new LegacyFingerprint(sha256(legacy), stored -> {
-            if (!(stored instanceof ReturnReceiptView receipt)) return false;
-            return java.util.Objects.equals(receipt.reason(), reason);
-        });
     }
 
     /**
-     * A superseded fingerprint, and the test that decides whether a key carrying it is really this
-     * command.
+     * Whether a stored receipt is the answer to this return command.
      *
-     * @param hash           the hash the previous encoding would have produced for this request
-     * @param confirmedBy    applied to the decoded stored response; must agree before the older hash is
-     *                       accepted, so a hash collision between two genuinely different requests
-     *                       under the old encoding cannot become a replay
+     * <p>Every field a caller can vary is compared, because the receipt is what makes a replay
+     * truthful: the payment it belongs to, which kind of return it was, the reason as normalised, and
+     * for a refund the exact amount. A reversal names no amount - it always returns the whole capture -
+     * so there is nothing of the caller's to compare there.
      */
-    private record LegacyFingerprint(String hash, java.util.function.Predicate<Object> confirmedBy) {}
+    private static Predicate<Object> describesTheSameReturn(ReturnCommand command, String reason) {
+        return stored -> stored instanceof ReturnReceiptView receipt
+                && receipt.paymentId().equals(command.paymentId())
+                && receipt.returnType() == command.type()
+                && java.util.Objects.equals(receipt.reason(), reason)
+                && (command.type() != ReturnType.REFUND
+                        || receipt.amountMinor() == command.amountMinor());
+    }
 
     @Transactional(readOnly = true)
     public PaymentView payment(String merchant, UUID id) { return store.payment(merchant, id, false); }
@@ -347,6 +354,11 @@ public class PaymentService {
     @Transactional(readOnly = true)
     public List<LedgerEntryView> ledger(String merchant, UUID id) { return store.ledger(merchant, id); }
 
+    /** A capture or void replay must describe the payment the path named. */
+    private static Predicate<Object> describesTheSamePayment(UUID paymentId) {
+        return stored -> stored instanceof PaymentView payment && payment.id().equals(paymentId);
+    }
+
     private CommandResult<PaymentView> transition(String merchant, UUID id, PaymentStatus target) {
         // All lifecycle operations lock payment first, then its account. Authorization locks only account.
         PaymentView existing = store.payment(merchant, id, true);
@@ -389,18 +401,38 @@ public class PaymentService {
      * reconciling against.
      */
     private <T> CommandResult<T> idempotent(String merchant, String key, String fingerprint,
-                                            StoredResponseKind kind, LegacyFingerprint legacy,
+                                            StoredResponseKind kind, String supersededFingerprint,
+                                            Predicate<Object> describesThisCommand,
                                             Supplier<CommandResult<T>> action) {
         if (key == null || !key.matches("[A-Za-z0-9._:-]{8,128}")) {
             throw new PaymentException("INVALID_IDEMPOTENCY_KEY", 400, "Idempotency-Key must contain 8-128 letters, digits, dots, underscores, colons or hyphens.");
         }
         String hash = sha256(fingerprint);
         PaymentStore.IdempotencyRecord record = store.claimKey(merchant, key, hash);
-        if (!record.requestHash().equals(hash) && !matchesSupersededFingerprint(record, kind, legacy)) {
-            metrics.counter("decisionrail.idempotency.conflicts").increment();
-            throw new PaymentException("IDEMPOTENCY_CONFLICT", 409, "This Idempotency-Key was already used for a different request.");
+        boolean hashRecognised = record.requestHash().equals(hash)
+                || (supersededFingerprint != null && sha256(supersededFingerprint).equals(record.requestHash()));
+        if (!hashRecognised) {
+            throw conflict();
         }
         if (record.responseBody() != null) {
+            // The stored response is the authority on what this key answered for, and it is consulted
+            // on every replay - not only when the hash came from an older encoding.
+            //
+            // A hash is a summary of a request, and two encodings of the same field share one space:
+            // a record written when the reason was concatenated raw, whose reason happened to read
+            // like the text the current encoding produces, hashes exactly where a different request
+            // hashes today. A direct hash match was therefore not proof of sameness, and accepting it
+            // as proof replayed one command's receipt for another's request. The receipt records what
+            // the operation actually was, so comparing against it settles the question whichever
+            // generation wrote the row.
+            StoredResponseKind stored = record.responseKind() == null ? StoredResponseKind.PAYMENT : record.responseKind();
+            if (stored != kind) {
+                throw conflict();
+            }
+            Object decoded = store.decodeResponse(record, kind);
+            if (!describesThisCommand.test(decoded)) {
+                throw conflict();
+            }
             metrics.counter("decisionrail.idempotency.replayed").increment();
             // This request is its own trace. It points at the operation it is replaying rather than
             // pretending to be it, and the original's provenance is left exactly as it was.
@@ -408,7 +440,7 @@ public class PaymentService {
                 correlation.tagCurrentSpan("decisionrail.replay_of_trace_id", record.originTraceId());
             }
             @SuppressWarnings("unchecked")
-            T body = (T) store.decodeResponse(record, kind);
+            T body = (T) decoded;
             return new CommandResult<>(body, record.httpStatus(), true);
         }
         CommandResult<T> result = action.get();
@@ -416,25 +448,10 @@ public class PaymentService {
         return result;
     }
 
-    /**
-     * Whether a key stored under a previous fingerprint encoding is this same command.
-     *
-     * <p>Only consulted when the current fingerprint does not match, so a key written since the change
-     * takes this path never. It requires both the older hash and the stored response to agree: the hash
-     * alone is what was ambiguous, and accepting it alone would carry the old defect forward for every
-     * key that predates the fix.
-     *
-     * <p>A key that was claimed but never completed has no stored response to confirm anything, and
-     * nothing committed under it either, so there is no replay to protect and it is refused as a
-     * conflict like any other mismatch.
-     */
-    private boolean matchesSupersededFingerprint(PaymentStore.IdempotencyRecord record,
-                                                 StoredResponseKind kind, LegacyFingerprint legacy) {
-        if (legacy == null || record.responseBody() == null) return false;
-        if (!legacy.hash().equals(record.requestHash())) return false;
-        StoredResponseKind stored = record.responseKind() == null ? StoredResponseKind.PAYMENT : record.responseKind();
-        if (stored != kind) return false;
-        return legacy.confirmedBy().test(store.decodeResponse(record, kind));
+    private PaymentException conflict() {
+        metrics.counter("decisionrail.idempotency.conflicts").increment();
+        return new PaymentException("IDEMPOTENCY_CONFLICT", 409,
+                "This Idempotency-Key was already used for a different request.");
     }
 
     /**

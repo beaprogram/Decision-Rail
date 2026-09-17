@@ -358,6 +358,54 @@ Not supported, deliberately: editing a journal, deleting a return, setting a bal
 idempotency key for work that may exist. The first three are rejected by the database; the fourth is
 rejected by arithmetic, eventually.
 
+### An upgrade that refuses to apply
+
+Two migrations validate a relationship across rows that already exist, and both check for incompatible
+records **before** touching anything:
+
+- **`V12`** — every payment must be denominated in the currency its funding account holds.
+- **`V13`** — every payment's `returned_amount_minor` must equal the sum of its return operations.
+
+If either finds rows that disagree, the migration fails and the startup stops there, with a message
+naming how many rows, one example payment, and the reconciliation finding types that describe them:
+
+```
+Cannot enforce payment/account currency agreement: 4 payment(s) are denominated
+differently from their funding account.
+DETAIL:  For example payment 0f2c…. Reconciliation reports these as PAYMENT_CURRENCY_MISMATCH
+         and ACCOUNT_CURRENCY_MISMATCH, with the account and currencies involved.
+HINT:    Investigate those records and correct them with compensating operations before
+         upgrading. This migration deliberately does not alter, delete or repair financial data.
+```
+
+The database is left exactly as the migration found it: the failed migration rolls back, and the
+schema stays at the last version that applied. Nothing is repaired, adjusted or deleted on your behalf
+— an upgrade that "fixed" such rows would destroy the only evidence that something went wrong.
+
+What to do:
+
+```bash
+# Which payments, and what the disagreement is.
+psql ... --command "SELECT p.id, p.currency AS payment, a.currency AS account, p.account_id
+                      FROM payments p JOIN accounts a ON a.id = p.account_id
+                     WHERE p.currency <> a.currency"
+
+psql ... --command "SELECT p.id, p.returned_amount_minor AS recorded,
+                           coalesce(sum(r.amount_minor), 0) AS operations
+                      FROM payments p LEFT JOIN payment_returns r ON r.payment_id = p.id
+                     GROUP BY p.id, p.returned_amount_minor
+                    HAVING p.returned_amount_minor <> coalesce(sum(r.amount_minor), 0)"
+```
+
+Then reconcile (`GET /v1/reconciliation`) to see the same records with expected, actual, delta and the
+references they were derived from, and correct them with compensating operations — the same rule as
+every other financial correction here. Only then re-run the upgrade. Do not edit the migration, and do
+not adjust the rows to make it pass.
+
+If the rows came from a test fixture rather than from real activity — which is where they came from in
+this project's own history — the answer is to recreate that **disposable** database, never the
+development one.
+
 ### Database and broker loss
 
 Stated plainly, because the alternative is implying something that was never tested.

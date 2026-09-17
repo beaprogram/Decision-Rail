@@ -1,7 +1,7 @@
 package com.decisionrail.migration;
 
+import com.decisionrail.support.ThrowawayDatabase;
 import java.sql.Connection;
-import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.Statement;
 import java.util.ArrayList;
@@ -25,29 +25,25 @@ import static org.assertj.core.api.Assertions.assertThat;
  * are using. It is dropped again afterwards.
  */
 class MigrationUpgradeTest {
-    private static final String ADMIN_DATABASE = "postgres";
 
     @Test
     void upgradingADatabaseWithExistingRecordsBackfillsDeliveryStateWithoutDisturbingMoney() throws Exception {
-        Target target = Target.fromEnvironment();
-        String database = "decisionrail_upgrade_" + UUID.randomUUID().toString().replace("-", "").substring(0, 12);
-        createDatabase(target, database);
-        try {
-            String url = target.urlFor(database);
+        try (ThrowawayDatabase database = ThrowawayDatabase.create("decisionrail_upgrade")) {
+            String url = database.url();
 
             // Stop at V2: exactly the schema the previous delivery left behind.
             Flyway atV2 = Flyway.configure()
-                    .dataSource(url, target.username(), target.password())
+                    .dataSource(url, database.username(), database.password())
                     .locations("classpath:db/migration")
                     .target("2")
                     .load();
             assertThat(atV2.migrate().migrationsExecuted).isEqualTo(2);
 
-            Seeded seeded = seedRecordsAsV1WouldHaveWritten(url, target);
+            Seeded seeded = seedRecordsAsV1WouldHaveWritten(database);
 
             // Now apply everything added after V2.
             Flyway toLatest = Flyway.configure()
-                    .dataSource(url, target.username(), target.password())
+                    .dataSource(url, database.username(), database.password())
                     .locations("classpath:db/migration")
                     .load();
             // Counted from the migrations on the classpath rather than hard-coded, so adding one does
@@ -57,7 +53,7 @@ class MigrationUpgradeTest {
             assertThat(expectedUpgrades).as("there are upgrade migrations to apply").isGreaterThanOrEqualTo(4);
             assertThat(toLatest.migrate().migrationsExecuted).isEqualTo(expectedUpgrades);
 
-            try (Connection connection = DriverManager.getConnection(url, target.username(), target.password())) {
+            try (Connection connection = database.open()) {
                 assertFinancialRecordsSurvived(connection, seeded);
                 assertOutboxBackfill(connection, seeded);
                 assertNewTablesExist(connection);
@@ -68,8 +64,6 @@ class MigrationUpgradeTest {
                 assertHistoricalEventsAreNotRewrittenForReturns(connection, seeded);
                 assertReturnsWorkAgainstAnUpgradedCapture(connection, seeded);
             }
-        } finally {
-            dropDatabase(target, database);
         }
     }
 
@@ -270,7 +264,7 @@ class MigrationUpgradeTest {
      * Writes rows in the shape V1 and V2 produced: outbox rows with no sequence, no status, and an
      * envelope that carries only the original five fields.
      */
-    private Seeded seedRecordsAsV1WouldHaveWritten(String url, Target target) throws Exception {
+    private Seeded seedRecordsAsV1WouldHaveWritten(ThrowawayDatabase database) throws Exception {
         UUID accountId = UUID.randomUUID();
         UUID capturedPayment = UUID.randomUUID();
         UUID authorizedPayment = UUID.randomUUID();
@@ -278,7 +272,7 @@ class MigrationUpgradeTest {
         List<UUID> capturedEvents = List.of(UUID.randomUUID(), UUID.randomUUID());
         UUID authorizedEvent = UUID.randomUUID();
 
-        try (Connection connection = DriverManager.getConnection(url, target.username(), target.password())) {
+        try (Connection connection = database.open()) {
             connection.setAutoCommit(false);
             try (Statement statement = connection.createStatement()) {
                 statement.execute("""
@@ -444,45 +438,6 @@ class MigrationUpgradeTest {
     }
 
     // ----- infrastructure -----
-
-    private record Target(String host, int port, String username, String password) {
-        static Target fromEnvironment() {
-            String url = System.getenv("JDBC_URL");
-            if (url == null || url.isBlank()) url = "jdbc:postgresql://127.0.0.1:55433/decisionrail_test";
-            String withoutScheme = url.substring("jdbc:postgresql://".length());
-            String authority = withoutScheme.substring(0, withoutScheme.indexOf('/'));
-            String host = authority.contains(":") ? authority.substring(0, authority.indexOf(':')) : authority;
-            int port = authority.contains(":") ? Integer.parseInt(authority.substring(authority.indexOf(':') + 1)) : 5432;
-            String username = orDefault(System.getenv("JDBC_USERNAME"), "decisionrail");
-            String password = orDefault(System.getenv("JDBC_PASSWORD"), "local-test-only");
-            return new Target(host, port, username, password);
-        }
-
-        String urlFor(String database) {
-            return "jdbc:postgresql://" + host + ":" + port + "/" + database;
-        }
-
-        private static String orDefault(String value, String fallback) {
-            return value == null || value.isBlank() ? fallback : value;
-        }
-    }
-
-    private void createDatabase(Target target, String database) throws Exception {
-        try (Connection connection = DriverManager.getConnection(target.urlFor(ADMIN_DATABASE), target.username(), target.password());
-             Statement statement = connection.createStatement()) {
-            statement.execute("CREATE DATABASE " + database);
-        }
-    }
-
-    private void dropDatabase(Target target, String database) {
-        try (Connection connection = DriverManager.getConnection(target.urlFor(ADMIN_DATABASE), target.username(), target.password());
-             Statement statement = connection.createStatement()) {
-            statement.execute("DROP DATABASE IF EXISTS " + database + " WITH (FORCE)");
-        } catch (Exception cleanupFailure) {
-            // A leaked throwaway database is untidy, not a test failure worth masking a real one with.
-            System.err.println("Could not drop upgrade-check database " + database + ": " + cleanupFailure.getMessage());
-        }
-    }
 
     private String single(Connection connection, String sql) throws Exception {
         try (Statement statement = connection.createStatement(); ResultSet rows = statement.executeQuery(sql)) {

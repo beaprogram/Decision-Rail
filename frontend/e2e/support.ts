@@ -210,6 +210,37 @@ export async function authorizeThroughUi(
   return url.slice(url.lastIndexOf('/') + 1);
 }
 
+/**
+ * Records a refund through the public API, as the given merchant.
+ *
+ * Used only to build a fixture large enough to have more than one page of history. Driving fifty-odd
+ * refunds through the form would take minutes and would prove nothing the form's own tests do not
+ * already prove; what the browser test needs is a payment whose history genuinely spans pages, and
+ * these are real returns made by the real service, not rows inserted behind it.
+ */
+export async function refundThroughApi(
+  who: Credentials,
+  paymentId: string,
+  amountMinor: number,
+  reason: string,
+): Promise<void> {
+  const context = await request.newContext({
+    baseURL: process.env.DASHBOARD_BASE_URL ?? 'http://localhost:8080',
+    httpCredentials: { username: who.username, password: who.password },
+  });
+  try {
+    const response = await context.post(`/v1/payments/${paymentId}/refunds`, {
+      headers: { 'Idempotency-Key': `e2e-refund-${crypto.randomUUID()}` },
+      data: { amountMinor, reason },
+    });
+    if (response.status() !== 201) {
+      throw new Error(`Refund of ${amountMinor} was refused with ${response.status()}: ${await response.text()}`);
+    }
+  } finally {
+    await context.dispose();
+  }
+}
+
 /** Saves a screenshot for the delivery report. Sanitised: no credential is ever on screen. */
 export async function capture(page: Page, name: string): Promise<void> {
   const directory = process.env.SCREENSHOT_DIR;

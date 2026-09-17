@@ -207,6 +207,31 @@ describe('apiFetch', () => {
       expect(result).toBeInstanceOf(StaleIdentityError);
     });
 
+    it('discards a whole search response that arrives after the identity changed', async () => {
+      // The browser case this stands in for: a payment search for one merchant is still outstanding
+      // when someone else signs in. In the running dashboard React Query cancels that request at the
+      // transition, so the response usually never reaches this code at all - which is exactly why the
+      // guard needs its own test. Here nothing cancels it: the response arrives whole, headers and
+      // body together, after the generation moved on, and it must still be refused.
+      const response = deferred<Response>();
+      fetchMock.mockImplementation(() => response.promise);
+
+      const pending = apiFetch('/ui/payments?limit=25').catch((error) => error);
+      advanceIdentityGeneration();
+      response.resolve(
+        responseWith({
+          status: 200,
+          body: async () => '{"payments":[{"id":"previous-tenant-payment","amountMinor":2300}],"matchedCount":1}',
+        }),
+      );
+
+      const result = await pending;
+      expect(result).toBeInstanceOf(StaleIdentityError);
+      // Nothing from it is handed back in any form, not even an empty page: a caller that received a
+      // value would render it.
+      expect(result).not.toHaveProperty('payments');
+    });
+
     it('does not report a stale transport failure as this identity\'s failure', async () => {
       const request = deferred<Response>();
       fetchMock.mockImplementation(() => request.promise);

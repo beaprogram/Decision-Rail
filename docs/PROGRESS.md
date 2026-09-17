@@ -46,12 +46,12 @@ the checkpoints are not equally difficult. The detailed scope and completion cri
 
 ## Verification record
 
-Local evidence recorded **2026-09-14 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
-**3.9.1**.
+Local evidence recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
+**3.9.1**, after the pre-checkpoint-10 hardening pass.
 
-- Pinned-wrapper build and suite: **302 backend tests passed**, with **0 failures, 0 errors, and
-  0 skipped**, up from 213 at checkpoint 8 and 282 before the correction pass.
-- Dashboard: **41 frontend unit tests** and **54 browser end-to-end tests** with retries disabled, up
+- Pinned-wrapper build and suite: **307 backend tests passed**, with **0 failures, 0 errors, and
+  0 skipped**, up from 213 at checkpoint 8.
+- Dashboard: **42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled, up
   from 44.
 - Demos: **12 checks** (transactional), **26 checks** (lifecycle and reconciliation), **27 checks**
   (asynchronous) and **16 checks** (restart recovery, on its own disposable stack), all against a
@@ -215,6 +215,34 @@ Record actual commands, test counts, failures, and meaningful limitations here a
 - The `ShadowStaleWorkerTest` flake stays resolved: an ordering race in `DeliveryFaults.clear()`, with
   the earlier shared-database hypothesis withdrawn. See [verification.md](verification.md).
 
+### The pre-checkpoint-10 hardening pass
+
+Four things, none of which extend scope:
+
+- **A cross-encoding idempotency collision, closed.** The direct hash-match branch replayed a stored
+  response without ever consulting the receipt, so wherever an old unversioned fingerprint encoding and
+  the current one could produce the same string, a key answered for a command nobody sent — reproduced
+  through the real HTTP and database path on both refund and reversal before being fixed. The stored
+  receipt is now the authority on **every** completed replay, which covers all three persisted
+  generations without a migration or a version column. A changed-request identity defect, not an
+  observed duplicate credit.
+- **Two schema constraints, added as a deliberate decision.** `V12` ties a payment's currency to its
+  funding account; `V13` extends returned-total equality to updates that touch only the payment. The
+  earlier position — leaving the second unenforced so reconciliation had something to detect — is
+  withdrawn in [ADR 0007](adr/0007-returns-reconciliation-and-recovery.md). Prevention and detection
+  are now evidenced separately: the production schema refuses the write, and the detector is exercised
+  against a private throwaway database migrated only to V11. Neither constraint responds to a
+  demonstrated loss; no service path produced either inconsistency.
+- **Two browser tests that did not test what they claimed.** The delayed-identity scenario held an
+  outgoing request rather than a response and changed identity by navigating, which remounts the SPA;
+  it is now a deterministic same-document interleaving with explicit rendezvous, asserting ownership by
+  resource identity confirmed against the database. The returns pagination test created four returns
+  against a page size of 50 and never pressed the paging controls; it now builds 52 operations and
+  traverses both ways.
+- **An upgrade that finds pre-existing disagreement refuses and explains**, naming the count, an
+  example payment and the reconciliation finding types, and repairs nothing. The runbook is in
+  [operator-guide.md](operator-guide.md).
+
 ## Remaining checkpoints
 
 - [ ] 10. Free-budget hosting assessment, secure public demo deployment, and release walkthrough.
@@ -342,7 +370,7 @@ financial mutation. Preserve the dashboard's own: the `/ui` session chain separa
 idempotency key, and an unknown outcome reported as unknown rather than as success or failure. The
 architecture tests enforce the isolation rules; do not relax them to make a new dependency convenient.
 
-Schema changes go in new Flyway migrations after V9. Do not edit an applied migration, and extend the
+Schema changes go in new Flyway migrations after V13. Do not edit an applied migration, and extend the
 migration upgrade check when a new one backfills anything.
 
 Keep generated credentials, `.env`, local database and runtime files under `.local/`, and build output

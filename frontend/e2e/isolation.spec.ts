@@ -1,5 +1,26 @@
 import { expect, test } from '@playwright/test';
-import { authorizeThroughUi, capture, identities, signIn, signOut } from './support';
+import {
+  authorizeThroughUi,
+  capture,
+  createIsolatedAccount,
+  identities,
+  signIn,
+  signInOnCurrentPage,
+  signOut,
+  sql,
+} from './support';
+
+/** Every payment search the dashboard makes. */
+const SEARCH = '**/ui/payments?*';
+
+/** A promise this test settles itself, so each step waits for a signal rather than for a duration. */
+function deferred<T = void>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => {
+    resolve = settle;
+  });
+  return { promise, resolve };
+}
 
 /**
  * Tenant isolation, including the moment an identity changes.
@@ -25,45 +46,118 @@ test.describe('merchant isolation', () => {
     await capture(page, '14-cross-tenant-refused');
   });
 
-  test('a slow response for the previous identity never lands on the next one', async ({ page }) => {
+  /**
+   * A search response for one merchant, deliberately held open across a sign-out and a sign-in, in one
+   * document.
+   *
+   * Three things this is careful about, because the previous version of it was not:
+   *
+   *  - **No navigation.** `page.goto` would remount the SPA and rebuild its state from scratch, which
+   *    is the one thing that makes this scenario safe by accident. Everything here happens by clicking
+   *    inside the application the first merchant was already using.
+   *  - **The response is held, not the request.** The route handler fetches the server's real answer
+   *    for the first merchant and keeps it in hand, so the interleaving is a completed response waiting
+   *    to be delivered rather than a request that never left.
+   *  - **No sleeps.** Each step waits for a named signal: the response being in hand, the transition
+   *    finishing, the next merchant's own search resolving.
+   *
+   * What it can establish is that the held response does not reach the next identity's screen. The
+   * dashboard cancels the outstanding request when the identity changes, so in this path the response
+   * is abandoned in the browser rather than being received and rejected; that is asserted below as
+   * cancellation, which is what actually happens. The generation guard - the code that refuses a
+   * response which does arrive whole after the identity moved on - cannot be reached through this path
+   * and is covered directly in src/api/client.test.ts.
+   */
+  test('a held response for the previous identity is abandoned at the transition', async ({ page }) => {
+    // The next identity needs resources of its own, so the ownership assertions below have something
+    // to be true of rather than passing on an empty table.
+    const theirAccount = await createIsolatedAccount('other-merchant', 'CAD', 5_000_000);
+    await signIn(page, identities.otherMerchant());
+    const theirs = await authorizeThroughUi(page, '41.00', { accountId: theirAccount });
+    await signOut(page);
+
     await signIn(page, identities.merchant());
     const mine = await authorizeThroughUi(page, '23.00');
 
-    // Hold the first merchant's search response open. This is the only interception in the suite:
-    // the delay has to be produced deliberately, and the response itself is the server's real one.
-    let release: (() => void) | null = null;
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await page.route('**/ui/payments?*', async (route) => {
-      await held;
-      await route.continue();
+    // Rendezvous points. Nothing below waits on a duration.
+    const inHand = deferred<void>();
+    const release = deferred<void>();
+    let heldBody = '';
+    let firstSearchHeld = false;
+    let deliveryOutcome: 'delivered' | 'abandoned' | null = null;
+
+    await page.route(SEARCH, async (route) => {
+      // Only the first search is held. The next merchant's own search must go straight through, or
+      // this test would be waiting on itself.
+      if (firstSearchHeld) {
+        await route.continue();
+        return;
+      }
+      firstSearchHeld = true;
+      // The server's real response for this merchant, obtained now and kept.
+      const response = await route.fetch();
+      heldBody = await response.text();
+      inHand.resolve();
+      await release.promise;
+      try {
+        await route.fulfill({ response });
+        deliveryOutcome = 'delivered';
+      } catch {
+        // The page is no longer waiting for it.
+        deliveryOutcome = 'abandoned';
+      }
     });
 
-    await page.goto('/dashboard/payments');
-    // Sign out while that request is still outstanding.
-    await page.unroute('**/ui/payments?*');
+    // Chromium reports the abandonment as a failed request; captured before it can happen.
+    const abandoned = page.waitForEvent('requestfailed', {
+      predicate: (request) => request.url().includes('/ui/payments?'),
+      timeout: 30_000,
+    });
+
+    // Inside the application: a click on the sidebar, not a navigation.
+    await page.getByRole('navigation', { name: 'Dashboard sections' }).getByRole('link', { name: 'Payments' }).click();
+    await expect(page.getByRole('heading', { name: 'Payments', level: 1 })).toBeVisible();
+    await inHand.promise;
+
+    // The response now exists and is this merchant's. It has not been delivered to the page.
+    expect(heldBody).toContain(mine);
+    expect(page.url()).toContain('/dashboard/payments');
+
+    // The identity changes while it is outstanding, in the same document.
     await signOut(page);
-    release?.();
+    await signInOnCurrentPage(page, identities.otherMerchant());
 
-    // Sign in as the other merchant and let the held response arrive.
-    await signIn(page, identities.otherMerchant());
-    await page.goto('/dashboard/payments');
-    await page.waitForTimeout(1_500);
+    // Let it go. The transition has already happened.
+    release.resolve();
+    const failedRequest = await abandoned;
+    expect(failedRequest.failure()?.errorText ?? '').toMatch(/abort/i);
+    expect(deliveryOutcome).not.toBe('delivered');
 
-    // The first merchant's payment must not be on this screen. Both assertions are scoped to the
-    // results table, because that is where a leaked payment would appear and a page-wide text search
-    // is a substring match: "23.00" also matches a legitimate "123.00", and the amount alone is not
-    // evidence of a leak without the row it belongs to.
-    const results = page.locator('tbody tr');
-    await expect(results.filter({ hasText: mine })).toHaveCount(0);
+    // The second merchant is on the same route the first one was reading - the URL never changed - so
+    // the screen now showing is this identity's own search. Waited for by the row it must contain
+    // rather than by a timer or by a response event that may already have happened.
+    await expect(page.getByRole('heading', { name: 'Payments', level: 1 })).toBeVisible();
+    await expect(page.locator(`tbody tr a[href$="/payments/${theirs}"]`)).toBeVisible();
+
+    // Ownership, established from resource identity rather than from an amount another merchant could
+    // legitimately also have. Every payment on screen is named by its own link.
+    const rendered = await page.locator('tbody tr a[href*="/payments/"]').evaluateAll((links) =>
+      links.map((link) => (link as HTMLAnchorElement).getAttribute('href')?.split('/').pop() ?? ''),
+    );
+    expect(rendered.length).toBeGreaterThan(0);
+    expect(rendered).toContain(theirs);
+    expect(rendered).not.toContain(mine);
+
+    // And confirmed against the database rather than against the same response that drew the rows:
+    // a count taken from the payload cannot testify about the payload.
+    const owners = await sql(
+      `SELECT DISTINCT merchant_id FROM payments WHERE id IN (${rendered.map((id) => `'${id}'`).join(',')})`,
+    );
+    expect(owners.split('\n').map((line) => line.trim()).filter(Boolean)).toEqual(['other-merchant']);
+
+    // The first merchant's payment is nowhere on the screen, by identity.
     await expect(page.getByText(mine)).toHaveCount(0);
-    // Anchored to a whole cell, so only a row genuinely showing this payment's amount counts.
-    await expect(page.locator('tbody td').filter({ hasText: /^23\.00 CAD$/ })).toHaveCount(0);
-    // And every row that is here belongs to the merchant now signed in: the count the server reports
-    // for this identity is the number of rows rendered, so nothing extra has been mixed in.
-    const matched = Number(await page.locator('.stat', { hasText: 'Shown on this page' }).locator('.stat-value').innerText());
-    await expect(results).toHaveCount(matched);
+    await expect(page.locator(`a[href$="/payments/${mine}"]`)).toHaveCount(0);
     // And the identity shown is the one actually signed in.
     await expect(page.getByText('other-merchant', { exact: true })).toBeVisible();
     await capture(page, '15-identity-switch');
