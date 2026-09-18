@@ -62,7 +62,7 @@ Tests share one database on purpose, and append-only history is retained so the 
 
 CI runs the same `compose.test.yaml` stack rather than workflow service containers, so the documented local command and the remote build exercise identical infrastructure. It then builds the Docker image, starts the container, and runs both demo scripts without publishing the image.
 
-[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35287845550) passed on revision `d9cea82`, the checkpoint 10 corrections: 380 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. The [preceding runs](https://github.com/beaprogram/Decision-Rail/actions/runs/35275604071) passed on `1977084` with 359 backend tests, on `aec16d7` with 329, on `995ba63` with 318 and on `fdc6d96` with 310, and an [earlier one](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35295428689) passed on revision `a4d94d6`, the R7 correction (`v0.10.2`): 402 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. The [preceding runs](https://github.com/beaprogram/Decision-Rail/actions/runs/35287845550) passed on `d9cea82` with 380 backend tests, on `1977084` with 359, on `aec16d7` with 329, on `995ba63` with 318 and on `fdc6d96` with 310, and an [earlier one](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 Test reports are written under `target/surefire-reports/`; the JaCoCo report is generated under `target/site/jacoco/`. CI uploads available reports when a verification job finishes, including on failure. Coverage is a diagnostic aid, not a substitute for meaningful assertions.
 
@@ -1201,7 +1201,7 @@ passed, and then the staging check decides.
 
 ### Rehearsal on disposable PostgreSQL and Kafka
 
-On the `decisionrail-public` project on this machine, from an image built from this tree:
+On the `decisionrail-public` project on this machine, first from an image built from this tree (the table below), then again from the published artifact (the section after the recorded result):
 
 | Step | Result |
 | --- | --- |
@@ -1240,6 +1240,56 @@ host, which does not yet exist.
 - `./mvnw clean verify`: **402 backend tests**, 0 failures, 0 errors, 0 skipped - 380 plus the 22
   guard tests - from an empty database. No application code changed in this pass; the browser suite,
   demos, collector checks and harness smoke are exercised by CI on the pushed revision.
+- Remotely, [CI run 35295428689](https://github.com/beaprogram/Decision-Rail/actions/runs/35295428689)
+  concluded `success` on every step for the delivered revision `a4d94d6`, including the 54 browser
+  tests with retries disabled, the demos, restart recovery and both collector checks; the conclusion
+  was read from the run itself, not from a watcher's exit code.
+- The tag `v0.10.2` on that commit ran
+  [the release workflow](https://github.com/beaprogram/Decision-Rail/actions/runs/35401797703)
+  (`success`), publishing `ghcr.io/beaprogram/decision-rail:sha-a4d94d6aa8cb69a0935111d7791580750d5dd435`
+  (also `:v0.10.2`). Read fresh from the registry afterwards, both tags resolve to the multi-platform
+  **index** `sha256:5c851bb410f7823f0e5c000f93489c0ca0cf2040e47e86ef08b4d03c4fcf2c4e`, whose children are
+  `linux/arm64` `sha256:35fa0daf44d3661f2732ac38dfcd3c73b10618cf1dcaffa4de0c7ea3eb8e7436` and
+  `linux/amd64` `sha256:4e775322964a44fa2d8b60e8aa0f36cee8ca7b1ff46eaf251b982adc4237425f`; both children
+  carry revision label and `APP_COMMIT` `a4d94d6…`. The release is at
+  [v0.10.2](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.2); the v0.10.1 release
+  carries a note pointing to it. `v0.10.0` and `v0.10.1` still resolve to `1977084` and `d9cea82`.
+
+### The published artifact, pulled anonymously and exercised
+
+The image was pulled with an isolated Docker configuration holding no credentials (the user's own
+configuration and login were not touched), and started in public mode on the disposable
+`decisionrail-public` project with its own generated credentials, `tls internal` and ports 8480/8443.
+`GET /actuator/info` reported commit `a4d94d6…`, image `sha-a4d94d6…` and migration `V15`; readiness
+answered 200; the public-demo banner was present; `/actuator/health/async/asyncDelivery` answered 401
+anonymously; the eleventh `HEAD` reconciliation request was refused with 429. Only `linux/arm64` was
+executed here; `linux/amd64` is verified by digest and labels, not by running it.
+
+The R7 procedure was then run against that image, with the application's real consumers rather than a
+fake `docker`:
+
+| Step | Result |
+| --- | --- |
+| Seed, then `backup.sh` at T | `COHERENT published=14 pending=0`; manifest `version 1`, `durable-receipts`, `verified: true`, SHA-256 equal to the dump's. T: 8 payments, 14 published, 28 receipts |
+| `backup.sh` with the observation made unreadable (`consumer_quarantine` renamed for the duration) | refused: `UNVERIFIED expected one row from the database, got 3 line(s): ERROR: relation "consumer_quarantine" does not exist…`; no dump or manifest written; application started again |
+| `backup.sh` with one published event's shadow receipt removed (parked, then put back) | refused: `INCOHERENT published=14 missing_projection=0 missing_shadow=1`; no dump or manifest written; application started again |
+| Two payments after T (T2: 10 payments, 16 published, 32 receipts, 0 duplicates, 2 broker records) | — |
+| The incoherent legacy-style dump (built by restoring the verified dump into a scratch database, deleting one projection receipt, dumping without a manifest) without `--legacy-dump` | refused before the application was stopped: `INVALID no manifest…`; it kept running |
+| The same with `--legacy-dump` | staged; `INCOHERENT published=14 missing_projection=1`; refused; live fingerprint unchanged, broker volume unchanged, staging database dropped, application stopped |
+| The verified dump paired with a manifest carrying a tampered checksum | refused before the application was stopped: `INVALID dump checksum … does not match the manifest's …` |
+| `restore.sh` of the verified snapshot over T2 | manifest `VALID`; staged `COHERENT published=14`; live database replaced; broker volume recreated (0 records); application `STOPPED and was not started`. Back to T's fingerprint: 8 payments, 14 published, 28 receipts, **14 of 14** holding both receipts |
+| `up.sh`, then one payment | 9 payments, 15 published, 30 receipts, 0 duplicate receipts, 0 quarantine, **1** broker record: the restored PUBLISHED events were not resent |
+
+Harness mistakes on the way, none in the scripts: my first post-backup payments hit a wrong path (404)
+and then a wrong credential variable (401) and a non-UUID account (400), so those steps were repeated
+until real activity existed; and a scratch copy made with `CREATE DATABASE … TEMPLATE` was refused by
+PostgreSQL while the application held sessions, so its empty dump was refused by `restore.sh` at the
+staging step ("the dump could not be restored into the staging database", application stopped, live
+untouched) rather than at the coherence step - itself a correct refusal, and the intended incoherent
+dump was then built from the verified dump instead.
+
+Teardown was confirmed by project name; the development stack's schema (V11), payment count (622) and
+broker start time were unchanged throughout.
 
 ## Failure cases and rationale
 

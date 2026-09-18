@@ -357,7 +357,11 @@ manifest before replacing the database and deleting the broker volume. Both were
 stubbed commands and corrected in `v0.10.2`: coherence is established from the durable consumer
 receipts in PostgreSQL rather than parsed from a CLI, and restore validates the manifest and
 re-establishes coherence on staged data before its first destructive step. Rehearsed end to end on a
-disposable stack, including refusals that left the live database and broker untouched.
+disposable stack, including refusals that left the live database and broker untouched, first from a
+local build and then from the published image. Released as `v0.10.2` on `a4d94d6`
+([CI](https://github.com/beaprogram/Decision-Rail/actions/runs/35295428689),
+[release](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.2),
+`ghcr.io/beaprogram/decision-rail:sha-a4d94d6aa8cb69a0935111d7791580750d5dd435`).
 
 The public instance is **not ready for exposure** until the live checks in `deploy/README.md` have
 been run on the actual host; that remains pending on owner access and available free capacity.

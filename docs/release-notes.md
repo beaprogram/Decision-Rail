@@ -2,7 +2,16 @@
 
 ## v0.10.2 - R7 backup and restore corrections
 
-Revision and image: recorded in [verification.md](verification.md) under this release once published.
+Revision `a4d94d6aa8cb69a0935111d7791580750d5dd435`, verified by
+[CI run 35295428689](https://github.com/beaprogram/Decision-Rail/actions/runs/35295428689) and published by
+[release run 35401797703](https://github.com/beaprogram/Decision-Rail/actions/runs/35401797703) as
+`ghcr.io/beaprogram/decision-rail:sha-a4d94d6aa8cb69a0935111d7791580750d5dd435` (also `:v0.10.2`; pin to
+the `sha-` tag or a digest). Multi-platform **index** (what the tags resolve to)
+`sha256:5c851bb410f7823f0e5c000f93489c0ca0cf2040e47e86ef08b4d03c4fcf2c4e`; `linux/arm64` child
+`sha256:35fa0daf44d3661f2732ac38dfcd3c73b10618cf1dcaffa4de0c7ea3eb8e7436`; `linux/amd64` child
+`sha256:4e775322964a44fa2d8b60e8aa0f36cee8ca7b1ff46eaf251b982adc4237425f`. Release:
+[v0.10.2](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.2); evidence, including the
+procedure exercised against the published image, in [verification.md](verification.md).
 Supersedes `v0.10.1` for the two remaining R7 defects; `v0.10.0` and `v0.10.1`, their tags, images and
 recordings are preserved unchanged. No visible behaviour changed.
 
