@@ -54,7 +54,7 @@ delivered revision `d9cea82`, tagged `v0.10.1`. The release image is
 `ghcr.io/beaprogram/decision-rail:sha-d9cea820d158e66f3013a5c2311ab29a028a2dcc` (index
 `sha256:9712ec58…`, arm64 child `sha256:613ba544…`, amd64 child `sha256:7666355f…`).
 
-- Pinned-wrapper build and suite: **380 backend tests passed**, with **0 failures, 0 errors, and
+- Pinned-wrapper build and suite: **402 backend tests passed**, with **0 failures, 0 errors, and
   0 skipped**, up from 213 at checkpoint 8. The 310 recorded for `fdc6d96` was correct; a 307 that
   appeared briefly in [verification.md](verification.md) was a counting mistake of mine, explained
   there.
@@ -350,6 +350,14 @@ writing to `/tmp/kafka-logs` with an empty volume. Established from the scripts 
 an online database snapshot uncoordinated with the broker's committed offsets, and a restore that
 started the newer image before an older one could be selected. Also corrected: an image guard that
 accepted `stable`, and release notes that called the amd64 child digest the image's digest.
+
+A further review of `v0.10.1` found R7 still open in two places: `backup.sh` turned missing or
+unreadable consumer-position evidence into "zero lag", and `restore.sh` only warned about a missing
+manifest before replacing the database and deleting the broker volume. Both were reproduced with
+stubbed commands and corrected in `v0.10.2`: coherence is established from the durable consumer
+receipts in PostgreSQL rather than parsed from a CLI, and restore validates the manifest and
+re-establishes coherence on staged data before its first destructive step. Rehearsed end to end on a
+disposable stack, including refusals that left the live database and broker untouched.
 
 The public instance is **not ready for exposure** until the live checks in `deploy/README.md` have
 been run on the actual host; that remains pending on owner access and available free capacity.

@@ -1,5 +1,31 @@
 # Release notes
 
+## v0.10.2 - R7 backup and restore corrections
+
+Revision and image: recorded in [verification.md](verification.md) under this release once published.
+Supersedes `v0.10.1` for the two remaining R7 defects; `v0.10.0` and `v0.10.1`, their tags, images and
+recordings are preserved unchanged. No visible behaviour changed.
+
+- **Backup no longer infers zero lag from missing evidence.** The v0.10.1 script summed a Kafka CLI's
+  `LAG` column, turning an error message, an empty answer, a header, or a `-` into zero - reproduced
+  with stubs: each case exited 0, announced zero lag, dumped, and wrote `consumerLagAtSnapshot: 0`.
+  Coherence is now asked of PostgreSQL directly: every PUBLISHED outbox event must hold, for each
+  consumer group, the receipt or quarantine row that group's contract writes. Anything that is not a
+  complete, self-consistent answer is unverified, and unverified is never coherent. An empty
+  environment is reported as such. On refusal nothing is written and the application is restarted.
+- **Restore establishes coherence before any destructive step.** The v0.10.1 script warned about a
+  missing manifest and continued to rename the live database and delete the broker volume -
+  reproduced with stubs. Now the manifest is validated (format, version, fields, coherence claim,
+  SHA-256 against the dump) before the application is stopped; the dump is restored into a staging
+  database; coherence is re-established on the staged data and its published count compared with the
+  manifest; and only then is the live database swapped and the broker reset. Every refusal leaves
+  the live database and broker untouched and the application stopped.
+- **Legacy dumps** (manifestless, v0.10.0 online dumps) are refused by default; `--legacy-dump`
+  admits one to the same staging check, which decides.
+
+Public deployment remains pending and the instance is **not ready for exposure** until the live
+checks in `deploy/README.md` have run on the actual host.
+
 ## v0.10.1 - Checkpoint 10 corrections
 
 Revision `d9cea82`, tag `v0.10.1`, image `ghcr.io/beaprogram/decision-rail:sha-d9cea820d158e66f3013a5c2311ab29a028a2dcc`.

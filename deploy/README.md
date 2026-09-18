@@ -80,8 +80,8 @@ curl -s https://decisionrail.duckdns.org/actuator/health/readiness
 | Script | What it does |
 | --- | --- |
 | `bin/status.sh` | liveness, readiness, async delivery details (with the operations credential), revision, containers |
-| `bin/backup.sh` | a **coherent** backup: stops the app, waits for zero consumer lag, dumps the database, writes a manifest, starts the app. Refuses if lag cannot reach zero or the broker cannot be asked |
-| `bin/restore.sh <dump>` | stops the app, replaces the database from the dump (into a fresh database, swapped in only on success), resets the broker to empty, and **leaves the app stopped**; requires typing the project name |
+| `bin/backup.sh` | a **coherent** backup: stops the app, establishes from the database that every published event's consumer state is durable, dumps, writes a checksummed manifest, starts the app. Refuses - writing nothing - if that cannot be established |
+| `bin/restore.sh <dump> [--legacy-dump]` | validates the manifest against the dump, stops the app, restores into a **staging** database, re-establishes coherence there, and only then replaces the live database and resets the broker; **leaves the app stopped**; requires typing the project name |
 | `bin/rollback.sh <image> [--restore <dump>]` | switches to an older image only if it knows every migration the database has applied; with `--restore`, restores the pre-upgrade backup first and starts the older image in one workflow, without the newer image ever running against the restored data |
 | `bin/reset-sandbox.sh` | destroys the database and broker volumes and re-seeds; requires typing the project name |
 | `bin/teardown.sh` | removes the stack and its volumes; requires typing the project name |
@@ -112,37 +112,65 @@ limiter reset on an application restart; that is acceptable for what they protec
 
 PostgreSQL is the system of record, but the consumers' committed positions live in the broker, so an
 online database snapshot and the broker's state describe different moments. The failure that leaves
-open is concrete: an event PUBLISHED before the snapshot whose projection effect and offset commit
-land after it. Restoring that snapshot removes the effect and its receipt while the broker still
-holds the advanced offset; the outbox never resends a PUBLISHED event, so the effect is simply gone.
+open is concrete: an event PUBLISHED before the snapshot whose consumer receipt and effect land after
+it. Restoring that snapshot removes the receipt and effect while the broker still holds the advanced
+offset; the outbox never resends a PUBLISHED event, so the effect is simply gone.
 
-The procedure closes that window rather than hoping it is narrow:
+**What establishes coherence.** With the application stopped, the database is asked one question:
+does every PUBLISHED outbox event have, for each consumer group, the durable record that group's
+contract writes - a `consumed_events` receipt (whose transaction also carried the group's effect, if
+the event type has one for that group) or a `consumer_quarantine` row? Both consumers claim a receipt
+for every event they parse before deciding whether to act on it, so a receipt is the fact for every
+event type, including the ones the shadow consumer deliberately ignores; no projection or shadow
+effect is required beyond that. Events still PENDING or CLAIMED in the outbox are in the dump and are
+re-dispatched after a restore; FAILED ones stay FAILED and can be redriven. An environment where
+nothing has been published yet is coherent by construction, and `backup.sh` says so explicitly.
 
-- **`backup.sh` quiesces.** It stops the application (nothing publishes, nothing consumes), confirms
-  both consumer groups have **zero lag**, and only then dumps. At that instant every published event's
-  effects are in the dump, and anything still PENDING in the outbox is in the dump too. That instant is
-  the **recovery point**, recorded in the manifest beside the dump. If lag does not reach zero within
-  `BACKUP_QUIESCE_SECONDS` (default 60), or the broker cannot be asked, it refuses and starts the
-  application again - a dump taken with lag would not be restorable coherently. The pause is a few
-  seconds of visitor-facing downtime.
-- **`restore.sh` resets the broker.** After the database is replaced, the broker's volume is removed
-  and the broker recreated empty. Its copy of the pre-recovery-point records is not needed - their
-  effects are in the dump - and everything it received afterwards belongs to activity the restore
-  discards, whose offsets would otherwise point past events the restored database has no receipt for.
-  PENDING events at the recovery point are re-dispatched from the outbox when the application
-  starts; deduplication by event id means nothing is applied twice.
-- **What is discarded, plainly:** every payment, return, replay job, shadow comparison and event
-  after the recovery point. This is a synthetic demo; that is acceptable, and it is stated.
-- **`restore.sh` leaves the application stopped** and says what to run next: `up.sh` for the current
-  image, or `rollback.sh <image> --restore <dump>` when the backup predates a migration.
-- **A failed restore changes nothing.** The dump is restored into a fresh database and swapped in
-  only when that succeeds; a bad dump leaves the previous database, the broker and a stopped
-  application exactly as they were.
+That question is asked of PostgreSQL and not of the broker, deliberately. Consumer lag as printed by
+`kafka-consumer-groups.sh` is an indirect proxy for the same property, and the tool's output is not
+evidence: it prints errors and exits 0, renders unavailable positions as `-`, and prints nothing for
+a group that has not committed. The v0.10.1 script turned each of those into "zero lag" and dumped -
+reproduced with stubs before this correction. Receipts are the fact itself; the only parsing left is
+of one row of six integers, and anything that is not exactly that is *unverified*, which is never
+treated as coherent.
 
-The rehearsal in [docs/verification.md](../docs/verification.md) covers the refusal with lag, the
-refusal with an unreachable broker, a coherent backup, activity published and consumed after it, the
-restore back to identical financial evidence, projection rows and receipt identities, delivery of new
-events exactly once afterwards, and the failed-restore path.
+**What makes `backup.sh` refuse.** Any published event lacking a group's receipt after
+`BACKUP_QUIESCE_SECONDS` (default 60) of letting the consumers catch up; an answer from the database
+that cannot be read or is not self-consistent; a schema version that cannot be read; a dump that
+produces no bytes. On refusal **no dump and no manifest are written** and the application is started
+again. The manifest a successful backup writes records the recovery point, schema, image, the dump's
+SHA-256, the coherence method and published count, and the pending and failed counts.
+
+**What makes `restore.sh` refuse, and when.** Before the application is stopped: a missing manifest
+(unless `--legacy-dump`), a manifest that is not JSON, an unsupported manifest version, a missing or
+mistyped field, an unknown coherence method, a manifest that does not claim verified coherence, or a
+dump whose SHA-256 differs from the manifest's - that manifest belongs to a different dump. After the
+application is stopped but **before anything is replaced or deleted**: a dump that cannot be restored
+into the staging database, staged data that is not coherent by the same check `backup.sh` makes, or a
+published count that disagrees with the manifest's. On every one of those the live database is
+untouched, the broker is untouched, the staging database is dropped, and the application is left
+**stopped**; `up.sh` resumes on the previous data. A manifest is a description that is checked, never
+a proof that is believed: coherence is re-established on the staged data every time.
+
+**Legacy snapshots.** A dump without a manifest - an online `pg_dump` from v0.10.0 - is refused by
+default, because nothing establishes it was taken at a coherent moment and a warning would be a way of
+pretending otherwise. `--legacy-dump` lets it into the same staging check, which decides: a legacy dump
+that happens to hold every receipt restores exactly like a verified one; one that does not is refused
+with the missing counts, and cannot be restored by this procedure at all. There is no other path.
+
+**What a restore discards, plainly.** Everything after the recovery point: every payment, return,
+replay job, shadow comparison and event committed since, and the broker's records and offsets, which
+belong to that discarded timeline. The broker is recreated empty because the dump holds every
+consumer effect of everything the broker had delivered by the recovery point. This is a synthetic
+demo; that is acceptable, and it is stated here and in the manifest.
+
+The rehearsal in [docs/verification.md](../docs/verification.md) covers an empty environment, a
+verified backup with real published events, a pending event at the recovery point, activity published
+and consumed after the backup, refusal of a manifestless dump before the application is stopped,
+refusal of an incoherent legacy dump after staging with the live database and broker shown unchanged,
+refusal of a mismatched manifest, the restore back to the recovery point with every published event
+holding both receipts, the pending event re-dispatched and a new one delivered exactly once, and the
+restore-and-rollback chain.
 
 ### Rollback - the migration boundary
 

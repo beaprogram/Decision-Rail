@@ -70,12 +70,12 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
 
-`./mvnw clean verify` passed **380 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
-**42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled. That is the
-checkpoint 10 corrective release, recorded in full further down; the 359 figure it replaces belongs
-to `1977084`, 329 to `50a2761`, 318 to `fc6fa5c`, 310 to `fdc6d96`, and 302/41 to `aa6de43`. The table below is
+`./mvnw clean verify` passed **402 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
+**42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled. That is the R7
+correction (v0.10.2), recorded in full further down; the 380 figure it replaces belongs to `d9cea82`,
+359 to `1977084`, 329 to `50a2761`, 318 to `fc6fa5c`, 310 to `fdc6d96`, and 302/41 to `aa6de43`. The table below is
 the checkpoint 8 record, kept because it is what the group breakdown was counted against; the checkpoint
-9 additions are listed in the section that follows it. The **380** figure is the current total and the
+9 additions are listed in the section that follows it. The **402** figure is the current total and the
 **213** figure is a historical record of an earlier revision — they are not two counts of the same thing.
 
 ### The earlier recorded result (checkpoint 8)
@@ -1120,6 +1120,126 @@ carries a note pointing to it and correcting its digest labelling.
 The development stack was not started, stopped, migrated or written to; its schema (V11), payment
 count (622) and broker start time were unchanged throughout. The public instance remains **not ready
 for exposure** until the live checks in `deploy/README.md` run on the actual host.
+
+## R7, closed: backup and restore coherence (v0.10.2)
+
+Baseline `994354b` (`v0.10.1`). A focused review found R7 still open in two places. Both were
+reproduced here with the v0.10.1 scripts unchanged, a fake `docker` on `PATH` and real `jq`, before
+anything was changed.
+
+### What was observed before the fix
+
+`backup.sh` computed "consumer lag" with `awk 'NR>1 && $1==g {s+=($6=="-"?0:$6)} END {print s+0}'`
+over the Kafka CLI's output. Five inputs, each returned by the fake with exit 0:
+
+| Input to the lag computation | Exit | Said "lag is zero" | Ran `pg_dump` | Manifest |
+| --- | --- | --- | --- | --- |
+| `Error: Consumer group 'decisionrail-projection' does not exist.` | 0 | yes | yes | `consumerLagAtSnapshot: 0` |
+| `Error: Executing consumer group command failed due to ...TimeoutException` | 0 | yes | yes | `0` |
+| a partition row with current offset `-`, log-end `7`, lag `-` | 0 | yes | yes | `0` |
+| nothing at all | 0 | yes | yes | `0` |
+| the header line only | 0 | yes | yes | `0` |
+
+The mechanism: no matching row sums to zero, `-` was mapped to zero by hand, and `awk` coerces any
+other non-number to zero. Kafka 3.9.1's `ConsumerGroupCommand` really does print errors and return
+normally, and really does render unavailable positions as `-`, so these are the shapes a real
+observation can take.
+
+`restore.sh`, given a dump with no manifest, printed a warning and then - in order - restored,
+renamed the live database, removed the broker container and deleted its volume. A v0.10.0 online dump
+holding a PUBLISHED event whose receipt was never captured would have entered exactly that path.
+
+### The correction, and why it establishes the property
+
+The property a restore needs is not "the broker reports no lag"; it is **"the database holds the
+durable consumer state of every event that was published"**, because after the restore the broker is
+reset and the outbox never resends a PUBLISHED event. That property is asked of the database
+directly, with the application stopped, as one row of six integers: published events; how many of
+them lack a `consumed_events` receipt or `consumer_quarantine` row for the projection group; the same
+for the shadow group; and the PENDING, CLAIMED and FAILED counts. It follows the consumers' actual
+contracts, read from their source: both claim a receipt for every event they parse *before* deciding
+whether the type is one they act on, and both commit any effect in the same transaction as that
+receipt - so a receipt is the fact for every event type, including the ones the shadow consumer
+deliberately ignores and the ones it ignores because shadow is off, and no projection or shadow effect
+is required beyond it. PENDING and CLAIMED events need nothing: they are re-dispatched. FAILED events
+stay FAILED.
+
+`assess_coherence` accepts exactly that row and nothing else. An error message, an empty answer, a
+header, a `-`, a missing column, a malformed or negative number, a second row, or a count of missing
+receipts larger than the published count is **UNVERIFIED** (exit 2); one or more missing receipts is
+**INCOHERENT** (exit 1); only the complete, self-consistent, all-present answer is **COHERENT**
+(exit 0). An empty environment - `0|0|0|0|0|0` - is coherent by construction and `backup.sh` says so
+in words, which is a different thing from an answer that could not be read.
+
+`restore.sh` validates the manifest - JSON, version 1, every required field present and typed, the
+`durable-receipts` method, `verified: true`, and the dump's SHA-256 equal to the manifest's - **before
+stopping the application**; then restores into a staging database, runs the same coherence check on
+the staged data, compares its published count with the manifest's, and only then swaps the live
+database and resets the broker. Legacy manifestless dumps are refused unless `--legacy-dump` is
+passed, and then the staging check decides.
+
+### Regression evidence
+
+`RecoveryCoherenceGuardTest` (22) runs the real shell functions and the real scripts:
+
+- `assess_coherence` on sixteen input shapes - empty, header, database error, timeout text, dashes,
+  incomplete columns, malformed, negative, more-missing-than-published, two rows, three incoherent
+  answers, three coherent ones including pending/claimed/failed counts and the empty environment -
+  each yielding exactly one verdict line with the expected exit.
+- `validate_manifest` on a missing file, non-JSON, unsupported version, missing field, wrong type,
+  unknown method, unverified claim, checksum mismatch, and a valid manifest.
+- `backup.sh` against a fake `docker` answering an error, nothing, and a missing receipt: exit 1,
+  "No dump or manifest was written", no `pg_dump` in the recorded calls, an empty backups directory,
+  and `start app` as the last recorded action. Against a coherent answer: the dump, a manifest with
+  `verified: true`, the published and pending counts, and the dump's SHA-256.
+- `restore.sh` against a fake `docker`: a manifestless dump refused with no `stop app`; a manifest
+  with the wrong checksum refused with no `stop app`; a valid manifest whose staged data lacks a
+  receipt refused after `pg_restore` with no `ALTER DATABASE` and no broker step, the staging database
+  dropped; the same under `--legacy-dump`; a published-count mismatch refused likewise; and a verified
+  dump proceeding in the order `pg_restore` → `ALTER DATABASE` → broker removed → volume deleted, with
+  nothing starting the application.
+
+### Rehearsal on disposable PostgreSQL and Kafka
+
+On the `decisionrail-public` project on this machine, from an image built from this tree:
+
+| Step | Result |
+| --- | --- |
+| Backup of an empty environment | `COHERENT published=0`, "Nothing has been published yet: coherence holds vacuously. This is an empty environment, not an unread one."; dump and manifest written |
+| Seed, then backup at T | `COHERENT published=14 pending=0`; manifest `version 1`, `durable-receipts`, `verified: true`, `publishedEvents 14`, SHA-256 equal to the dump's |
+| A payment made with the broker stopped, then backup | `COHERENT published=14 pending=1`: a PENDING event needs no receipt and is captured for re-dispatch |
+| An incoherent legacy-style dump (a published event's projection receipt deleted in a scratch copy, dumped without a manifest) without `--legacy-dump` | refused before the application was stopped; it kept running |
+| The same with `--legacy-dump` | staged; `INCOHERENT published=14 missing_projection=1`; refused; live fingerprint unchanged, broker cluster id and topic id unchanged, staging database dropped, application stopped |
+| A valid dump paired with a manifest carrying the wrong checksum | refused before the application was stopped |
+| Three payments published and consumed after T2 (12 payments, 18 published, 36 receipts) | — |
+| Restore to T2 | manifest VALID; staged `COHERENT published=14 pending=1`; live database replaced; broker recreated empty; application stopped. Restored: 9 payments, 14 published, 1 pending, 28 receipts, **14 of 14** published events holding both receipts |
+| Start, then one new payment | the pending event re-dispatched and the new one delivered: 16 published, 32 receipts (16 × 2 groups), 0 duplicate receipts, 0 projection rows without a payment |
+| `rollback.sh <image> --restore <dump>` | chains through the validated restore and starts the image; the cross-migration semantics verified for v0.10.1 are unchanged |
+
+Teardown confirmed by project name; the development stack's schema (V11), payment count (622) and
+broker start time were unchanged throughout.
+
+### First-attempt failures in this pass
+
+| What failed | Why | What it means |
+| --- | --- | --- |
+| `RecoveryCoherenceGuardTest` - two compile errors | a record component named `log` collided with an accessor I also called `log()`, and a two-variable declaration mixed types | Test-fixture typing |
+| The first seeded backup in the rehearsal reported `published=0` | the seed ran while the application, restarted by the previous backup, was not yet ready; its calls failed | Rehearsal sequencing; re-seeded after readiness. The empty-environment backup it produced instead was itself a valid observation and is kept above |
+
+### Remaining limits
+
+Coherence is decided from the database's own records of what its consumers did. It cannot detect a
+consumer that acknowledged a broker offset without writing its receipt, because the consumers commit
+the receipt before acknowledging and the application is stopped when the question is asked; that is
+the contract, and it is what this procedure relies on. The broker is not backed up at all, by design.
+Restore discards everything after the recovery point. And none of this has run on the actual public
+host, which does not yet exist.
+
+### Recorded result for this pass
+
+- `./mvnw clean verify`: **402 backend tests**, 0 failures, 0 errors, 0 skipped - 380 plus the 22
+  guard tests - from an empty database. No application code changed in this pass; the browser suite,
+  demos, collector checks and harness smoke are exercised by CI on the pushed revision.
 
 ## Failure cases and rationale
 
