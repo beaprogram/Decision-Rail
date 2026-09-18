@@ -48,7 +48,11 @@ and completion criteria are in [roadmap.md](roadmap.md).
 ## Verification record
 
 Local evidence recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka
-**3.9.1**, after the checkpoint 10 corrections (v0.10.1).
+**3.9.1**, after the checkpoint 10 corrections, and confirmed remotely by
+[CI run 35287845550](https://github.com/beaprogram/Decision-Rail/actions/runs/35287845550) on the
+delivered revision `d9cea82`, tagged `v0.10.1`. The release image is
+`ghcr.io/beaprogram/decision-rail:sha-d9cea820d158e66f3013a5c2311ab29a028a2dcc` (index
+`sha256:9712ec58…`, arm64 child `sha256:613ba544…`, amd64 child `sha256:7666355f…`).
 
 - Pinned-wrapper build and suite: **380 backend tests passed**, with **0 failures, 0 errors, and
   0 skipped**, up from 213 at checkpoint 8. The 310 recorded for `fdc6d96` was correct; a 307 that

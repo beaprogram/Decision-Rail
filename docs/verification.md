@@ -62,7 +62,7 @@ Tests share one database on purpose, and append-only history is retained so the 
 
 CI runs the same `compose.test.yaml` stack rather than workflow service containers, so the documented local command and the remote build exercise identical infrastructure. It then builds the Docker image, starts the container, and runs both demo scripts without publishing the image.
 
-[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35275604071) passed on revision `1977084`, the checkpoint 10 release: 359 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. The [preceding runs](https://github.com/beaprogram/Decision-Rail/actions/runs/35246574566) passed on `aec16d7` with 329 backend tests, on `995ba63` with 318 and on `fdc6d96` with 310, and an [earlier one](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
+[The remote run](https://github.com/beaprogram/Decision-Rail/actions/runs/35287845550) passed on revision `d9cea82`, the checkpoint 10 corrections: 380 backend tests, 42 frontend unit tests and 54 browser end-to-end tests against PostgreSQL 16 and a real broker, plus the image build, container startup, the operator demos, restart recovery on its own disposable stack, both collector checks and the performance harness smoke run. The browser step ran with retries at 0, so every one of those 54 passed on its first attempt. The [preceding runs](https://github.com/beaprogram/Decision-Rail/actions/runs/35275604071) passed on `1977084` with 359 backend tests, on `aec16d7` with 329, on `995ba63` with 318 and on `fdc6d96` with 310, and an [earlier one](https://github.com/beaprogram/Decision-Rail/actions/runs/34719181973) on revision `4754fab` with 213 backend, 41 frontend unit and the 41 browser tests that existed then; it is kept because the checkpoint 8 group breakdown was counted against it. CI configuration in the repository is not itself evidence that a remote run has passed; inspect the workflow result for the revision you care about.
 
 Test reports are written under `target/surefire-reports/`; the JaCoCo report is generated under `target/site/jacoco/`. CI uploads available reports when a verification job finishes, including on failure. Coverage is a diagnostic aid, not a substitute for meaningful assertions.
 
@@ -1101,6 +1101,21 @@ Playwright **1.63**.
 - the rehearsal table above, on the `decisionrail-public` project on this machine with the corrected
   image and a synthetic V14 image built from this tree without `V15`, all confirmed by name before
   removal
+
+Remotely, [CI run 35287845550](https://github.com/beaprogram/Decision-Rail/actions/runs/35287845550)
+passed every step on the delivered revision `d9cea82`. The tag `v0.10.1` on that commit ran
+[the release workflow](https://github.com/beaprogram/Decision-Rail/actions/runs/35288730001), which
+published `ghcr.io/beaprogram/decision-rail:sha-d9cea820d158e66f3013a5c2311ab29a028a2dcc` (also
+`:v0.10.1`). Read fresh from the registry afterwards, both tags resolve to the multi-platform
+**index** `sha256:9712ec586d09b0e80de3e78b08ea2b53b045ec97827c7f5b1004698c8c803129`, with children
+`linux/arm64` `sha256:613ba5444bd8086a5f796822d92e3eb88d4bc3ce208a104ffcbc486b288ed702` and
+`linux/amd64` `sha256:7666355f2529443e181b5153cda6ac567db9d8e12c4bb3959ae6c7791f33e4c6`. The image
+was pulled without credentials, its `APP_COMMIT` and newest migration read back as `d9cea82…` and 15,
+and it was started in public mode against the disposable stack: `GET /actuator/info` reported that
+commit, `/actuator/health/async/asyncDelivery` answered 401 anonymously, and eleven `HEAD` requests
+for reconciliation were counted and refused at the eleventh. The release is at
+[v0.10.1](https://github.com/beaprogram/Decision-Rail/releases/tag/v0.10.1); the v0.10.0 release
+carries a note pointing to it and correcting its digest labelling.
 
 The development stack was not started, stopped, migrated or written to; its schema (V11), payment
 count (622) and broker start time were unchanged throughout. The public instance remains **not ready

@@ -2,9 +2,12 @@
 
 ## v0.10.1 - Checkpoint 10 corrections
 
-Revision and image: recorded in [verification.md](verification.md) under the corrective release once
-published. Supersedes `v0.10.0`, whose tag, image and recordings are preserved unchanged; the
-recordings remain accurate because no visible behaviour changed.
+Revision `d9cea82`, tag `v0.10.1`, image `ghcr.io/beaprogram/decision-rail:sha-d9cea820d158e66f3013a5c2311ab29a028a2dcc`.
+The tag resolves to the multi-platform **index** `sha256:9712ec586d09b0e80de3e78b08ea2b53b045ec97827c7f5b1004698c8c803129`;
+its children are `linux/arm64` `sha256:613ba5444bd8086a5f796822d92e3eb88d4bc3ce208a104ffcbc486b288ed702`
+(the Oracle Ampere host) and `linux/amd64` `sha256:7666355f2529443e181b5153cda6ac567db9d8e12c4bb3959ae6c7791f33e4c6`,
+read fresh from the registry after publication. Supersedes `v0.10.0`, whose tag, image and recordings
+are preserved unchanged; the recordings remain accurate because no visible behaviour changed.
 
 A review of the release configuration found eight findings, none in the financial core. Each was
 reproduced where it could be, corrected, and covered by a regression:
