@@ -1,0 +1,51 @@
+# Render terminates TLS before forwarding HTTP to this one public listener. The Java process is
+# loopback-only. Trusted proxy ranges must be supplied for the actual platform/rehearsal topology;
+# neither a caller's X-Forwarded-For nor its standardized Forwarded header supplies a client identity.
+{
+	admin off
+	auto_https off
+	servers {
+		trusted_proxies static {$RENDER_TRUSTED_PROXIES}
+		trusted_proxies_strict
+		client_ip_headers CF-Connecting-IP
+	}
+}
+
+http://:{$PORT} {
+	encode zstd gzip
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Content-Security-Policy "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+		-Server
+	}
+	request_body {
+		max_size 64KB
+	}
+	@app path / /index.html /favicon.ico /dashboard/* /ui/* /v1/* /actuator/health /actuator/health/* /actuator/info
+	handle @app {
+		reverse_proxy 127.0.0.1:8080 {
+			# Render documents CF-Connecting-IP as overwritten by its Cloudflare edge. Caddy reads it
+			# only from the configured immediate peers, then supplies one address to native Tomcat.
+			header_up -Forwarded
+			header_up -X-Forwarded-Prefix
+			header_up -X-Forwarded-Ssl
+			header_up -CF-Connecting-IP
+			header_up -X-Real-IP
+			header_up Host {$RENDER_EXTERNAL_HOSTNAME}
+			header_up X-Forwarded-For {client_ip}
+			header_up X-Forwarded-Proto https
+			header_up X-Forwarded-Host {$RENDER_EXTERNAL_HOSTNAME}
+			header_up X-Forwarded-Port 443
+			transport http {
+				dial_timeout 5s
+				response_header_timeout 30s
+			}
+		}
+	}
+	handle {
+		respond 404
+	}
+}

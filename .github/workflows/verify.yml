@@ -168,3 +168,31 @@ jobs:
             frontend/test-results/
           if-no-files-found: ignore
           retention-days: 3
+
+  render-edge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - name: Check supervisor shutdown and configuration guards
+        run: python3 deploy/render/test_entrypoint.py
+      - name: Check the real pinned edge on disposable loopback ports
+        shell: bash
+        run: |
+          # Copy the same immutable official binary used by the render build target. This job
+          # neither builds the application nor starts its databases or any development stack.
+          edge_image=$(python3 - <<'PY'
+          from pathlib import Path
+          import re
+          match = re.search(r'^FROM (caddy:[^\s]+@sha256:[0-9a-f]{64}) AS render-caddy$',
+                            Path('Dockerfile').read_text(), re.MULTILINE)
+          if not match:
+              raise SystemExit('Missing pinned Render edge image in Dockerfile')
+          print(match.group(1))
+          PY
+          )
+          edge_container=$(docker create "$edge_image")
+          trap 'docker rm --force "$edge_container" >/dev/null' EXIT
+          docker cp "$edge_container:/usr/bin/caddy" "$RUNNER_TEMP/decisionrail-render-caddy"
+          chmod +x "$RUNNER_TEMP/decisionrail-render-caddy"
+          CADDY_BINARY="$RUNNER_TEMP/decisionrail-render-caddy" python3 deploy/render/test_edge.py

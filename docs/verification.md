@@ -1,5 +1,75 @@
 # Verification strategy
 
+## Render/Aiven adaptation — local evidence, 2026-09-19 UTC
+
+These local checks were performed before publication in worktree `codex/render-aiven`, based on
+`01c49f6`. The rehearsal image identified itself as `01c49f6-render-worktree`, not as an immutable
+release. This record does not establish a public deployment. No existing applied migration was edited. All infrastructure below is disposable;
+the original development stack and the owner's actual Aiven services were not modified.
+
+- Java 21.0.11 wrapper `verify`: **408 backend tests**, zero failures/errors/skips; **42 frontend unit
+  tests**, typecheck, lint and bundle passed. The six added tests use actual Boot environment binding
+  and factory maps to verify TLS/SASL reaches producer, consumer and admin without weakening required
+  acknowledgement, idempotence, deadline or manual-offset settings.
+- Ordinary packaged image: **54 Chromium browser tests**, retries zero, first attempt; demos
+  **12 / 26 / 27**; independent restart-recovery demo **16**. Dedicated PG16/Kafka3.9 infrastructure
+  used ports 55435/19095, application 8086; restart recovery used its own project and ports 55437/8087.
+- **Eight supervisor checks** and **four real Caddy 2.11.4 checks** passed. The latter cover trusted
+  and untrusted peers, forwarding/Host sanitation, route/status preservation, response headers and
+  the existing 64,000-byte body limit. CI now has a separate job using the exact pinned Caddy image.
+- Provider-version fixture: **PostgreSQL 18.6** over `verify-full`, V1–V15 applied and validated,
+  including a fresh database owned by a non-superuser role. Flyway 11.7.2 emits its newer-than-tested
+  warning (tested through PG17); this successful rehearsal is not a vendor-support claim.
+  **Kafka 4.2.1** used SCRAM-SHA-256/SASL_SSL and a PEM CA. The actual changed factories produced an
+  acknowledged record and consumed/committed the same partition/offset. Admin created two-partition
+  topics. Wrong hostnames and a wrong Kafka password were refused, not worked around.
+- Final local Render image, **arm64 only**, Java **21.0.12**, hard **512 MiB memory / 0.1 CPU** quota,
+  with those real TLS fixtures: readiness first observed at **134.5 seconds** after container start.
+  **35 HTTP checks** passed through its real Caddy and application: dashboard/info, blocked metrics,
+  anonymous async-health protection, oversized-body refusal, CSRF/session cookie properties,
+  login/logout, separation of session and Basic chains, authorize/idempotent repeat/capture/refund,
+  clean reconciliation, replay completion and per-client authentication limiting despite changing
+  caller forwarding headers. This was a local HTTP proxy simulation; real HTTPS browser/cookie and
+  Cloudflare header overwrite remain live checks.
+- That payment had **three published events, six consumer receipts and one shadow comparison**.
+  Observed cgroup peak after these checks was **264,282,112 bytes (252.0 MiB)**, with zero OOM events,
+  zero OOM kills and zero container restarts. It is one short sequential functional rehearsal, not a
+  load/capacity result or evidence of actual Render startup speed. Startup TLS handshakes initially
+  timed out under the CPU quota and recovered; both consumers then caught up.
+
+Corrections and failed first attempts are retained here: inherited `LOG_FORMAT=json` prevented Spring
+contexts from starting on the first full run; explicitly using supported `ecs` resolved that harness
+setting. The first Docker build used `COPY --chmod`, unsupported by the installed legacy builder;
+it now uses owned COPY plus chmod. The Docker daemon could not bind-mount the SSD's fixture CA, so
+only the disposable CA was copied into the test container. The provider probe initially matched an
+older PostgreSQL hostname-error wording; the driver had correctly refused the connection. The first
+HTTP harness expected logout 200; the actual documented 204 was correct, and the harness was fixed.
+The Kafka binding test initially misnamed its simulated system-environment source. No application
+assertion was relaxed to hide these setup errors.
+
+One actual supervisor defect was found before delivery: a TERM arriving between spawning a child and
+recording its PID could orphan it until container exit killed it. Deterministic signal injection
+reproduced the Java and Caddy windows. Startup now defers termination until both PIDs are recorded;
+both cases fail with the old script and pass with the corrected script.
+
+A pre-existing metrics warning was observed during replay creation: `decisionrail.replay.jobs.created`
+counter conflicts with the exported `decisionrail.replay.jobs` gauge in the Prometheus registry.
+Both registrations exist at the base revision. This adaptation leaves them unchanged; the creation
+counter must not be relied on until that separate instrumentation issue is fixed. Payment/replay
+execution and the reconciliation checks passed.
+
+Publication was authorized by the owner on 2026-09-19. Remaining delivery work at this checkpoint:
+commit/push and Render image publication/anonymous pull;
+actual Aiven credentials/CA installation in Render; actual platform forwarding, HTTPS, idle wake-up,
+workspace free-hour/resource checks; and an Aiven-specific backup/recovery procedure and rehearsal.
+The existing Compose backup/restore scripts do not establish managed-service recovery. See
+[the Render guide](../deploy/render/README.md). No public URL or CI success is claimed for this worktree.
+All three isolated Compose projects and the two separately labelled application containers were
+removed after verification, including their test volumes and fixture image tags. Ignored local
+evidence remains in `.local/`; shared base-image caches were retained. The original checkout is
+still clean at `01c49f6`.
+
+
 The central question is whether payment and ledger state remain consistent under retries, rejected requests, and overlapping mutations, and now also whether the asynchronous path loses, reorders, or duplicates the effects of committed events. A green happy-path HTTP response alone cannot establish either.
 
 Infrastructure behaviour is verified against real PostgreSQL and a real Kafka broker. These checks are never skipped: if either dependency is unavailable the suite fails with instructions, because a skipped check reported as success is worse than no check.
