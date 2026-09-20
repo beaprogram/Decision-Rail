@@ -13,7 +13,7 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
-import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.kafka.KafkaProperties;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -72,8 +72,7 @@ public class EventsConfiguration {
 
     @Bean
     DefaultKafkaProducerFactory<String, String> paymentEventProducerFactory(
-            @Value("${spring.kafka.bootstrap-servers}") String bootstrapServers,
-            DeliveryProperties properties) {
+            KafkaProperties kafkaProperties, DeliveryProperties properties) {
         // Kafka requires delivery.timeout.ms >= linger.ms + request.timeout.ms, and this
         // application requires the client to give up before its own send deadline so a failure
         // is reported definitively instead of abandoned while still in flight. Both constraints
@@ -85,8 +84,10 @@ public class EventsConfiguration {
         if (clientDeliveryTimeoutMillis < lingerMillis + requestTimeoutMillis) {
             throw new IllegalStateException("Derived producer timeouts are inconsistent; increase app.events.dispatcher.send-timeout");
         }
-        Map<String, Object> config = new HashMap<>();
-        config.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        // Keep Boot's connection settings (including TLS and SASL) for managed brokers. Apply
+        // the delivery invariants afterwards so external settings cannot weaken acknowledgements,
+        // ordering or deadlines. With no security settings, local PLAINTEXT behavior is unchanged.
+        Map<String, Object> config = new HashMap<>(kafkaProperties.buildProducerProperties());
         config.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         config.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, StringSerializer.class);
         // acks=all with idempotence: an acknowledgement means the record is durable on the
@@ -112,9 +113,10 @@ public class EventsConfiguration {
 
     @Bean
     ConsumerFactory<String, String> paymentEventConsumerFactory(
-            @Value("${spring.kafka.bootstrap-servers}") String bootstrapServers) {
-        Map<String, Object> config = new HashMap<>();
-        config.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+            KafkaProperties kafkaProperties) {
+        // Share the same Boot connection/security configuration as the producer and auto-configured
+        // KafkaAdmin, while retaining the consumer's transaction and offset guarantees below.
+        Map<String, Object> config = new HashMap<>(kafkaProperties.buildConsumerProperties());
         config.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         config.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class);
         // Offsets are committed by the application after its database transaction commits.

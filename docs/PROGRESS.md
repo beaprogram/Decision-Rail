@@ -6,6 +6,16 @@ action that a repository cannot perform. "Ten of ten implemented" is planning sh
 of effort or production readiness, and the checkpoints are not equally difficult. The detailed scope
 and completion criteria are in [roadmap.md](roadmap.md).
 
+## Render/Aiven adaptation in progress (2026-09-18)
+
+The owner chose a no-card hosting path and provisioned Aiven Free PostgreSQL and Kafka. The
+original Compose release does not by itself establish compatibility with this deployment. An
+isolated `codex/render-aiven` worktree adds secure managed-Kafka configuration and a combined
+Render edge/application image. See [the deployment guide](../deploy/render/README.md).
+The public URL, actual managed-service connectivity, platform forwarding behavior, free-tier
+resource suitability and managed backup/recovery rehearsal remain unverified. Checkpoint 10 is
+still pending; local adaptation tests must not be presented as a public deployment.
+
 ## Completed checkpoints
 
 1. Java 21/Spring Boot/PostgreSQL foundation, merchant isolation, required credentials, API contract,

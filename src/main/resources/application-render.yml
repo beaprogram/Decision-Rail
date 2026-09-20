@@ -1,0 +1,26 @@
+# Selected only by the Render image. Provider credentials and trust roots are Render secrets;
+# TLS hostname verification remains enabled for both managed services.
+spring:
+  datasource:
+    hikari:
+      # Aiven Free PostgreSQL allows 20 connections. Leave room for an overlapping deployment and
+      # maintenance connections; a second instance is still unsupported because sessions are local.
+      maximum-pool-size: 6
+      minimum-idle: 2
+  kafka:
+    admin:
+      # The free service permits two partitions per topic. Create the topic in Aiven before boot;
+      # the local development NewTopic bean requests three and must not alter the managed topic.
+      auto-create: false
+    properties:
+      "[security.protocol]": SASL_SSL
+      "[sasl.mechanism]": SCRAM-SHA-256
+      "[sasl.jaas.config]": ${KAFKA_SASL_JAAS_CONFIG}
+      "[ssl.truststore.type]": PEM
+      "[ssl.truststore.location]": ${KAFKA_CA_PATH:/etc/secrets/kafka-ca.pem}
+      "[ssl.endpoint.identification.algorithm]": https
+server:
+  tomcat:
+    threads:
+      max: 16
+      min-spare: 2
