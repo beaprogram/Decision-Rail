@@ -69,6 +69,30 @@ removed after verification, including their test volumes and fixture image tags.
 evidence remains in `.local/`; shared base-image caches were retained. The original checkout is
 still clean at `01c49f6`.
 
+### Publication of the Render image, 2026-09-20 UTC
+
+The worktree branch was pushed as `codex/render-aiven` (`945b8fa`), verified by
+[CI run 35481316461](https://github.com/beaprogram/Decision-Rail/actions/runs/35481316461), merged
+into `main` as `ca61492`, verified again by
+[CI run 35481913404](https://github.com/beaprogram/Decision-Rail/actions/runs/35481913404), and the
+owner dispatched the manual `Release Render image` workflow on that commit:
+[run 35481914159](https://github.com/beaprogram/Decision-Rail/actions/runs/35481914159), concluded
+`success`. Every conclusion was read from the run itself, not from a watcher's exit code.
+
+It published `ghcr.io/beaprogram/decision-rail:render-sha-ca61492a80c6e3da835376c88a5325425ad2012d`,
+a separate tag that does not replace `v0.10.0`, `v0.10.1` or `v0.10.2`, which still resolve to
+`1977084`, `d9cea82` and `a4d94d6`. Read back from the registry without credentials on 2026-09-19 and
+again on 2026-09-20, the tag is publicly visible and resolves to the multi-platform **index**
+`sha256:2d76386200d8c6a695ddbffcfd3b9d1f3b5229ab6805c2acdc13109be22b3243`, whose children are
+`linux/amd64` `sha256:59ef4954ae46ea9514cea040c5c3aeb9154c820c5207728a06a35af09b2dc85f` and
+`linux/arm64` `sha256:e5efcee06223c352a2b574a02a09c01b7673fd72a46a70b656adcce7c6640d06`. Both
+children carry `org.opencontainers.image.revision` and `APP_COMMIT` `ca61492…` and the entrypoint
+`/app/render-entrypoint.sh`, so `/actuator/info` on a running instance will report that commit.
+
+This is a published, inspectable image, not a deployment. Nothing has been created on Render, the
+Aiven services have not been connected, and every live acceptance check in
+[the Render guide](../deploy/render/README.md) is still owed.
+
 
 The central question is whether payment and ledger state remain consistent under retries, rejected requests, and overlapping mutations, and now also whether the asynchronous path loses, reorders, or duplicates the effects of committed events. A green happy-path HTTP response alone cannot establish either.
 

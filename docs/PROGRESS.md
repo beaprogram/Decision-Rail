@@ -16,6 +16,12 @@ The public URL, actual managed-service connectivity, platform forwarding behavio
 resource suitability and managed backup/recovery rehearsal remain unverified. Checkpoint 10 is
 still pending; local adaptation tests must not be presented as a public deployment.
 
+On 2026-09-20 the adaptation was merged (`ca61492`), verified by CI, and published by the manual
+workflow as `ghcr.io/beaprogram/decision-rail:render-sha-ca61492a80c6e3da835376c88a5325425ad2012d`
+for both architectures, pulled anonymously and inspected; digests are in
+[verification.md](verification.md). The Render service and the Aiven connection have not been
+created, so there is still no public URL.
+
 ## Completed checkpoints
 
 1. Java 21/Spring Boot/PostgreSQL foundation, merchant isolation, required credentials, API contract,
