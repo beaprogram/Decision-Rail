@@ -155,3 +155,9 @@ pending** two owner actions - an Oracle Cloud Free Tier account and a DuckDNS na
 - Prepared a zero-cost public deployment: an assessed and documented free host, a bounded shared
   visitor identity with server-enforced budgets on both APIs, HTTPS at the edge, migration-aware
   rollback and rehearsed backup/restore, plus a recorded walkthrough.
+- Made backup and restore refuse to guess: a snapshot is coherent only when the database itself shows
+  every published event's consumer state, and a restore proves that property on a staging copy before
+  it may replace the live database or reset the broker - both defects reproduced before being fixed.
+- Packaged the same application for a second, managed target - a supervised container edge plus the
+  application, TLS and SASL to managed PostgreSQL and Kafka, inside a 512 MiB budget - with the
+  deployment's acceptance checks written as an executable harness rather than a checklist.
