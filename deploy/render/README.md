@@ -103,6 +103,21 @@ contract, stop and revisit the edge configuration rather than enabling broad `0.
 
 ## Live acceptance checks
 
+Most of the checks below are executable: `deploy/render/live-check.py` runs them against the real
+host and writes a JSON record beside the environment sheet it reads.
+
+    python3 deploy/render/live-check.py --base https://<service>.onrender.com \
+        --env <path outside the repository>/render-env.txt --phase readonly
+    ... then --phase session, --phase flow, and --phase limiter last
+
+Its environment sheet is the same `KEY=value` list this guide asks you to set in the dashboard, kept
+outside the repository; the harness never prints anything it reads. `--phase flow` additionally needs
+`psql` and the provider's PostgreSQL CA to confirm the consumer receipts. Run `--phase limiter` last:
+it deliberately exhausts the per-address budget and locks the calling address for the window, which
+is also why the "a different client must not inherit that lockout" check stays manual. Verify wake-up
+after idle with `--phase cold`. The harness only reads and exercises a deployment; it changes nothing,
+and it must never be pointed at the development stack.
+
 Use only synthetic demo data and this service's credentials. Do not point local fault-injection,
 operator-demo, recovery or benchmark scripts at managed infrastructure: some stop a broker, alter
 rows deliberately, or destroy an isolated Compose project.

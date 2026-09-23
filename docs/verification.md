@@ -93,6 +93,31 @@ This is a published, inspectable image, not a deployment. Nothing has been creat
 Aiven services have not been connected, and every live acceptance check in
 [the Render guide](../deploy/render/README.md) is still owed.
 
+### The acceptance harness, rehearsed before the live run
+
+`deploy/render/live-check.py` encodes the guide's live checks so the live run is executed rather than
+described. It was rehearsed on 2026-09-20 against a disposable `decisionrail-public` Compose project
+running the published `v0.10.2` application image behind the packaged Caddy edge, with its own
+generated credentials and high ports - not the development stack, and not a managed service:
+**45 checks passed, 0 failed**, covering the reported revision and migration, the five security
+headers and the removed `Server` header, `/actuator/prometheus` 404, anonymous 401 on
+`/actuator/health/async` and its descendants, the 64,001-byte body refusal, unknown `/v1` and `/ui`
+paths staying errors while `/dashboard/**` falls back to the page, CSRF refusal without a token, a
+`Secure; HttpOnly; SameSite` session cookie, a session buying nothing on `/v1`, logout invalidating
+it, an authorize/idempotent-repeat/capture/refund sequence with `CLEAN` reconciliation, replay
+completing within budget through both chains, three published events with six receipts across both
+consumer groups and one shadow comparison with no duplicate receipts, and ten failed logins with
+rotating `X-Forwarded-For`, `Forwarded`, `X-Real-IP` and `CF-Connecting-IP` values still reaching a
+429 on the eleventh, with correct credentials from that address also refused and non-attempt requests
+passing through. One harness defect was found and fixed during the rehearsal: it read `commit` at the
+top level of `/actuator/info` instead of under `decisionrail`, so its first run failed on a healthy
+instance.
+
+A rehearsal against a Compose stack is not the live run. It does not establish the platform's
+forwarding behaviour, real HTTPS and browser cookie handling, managed PostgreSQL and Kafka over TLS
+and SASL, free-instance startup time, or idle wake-up. Those remain owed, and the harness exists so
+they are measured rather than asserted.
+
 
 The central question is whether payment and ledger state remain consistent under retries, rejected requests, and overlapping mutations, and now also whether the asynchronous path loses, reorders, or duplicates the effects of committed events. A green happy-path HTTP response alone cannot establish either.
 
