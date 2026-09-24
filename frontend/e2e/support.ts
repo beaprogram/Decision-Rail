@@ -107,7 +107,40 @@ export async function createIsolatedAccount(
     `INSERT INTO accounts (id, merchant_id, currency, opening_balance_minor, balance_minor) ` +
       `VALUES ('${id}', '${merchantId}', '${currency}', ${balanceMinor}, ${balanceMinor})`,
   );
+  await assertTheApplicationSeesIt(id, merchantId);
   return id;
+}
+
+/**
+ * Proves the row this suite just wrote is a row the application under test can read.
+ *
+ * `sql` reaches a database through Compose, and the browser reaches an application through
+ * `DASHBOARD_BASE_URL`. Nothing forces those two to be the same deployment: point the browser at a
+ * second stack and leave `COMPOSE_PROJECT_NAME` alone and every insert lands in the first one, which
+ * then surfaces much later as an account missing from a picker, one fifteen-second timeout at a time -
+ * and writes this suite's rows into whichever stack Compose did resolve to. Asking the application
+ * once, here, turns that into a sentence naming the two variables.
+ */
+async function assertTheApplicationSeesIt(accountId: string, merchantId: string): Promise<void> {
+  const who = merchantId === 'other-merchant' ? identities.otherMerchant() : identities.merchant();
+  const api = await request.newContext({
+    baseURL: process.env.DASHBOARD_BASE_URL ?? 'http://localhost:8080',
+    httpCredentials: { username: who.username, password: who.password },
+  });
+  try {
+    const response = await api.get(`/v1/accounts/${accountId}`);
+    if (response.status() === 404) {
+      throw new Error(
+        `The application under test cannot see account ${accountId}, which this suite just inserted ` +
+          `through ${COMPOSE_FILE}. The SQL helper and the application are looking at different ` +
+          `deployments: set COMPOSE_PROJECT_NAME (and COMPOSE_FILE_PATH, DATABASE_SERVICE) to the ` +
+          `stack that DASHBOARD_BASE_URL points at, or the inserted rows land somewhere else.`,
+      );
+    }
+    expect(response.status(), 'reading back the inserted account').toBe(200);
+  } finally {
+    await api.dispose();
+  }
 }
 
 /** How many payments exist against one account. Used to prove a retry produced no second effect. */
