@@ -1,6 +1,6 @@
 # Delivery plan and progress ledger
 
-Delivery is defined as **10 equally weighted scope checkpoints**; **9 are complete and the tenth is implemented and verified**, with its public URL pending an owner action (see [PROGRESS.md](PROGRESS.md)). The count is planning shorthand, not a measurement of elapsed time, engineering effort, production readiness, or a guarantee that the checkpoints are equally difficult.
+Delivery is defined as **10 equally weighted scope checkpoints**; **9 are complete, and the tenth is closed without a live deployment** - packaged, unit-tested, rehearsed and published, with no instance serving it at a URL (see [PROGRESS.md](PROGRESS.md)). The count is planning shorthand, not a measurement of elapsed time, engineering effort, production readiness, or a guarantee that the checkpoints are equally difficult.
 
 A checkpoint is complete only when its implementation and relevant verification are present. Future milestones below are a delivery plan, not current capabilities.
 
@@ -15,7 +15,7 @@ A checkpoint is complete only when its implementation and relevant verification 
 | 7 | Operator experience | Searchable payments and decisions, policy comparison views, lifecycle timelines, and an accessible operator UI. | Included |
 | 8 | Telemetry and measured performance | Correlated traces and structured logs, operational metrics, load tests, published methodology, and measured limits. | Included |
 | 9 | Extended lifecycle and recovery | Refunds/reversals, reconciliation, recovery procedures, and financial correction evidence. | Included |
-| 10 | Public demo and release | Free-budget hosting assessment, secure configuration, synthetic demo data, deployment validation, and a recorded walkthrough. | Implemented and verified; public URL pending an owner action |
+| 10 | Public demo and release | Free-budget hosting assessment, secure configuration, synthetic demo data, deployment validation, and a recorded walkthrough. | Closed without a live deployment: both targets packaged and published, acceptance harness executable and rehearsed 45/45, no live URL |
 
 ## Definition of done for checkpoints 1 to 3
 

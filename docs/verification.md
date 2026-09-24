@@ -118,6 +118,42 @@ forwarding behaviour, real HTTPS and browser cookie handling, managed PostgreSQL
 and SASL, free-instance startup time, or idle wake-up. Those remain owed, and the harness exists so
 they are measured rather than asserted.
 
+### Checkpoint 10's final state, and why it is closed here
+
+Recorded **2026-09-23 UTC**. The deployment was carried as far as this repository can carry it, and
+then stopped rather than left open:
+
+| Deliverable | State |
+| --- | --- |
+| Free-budget hosting assessment, with sources | Done, [docs/hosting.md](hosting.md) |
+| Secure public-demo configuration (shared visitor, server-side budgets on both chains, per-address authentication limiting, operator-only async health, refusal to start without Secure cookies or with fault injection) | Done, exercised by the backend suite and by the harness below |
+| Compose deployment bundle with HTTPS at the edge, pinned images, seeding, health, backup, restore, rollback, teardown | Done, [deploy/](../deploy/) |
+| Second target packaged for managed services: supervised edge plus application in one image, TLS and SASL to managed PostgreSQL and Kafka, 512 MiB budget | Done, [deploy/render/](../deploy/render/), with 8 supervisor checks and 4 real-Caddy checks in CI |
+| Published, inspectable images for both targets, digests recorded | Done, `sha-a4d94d6…` and `render-sha-ca61492…` |
+| Acceptance checks as an executable harness | Done, `deploy/render/live-check.py`, 45 checks, rehearsed 45/45 |
+| Recorded walkthrough | Done, [walkthrough.md](walkthrough.md), labelled with the revision it shows |
+| **A live public instance at a URL** | **Not done.** No Render service is serving the packaged image; the hostname tried answers with Render's own `x-render-routing: no-server`. The managed PostgreSQL and Kafka services exist on free plans and power off when idle, and were never connected to a running application. |
+
+So checkpoint 10 is **packaged, unit-tested, rehearsed and published, without a live deployment**. The
+live acceptance checks in [the Render guide](../deploy/render/README.md) have never run against a
+managed deployment, and nothing in this repository should be read as saying they have. What that would
+still take is owner work in two dashboards - a topic with two partitions, two CA files, fourteen
+environment values, one service created from the published image - followed by
+`deploy/render/live-check.py --phase readonly|session|flow|limiter` and one manual check from a second
+network. It is not blocked on code.
+
+### A sharp edge in the browser suite, found and blunted
+
+The browser tests reach the application over HTTP through `DASHBOARD_BASE_URL` and reach its database
+through Compose. Nothing tied those two together. Pointing the browser at a second stack while leaving
+`COMPOSE_PROJECT_NAME` alone sent every inserted row to whichever project Compose resolved to by
+directory name, and the only symptom was a fifteen-second `selectOption` timeout on an account picker
+that was missing the account. In this session that happened, and the suite wrote 35 empty accounts -
+no payments, no journals, no audit rows, no events - into the development database before it was
+noticed. `createIsolatedAccount` now reads the row back through the application's own API and fails
+immediately, naming the two variables to set. Confirmed both ways on 2026-09-23: mis-targeted, the
+first test fails with that sentence; targeted correctly, all 54 pass.
+
 
 The central question is whether payment and ledger state remain consistent under retries, rejected requests, and overlapping mutations, and now also whether the asynchronous path loses, reorders, or duplicates the effects of committed events. A green happy-path HTTP response alone cannot establish either.
 
@@ -187,15 +223,27 @@ Test reports are written under `target/surefire-reports/`; the JaCoCo report is 
 
 ## Recorded local result
 
-Recorded **2026-09-17 UTC** using Java **21.0.11**, PostgreSQL **16.15**, and Kafka **3.9.1**.
+Recorded **2026-09-23 UTC** on revision `e000c1a`, using PostgreSQL **16.15** and Kafka **3.9.1**
+(`apache/kafka:3.9.1`, single-node KRaft). `./mvnw clean verify` passed **408 backend tests** with
+**0 failures, 0 errors, and 0 skipped**, in 5 minutes 37 seconds, alongside **42 frontend unit tests**
+in four files. The **54 browser end-to-end tests** passed with retries disabled, on the first attempt,
+against an application built from this tree on its own disposable Compose project. The four demo
+scripts passed against that same deployment: **12** transactional checks, **26** lifecycle and
+reconciliation checks, **27** asynchronous checks, and **16** restart-recovery checks on the separate
+stack that `recovery-demo.sh` builds and destroys itself.
 
-`./mvnw clean verify` passed **402 backend tests** with **0 failures, 0 errors, and 0 skipped**, alongside
-**42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled. That is the R7
-correction (v0.10.2), recorded in full further down; the 380 figure it replaces belongs to `d9cea82`,
-359 to `1977084`, 329 to `50a2761`, 318 to `fc6fa5c`, 310 to `fdc6d96`, and 302/41 to `aa6de43`. The table below is
-the checkpoint 8 record, kept because it is what the group breakdown was counted against; the checkpoint
-9 additions are listed in the section that follows it. The **402** figure is the current total and the
-**213** figure is a historical record of an earlier revision — they are not two counts of the same thing.
+Two honest notes about that run. The local JVM was **25.0.1**, not the Java 21.0.11 these records
+name, because 21 is not installed on this machine; the build targets release 21 (`java.version`), and
+CI is what exercises the documented toolchain on every pushed revision. And the browser suite ran with
+`COMPOSE_PROJECT_NAME` naming the stack under test: see "A sharp edge in the browser suite" below for
+what happens without it, which is a thing this session got wrong before getting it right.
+
+The figures above supersede the **402** recorded for `a4d94d6` (v0.10.2), which superseded 380 for
+`d9cea82`, 359 for `1977084`, 329 for `50a2761`, 318 for `fc6fa5c`, 310 for `fdc6d96` and 302/41 for
+`aa6de43`. The table below is the checkpoint 8 record, kept because it is what the group breakdown was
+counted against; the checkpoint 9 additions are listed in the section that follows it. The **408**
+figure is the current total and the **213** figure is a historical record of an earlier revision - they
+are not two counts of the same thing.
 
 ### The earlier recorded result (checkpoint 8)
 
@@ -1188,7 +1236,7 @@ regression that now holds it.
 | R4 | `HEAD` bypassed the reconciliation budget; Spring runs the `GET` handler and drops the body | **Observed** (review, real interceptor): GET 200, 200, 429, then four HEADs each running the handler | `HEAD` is charged like `GET` | `PublicDemoIntegrationTest`: after two reports, every further `GET` and `HEAD` on both chains is 429 and **the service is not invoked** (spy) |
 | R5 | The one-in-flight replay limit was a count in an interceptor before the controller created the job | **Observed** here, through HTTP, on the pre-fix code: eight concurrent requests against a limit of one created **three** PENDING jobs | Admission moved into the job-creation transaction under `SELECT … FOR UPDATE` on the visitor's merchant row; the hourly allowance is counted from the rows there too; a refusal rolls back with no job, membership or key | `VisitorReplayConcurrencyTest`: eight concurrent HTTP requests create exactly one; refused keys claim nothing; a same-key retry replays; capacity returns on COMPLETED or FAILED; the hourly control answers separately; the private merchant is unlimited |
 | R6 | The broker mounted a volume but set no `log.dirs`; the Apache image builds its configuration from the environment alone | **Observed**: effective configuration without `log.dirs`; `__cluster_metadata-0` and checkpoints in `/tmp/kafka-logs`; the mounted volume empty | `KAFKA_LOG_DIRS` and `KAFKA_METADATA_LOG_DIR` on the volume | Rehearsed: seeded activity, then the container **removed and recreated** with the volume kept - cluster id, topic id, log-end and committed offsets byte-identical; a new event afterwards published and consumed by both groups |
-| R7 | An online database snapshot uncoordinated with the broker's committed offsets; restore replaced the database and restarted the application with the broker's newer state | Source-derived; not reproduced as a loss. What was rehearsed instead is the corrected procedure's every branch | `backup.sh` stops the application and requires zero consumer lag (unknown lag refuses); `restore.sh` restores into a fresh database swapped in on success, resets the broker to empty, leaves the application stopped | Rehearsed: refusal with lag 4 (application restarted), refusal with the broker unreachable, a coherent backup, three payments published and consumed after it, restore back to identical financial fingerprint, projection count and receipt identities, broker empty, new event delivered exactly once afterwards, and a corrupt dump leaving the previous database, the broker and a stopped application intact |
+| R7 | An online database snapshot uncoordinated with the broker's committed offsets; restore replaced the database and restarted the application with the broker's newer state | Source-derived; not reproduced as a loss. What was rehearsed instead is the corrected procedure's every branch | `backup.sh` stops the application and requires zero consumer lag (unknown lag refuses); `restore.sh` restores into a fresh database swapped in on success, resets the broker to empty, leaves the application stopped | Rehearsed: refusal with lag 4 (application restarted), refusal with the broker unreachable, a coherent backup, three payments published and consumed after it, restore back to identical financial fingerprint, projection count and receipt identities, broker empty, a new event delivered once with no duplicate consumer effect afterwards, and a corrupt dump leaving the previous database, the broker and a stopped application intact. This row records the `v0.10.1` procedure, which `v0.10.2` replaced: see "R7, closed" below |
 | R8 | `restore.sh` started the current image, so a cross-migration rollback could re-apply the newer migrations before the older image was selected | **Observed** (review, stub execution): restore of V14 ended in `start app` without selecting an image | `restore.sh` starts nothing; `rollback.sh <image> --restore <dump>` is the one workflow | Rehearsed with real images: V14 image deployed and backed up; V15 image upgraded; direct rollback refused with the application stopped; `--restore` rollback ended at V14 on the V14 image with **no V15 row ever re-applied**; forward again to V15 |
 | — | The image guard rejected three strings and accepted `stable` | **Observed** (review, stub execution) | Only `sha-<40-hex>` tags and `@sha256:` digests are accepted | `ImagePinGuardTest`: four accepted forms, ten refused including `stable`, `v0.10.0` and a short sha |
 | — | Release notes called the amd64 child digest the image's digest | Fact of the record | Index and per-architecture digests labelled separately, read fresh for the corrective image | — |

@@ -138,6 +138,15 @@ pending** two owner actions - an Oracle Cloud Free Tier account and a DuckDNS na
 
 ## Resume bullets, defensible as written
 
+Each bullet below names something shipped in this repository and verified by a run that is recorded in
+[verification.md](verification.md); the figures are from the local verification of **2026-09-23** on
+`e000c1a` (408 backend, 42 frontend unit, 54 browser tests, and demo runs of 12 / 26 / 27 / 16 checks)
+and from [performance.md](performance.md) for the measured rate. Three things are deliberately absent
+because they are not true of this system: exactly-once delivery, high availability or production
+readiness, and any affiliation with a real payment network. Delivery is at-least-once with idempotent
+consumer effects, the broker is a single-node KRaft development configuration, and the public demo was
+never deployed to a live URL.
+
 - Built a Java 21 / Spring Boot payment decisioning service with PostgreSQL and Kafka: idempotent
   authorize / capture / void / refund / reversal under a per-merchant request identity, a balanced
   double-entry ledger sealed by database constraints, and a read-only reconciliation that derives
@@ -148,13 +157,17 @@ pending** two owner actions - an Oracle Cloud Free Tier account and a DuckDNS na
 - Closed three database-invariant gaps found in review by adding validated migrations that refuse an
   inconsistent upgrade rather than repairing financial history, each reproduced first and covered by
   regression tests against real PostgreSQL.
-- Measured 25 business operations/s sustained on one laptop with zero failures through a 25-second
-  broker outage, with the method, ceiling and limitations published.
+- Measured the sustained rate on one laptop: 25 iterations/s, each an authorization plus a capture
+  (50 HTTP requests/s), across three repetitions with zero dropped iterations, holding through a
+  deliberate 25-second broker outage - with the method, the nearby failing level and the limitations
+  published rather than a single headline number.
 - Shipped a React/TypeScript operator console with session + CSRF protection separate from the
   stateless API, tenant isolation on every route, and a Playwright suite run with retries disabled.
-- Prepared a zero-cost public deployment: an assessed and documented free host, a bounded shared
-  visitor identity with server-enforced budgets on both APIs, HTTPS at the edge, migration-aware
-  rollback and rehearsed backup/restore, plus a recorded walkthrough.
+- Built a zero-cost public demo deployment, up to but not including a live instance: an assessed and
+  documented free host, a bounded shared visitor identity with server-enforced budgets on both API
+  chains, HTTPS at the edge, migration-aware rollback, rehearsed backup and restore, published
+  inspectable images, and a recorded walkthrough. No public URL was ever served, and the repository
+  says so.
 - Made backup and restore refuse to guess: a snapshot is coherent only when the database itself shows
   every published event's consumer state, and a restore proves that property on a staging copy before
   it may replace the live database or reset the broker - both defects reproduced before being fixed.

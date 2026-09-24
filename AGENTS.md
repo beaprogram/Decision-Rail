@@ -4,7 +4,7 @@ DecisionRail is an independent, synthetic payment decisioning portfolio project.
 
 ## Current delivery boundary
 
-Read docs/PROGRESS.md and docs/roadmap.md before continuing. Nine of ten checkpoints are complete and the tenth - the public demo - is implemented and verified in its deployed shape, with the live URL pending an owner action (a free-tier hosting account and a DNS name). Redis features and candidate policy promotion remain later milestones. Do not represent planned capabilities as shipped, and do not claim a public URL that does not exist.
+Read docs/PROGRESS.md and docs/roadmap.md before continuing. Nine of ten checkpoints are complete. The tenth - the public demo - is closed as packaged, unit-tested, rehearsed and published, **without a live deployment**: two deployment targets are built and their images published, the acceptance checks are executable (deploy/render/live-check.py), and no instance serves them at any URL. Redis features and candidate policy promotion remain later milestones. Do not represent planned capabilities as shipped, do not claim a public URL that does not exist, and do not describe the live acceptance checks as having run against a managed deployment.
 
 ## Invariants
 

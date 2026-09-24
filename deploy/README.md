@@ -169,7 +169,8 @@ verified backup with real published events, a pending event at the recovery poin
 and consumed after the backup, refusal of a manifestless dump before the application is stopped,
 refusal of an incoherent legacy dump after staging with the live database and broker shown unchanged,
 refusal of a mismatched manifest, the restore back to the recovery point with every published event
-holding both receipts, the pending event re-dispatched and a new one delivered exactly once, and the
+holding both receipts, the pending event re-dispatched and a new one delivered once with no duplicate
+consumer effect, and the
 restore-and-rollback chain.
 
 ### Rollback - the migration boundary

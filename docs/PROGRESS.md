@@ -1,26 +1,30 @@
 # Current delivery and continuation
 
-The plan is ten equally weighted scope checkpoints. Nine are complete, and the tenth is implemented
-and verified in its deployed shape with one deliverable - the public URL itself - waiting on an owner
-action that a repository cannot perform. "Ten of ten implemented" is planning shorthand, not a claim
+The plan is ten equally weighted scope checkpoints. Nine are complete. The tenth is **closed without
+a live deployment**: every deliverable except the running instance is done - two deployment targets
+built, their images published and pulled anonymously, the acceptance checks written as an executable
+harness and rehearsed 45/45 on disposable infrastructure - and no instance serves any of it at a URL.
+That is the end state, not a pending step. "Nine of ten complete" is planning shorthand, not a claim
 of effort or production readiness, and the checkpoints are not equally difficult. The detailed scope
 and completion criteria are in [roadmap.md](roadmap.md).
 
-## Render/Aiven adaptation in progress (2026-09-18)
+## The managed-services target, and where it stopped (closed 2026-09-23)
 
-The owner chose a no-card hosting path and provisioned Aiven Free PostgreSQL and Kafka. The
-original Compose release does not by itself establish compatibility with this deployment. An
-isolated `codex/render-aiven` worktree adds secure managed-Kafka configuration and a combined
-Render edge/application image. See [the deployment guide](../deploy/render/README.md).
-The public URL, actual managed-service connectivity, platform forwarding behavior, free-tier
-resource suitability and managed backup/recovery rehearsal remain unverified. Checkpoint 10 is
-still pending; local adaptation tests must not be presented as a public deployment.
+A second hosting target was added for a no-card path: managed PostgreSQL and Kafka on a free plan,
+with the application and its own supervised edge in one image. The Compose release does not by itself
+establish compatibility with that shape, so the adaptation carries its own configuration, supervisor
+and edge tests. It was merged as `ca61492`, verified by CI, and published by a manually dispatched
+workflow as `ghcr.io/beaprogram/decision-rail:render-sha-ca61492a80c6e3da835376c88a5325425ad2012d` for
+both architectures, then pulled anonymously and inspected; digests are in
+[verification.md](verification.md).
 
-On 2026-09-20 the adaptation was merged (`ca61492`), verified by CI, and published by the manual
-workflow as `ghcr.io/beaprogram/decision-rail:render-sha-ca61492a80c6e3da835376c88a5325425ad2012d`
-for both architectures, pulled anonymously and inspected; digests are in
-[verification.md](verification.md). The Render service and the Aiven connection have not been
-created, so there is still no public URL.
+It stops there. **No service was ever created from that image, the managed database and broker were
+never connected to a running application, and there is no public URL.** The managed services exist on
+free plans that power off when idle. The platform's forwarding behaviour, real HTTPS and browser cookie
+handling, TLS and SASL against the managed providers, free-instance startup time, idle wake-up and a
+managed backup/recovery rehearsal are therefore all unverified, and the acceptance harness exists so
+that whoever runs them measures them rather than asserts them. Local adaptation tests must never be
+presented as a public deployment.
 
 ## Completed checkpoints
 
@@ -70,10 +74,10 @@ delivered revision `d9cea82`, tagged `v0.10.1`. The release image is
 `ghcr.io/beaprogram/decision-rail:sha-d9cea820d158e66f3013a5c2311ab29a028a2dcc` (index
 `sha256:9712ec58…`, arm64 child `sha256:613ba544…`, amd64 child `sha256:7666355f…`).
 
-- Pinned-wrapper build and suite: **402 backend tests passed**, with **0 failures, 0 errors, and
-  0 skipped**, up from 213 at checkpoint 8. The 310 recorded for `fdc6d96` was correct; a 307 that
-  appeared briefly in [verification.md](verification.md) was a counting mistake of mine, explained
-  there.
+- Pinned-wrapper build and suite: **408 backend tests passed**, with **0 failures, 0 errors, and
+  0 skipped**, measured on `e000c1a` on 2026-09-23 and up from 213 at checkpoint 8. The 402 figure
+  belongs to `a4d94d6`; the 310 recorded for `fdc6d96` was correct; a 307 that appeared briefly in
+  [verification.md](verification.md) was a counting mistake of mine, explained there.
 - Dashboard: **42 frontend unit tests** and **54 browser end-to-end tests** with retries disabled, up
   from 44.
 - Demos: **12 checks** (transactional), **26 checks** (lifecycle and reconciliation), **27 checks**
@@ -345,13 +349,16 @@ verified; the record is in [verification.md](verification.md).
 - [x] **Release materials**: README, `deploy/README.md`, [release-notes.md](release-notes.md) with
       defensible resume bullets, [walkthrough.md](walkthrough.md), and a **playable recording** of the
       visitor path and a labelled operator segment, produced from the real application.
-- [ ] **Public deployment working**: a live URL, verified by a smoke test against the actual page,
-      running the reported revision. **Pending**: it needs an Oracle Cloud Free Tier account and a
-      DuckDNS name, which are owner actions (card verification, a sign-in); the exact steps are in
-      `deploy/README.md`. No URL is claimed until then.
+- [ ] **Public deployment working**: a live URL, verified against the actual page, running the
+      reported revision. **Not done, and closed as not done.** Both targets are packaged and their
+      images published; what remains is owner work in a hosting dashboard - an account, a topic, two
+      CA files, fourteen environment values - and then `deploy/render/live-check.py` against the real
+      host. The steps are in `deploy/README.md` and `deploy/render/README.md`. No URL is claimed.
 
-The checkpoint's implementation is finished and the release is verified. It is not marked complete,
-because its last deliverable does not yet exist.
+Checkpoint 10 is therefore closed as **packaged, unit-tested, rehearsed and published, without a live
+deployment**. Every other deliverable in this checklist is done; this one is not, and the gap is an
+owner action and one live run rather than missing code. Calling it complete would be a claim about a
+URL that does not exist.
 
 ### Corrections after review (v0.10.1)
 
